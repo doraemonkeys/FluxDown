@@ -1,0 +1,86 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "FluxDown - Modern Multi-Protocol Download Manager",
+  description = "A blazing fast, multi-protocol download manager with browser extension. Powered by Rust engine with HTTP/HTTPS/FTP support, intelligent segmentation, and speed optimization.",
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#0a0a0b" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/logo.png" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <title>{title}</title>
+    <script is:inline>
+      // Prevent FOUC: apply saved theme before first paint
+      if (localStorage.getItem('fluxdown-theme') === 'light') {
+        document.documentElement.classList.add('light');
+      }
+      // Apply saved locale to html lang attribute
+      (function() {
+        var saved = localStorage.getItem('fluxdown-locale');
+        if (saved === 'zh') {
+          document.documentElement.lang = 'zh-CN';
+        } else if (saved === 'en') {
+          document.documentElement.lang = 'en';
+        } else {
+          var langs = navigator.languages || [navigator.language];
+          for (var i = 0; i < langs.length; i++) {
+            if (langs[i].startsWith('zh')) { document.documentElement.lang = 'zh-CN'; break; }
+            if (langs[i].startsWith('en')) { document.documentElement.lang = 'en'; break; }
+          }
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-screen bg-dark-bg text-dark-text antialiased">
+    <slot />
+    <script is:inline>
+      // Theme persistence & toggle
+      (function() {
+        const saved = localStorage.getItem('fluxdown-theme');
+        if (saved === 'light') document.documentElement.classList.add('light');
+
+        window.__toggleTheme = function() {
+          const html = document.documentElement;
+          html.classList.add('theme-transitioning');
+          html.classList.toggle('light');
+          const isLight = html.classList.contains('light');
+          localStorage.setItem('fluxdown-theme', isLight ? 'light' : 'dark');
+          window.dispatchEvent(new CustomEvent('theme-change', { detail: { light: isLight } }));
+          // Remove transition class after animation completes
+          setTimeout(() => html.classList.remove('theme-transitioning'), 350);
+        };
+
+        window.__isLightTheme = function() {
+          return document.documentElement.classList.contains('light');
+        };
+      })();
+    </script>
+  </body>
+</html>

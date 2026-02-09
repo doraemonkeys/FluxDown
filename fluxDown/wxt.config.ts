@@ -2,8 +2,9 @@ import { defineConfig } from 'wxt';
 
 export default defineConfig({
   manifest: {
-    name: 'FluxDown',
-    description: '拦截浏览器下载，发送到 FluxDown 桌面应用进行高速下载',
+    name: '__MSG_extensionName__',
+    description: '__MSG_extensionDescription__',
+    default_locale: 'en',
     version: '1.0.0',
     permissions: [
       'downloads',
@@ -15,17 +16,17 @@ export default defineConfig({
     ],
     action: {
       default_icon: {
-        16: '/icon/icon.svg',
-        32: '/icon/icon.svg',
-        48: '/icon/icon.svg',
-        128: '/icon/icon.svg',
+        16: '/icon/16.png',
+        32: '/icon/32.png',
+        48: '/icon/48.png',
+        128: '/icon/128.png',
       },
     },
     icons: {
-      16: '/icon/icon.svg',
-      32: '/icon/icon.svg',
-      48: '/icon/icon.svg',
-      128: '/icon/icon.svg',
+      16: '/icon/16.png',
+      32: '/icon/32.png',
+      48: '/icon/48.png',
+      128: '/icon/128.png',
     },
   },
 });

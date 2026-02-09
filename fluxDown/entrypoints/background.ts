@@ -7,16 +7,17 @@
  * 3. 管理与 Native Host 的通信
  * 4. 响应 popup 的消息
  * 5. 维护拦截统计数据
+ * 6. 多语言支持
  */
 
 import { sendDownloadRequest, checkFluxDownAvailable } from '@/utils/native-messaging';
 import type { DownloadRequest } from '@/utils/native-messaging';
 import { loadSettings, shouldIntercept } from '@/utils/settings';
 import type { DownloadItemInfo } from '@/utils/settings';
+import { initI18n, t } from '@/utils/i18n';
 
 // ===== 统计相关 =====
 interface DailyStats {
-  intercepted: number;
   sent: number;
   failed: number;
   date: string;
@@ -25,11 +26,11 @@ interface DailyStats {
 async function getTodayStats(): Promise<DailyStats> {
   const today = new Date().toDateString();
   const result = await chrome.storage.local.get('stats');
-  const stats: DailyStats = result.stats || { intercepted: 0, sent: 0, failed: 0, date: '' };
+  const stats: DailyStats = result.stats || { sent: 0, failed: 0, date: '' };
 
   // 跨天自动重置
   if (stats.date !== today) {
-    const resetStats: DailyStats = { intercepted: 0, sent: 0, failed: 0, date: today };
+    const resetStats: DailyStats = { sent: 0, failed: 0, date: today };
     await chrome.storage.local.set({ stats: resetStats });
     return resetStats;
   }
@@ -37,7 +38,7 @@ async function getTodayStats(): Promise<DailyStats> {
   return stats;
 }
 
-async function incrementStat(field: 'intercepted' | 'sent' | 'failed') {
+async function incrementStat(field: 'sent' | 'failed') {
   const stats = await getTodayStats();
   stats[field]++;
   await chrome.storage.local.set({ stats });
@@ -46,23 +47,31 @@ async function incrementStat(field: 'intercepted' | 'sent' | 'failed') {
 export default defineBackground(() => {
   console.log('[FluxDown] Background service worker started');
 
+  // 初始化 i18n
+  initI18n().then(() => {
+    console.log('[FluxDown] i18n initialized');
+  });
+
   // ===== 右键菜单 =====
-  chrome.runtime.onInstalled.addListener(() => {
+  chrome.runtime.onInstalled.addListener(async () => {
+    // 确保 i18n 已初始化
+    await initI18n();
+
     chrome.contextMenus.create({
       id: 'fluxdown-download-link',
-      title: '使用 FluxDown 下载链接',
+      title: t('contextMenu.downloadLink'),
       contexts: ['link'],
     });
 
     chrome.contextMenus.create({
       id: 'fluxdown-download-media',
-      title: '使用 FluxDown 下载媒体',
+      title: t('contextMenu.downloadMedia'),
       contexts: ['image', 'video', 'audio'],
     });
 
     chrome.contextMenus.create({
       id: 'fluxdown-download-page',
-      title: '使用 FluxDown 下载此页面所有链接',
+      title: t('contextMenu.downloadPage'),
       contexts: ['page'],
     });
 
@@ -83,7 +92,7 @@ export default defineBackground(() => {
       case 'fluxdown-download-page':
         if (tab?.id) {
           // TODO: 实现全部链接提取
-          notify('功能开发中', '批量下载页面链接功能即将推出');
+          notify(t('notify.featureInDev'), t('notify.batchDownloadComing'));
         }
         return;
     }
@@ -123,9 +132,6 @@ export default defineBackground(() => {
       fileSize,
       mode: settings.interceptMode,
     });
-
-    // 统计：拦截
-    await incrementStat('intercepted');
 
     // 取消浏览器的下载
     try {
@@ -178,17 +184,23 @@ export default defineBackground(() => {
     const response = await sendDownloadRequest(request);
 
     if (response.success) {
-      // 统计：发送成功
+      // 统计：接管成功
       await incrementStat('sent');
 
       if (settings.showNotification) {
-        notify('下载已发送', `${request.filename || url} 已发送到 FluxDown`);
+        notify(
+          t('notify.downloadSent'),
+          t('notify.sentToFluxDown', { name: request.filename || url }),
+        );
       }
     } else {
-      // 统计：失败
+      // 统计：接管失败
       await incrementStat('failed');
 
-      notify('发送失败', `无法连接到 FluxDown 应用: ${response.message}`);
+      notify(
+        t('notify.sendFailed'),
+        t('notify.connectionFailed', { message: response.message }),
+      );
     }
   }
 

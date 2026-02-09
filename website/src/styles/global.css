@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/* ===== FluxDown Brand Design Tokens (Dark = default) ===== */
+@theme {
+  /* Brand Colors (static — same in both themes) */
+  --color-brand-sky: #38bdf8;
+  --color-brand-cyan: #06b6d4;
+  --color-brand-blue: #3b82f6;
+
+  /* Dark Palette (default) */
+  --color-dark-bg: #0a0a0b;
+  --color-dark-surface1: #111113;
+  --color-dark-surface2: #1a1a1d;
+  --color-dark-surface3: #232326;
+  --color-dark-border: #27272a;
+  --color-dark-text: #fafafa;
+  --color-dark-text-secondary: #a1a1aa;
+  --color-dark-text-muted: #52525b;
+
+  /* Semantic Colors */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  /* Gradients */
+  --color-gradient-start: #38bdf8;
+  --color-gradient-end: #06b6d4;
+}
+
+/* ===== Light theme: override Tailwind's --color-* variables directly ===== */
+html.light {
+  --color-dark-bg: #F8F9FA;
+  --color-dark-surface1: #FFFFFF;
+  --color-dark-surface2: #F1F3F5;
+  --color-dark-surface3: #E9ECEF;
+  --color-dark-border: #E4E4E7;
+  --color-dark-text: #09090B;
+  --color-dark-text-secondary: #71717A;
+  --color-dark-text-muted: #A1A1AA;
+}
+
+/* ===== Base Styles ===== */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== Selection ===== */
+::selection {
+  background-color: color-mix(in srgb, var(--color-brand-blue) 30%, transparent);
+  color: white;
+}
+
+/* ===== Scrollbar (Webkit) ===== */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-dark-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-dark-surface3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-dark-text-muted);
+}
+
+/* ===== Theme transition ===== */
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, fill 0.3s ease, stroke 0.3s ease, box-shadow 0.3s ease !important;
+}

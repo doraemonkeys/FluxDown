@@ -183,6 +183,17 @@ body::-webkit-scrollbar-thumb {
   border-radius: 4px;
 }
 
+/* ===== Language Toggle ===== */
+.lang-btn {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.lang-btn .lang-label {
+  line-height: 1;
+}
+
 /* ===== Theme Toggle ===== */
 /* Dark mode: show sun, hide moon */
 .icon-moon { display: none; }
@@ -384,12 +395,9 @@ body::-webkit-scrollbar-thumb {
 
 /* 统计值颜色区分 */
 .stat-item:first-child .stat-value {
-  color: var(--accent);
-}
-.stat-item:nth-child(3) .stat-value {
   color: var(--success);
 }
-.stat-item:nth-child(5) .stat-value {
+.stat-item:nth-child(3) .stat-value {
   color: var(--danger);
 }
 

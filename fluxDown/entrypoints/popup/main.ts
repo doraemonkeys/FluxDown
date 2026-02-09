@@ -9,7 +9,10 @@
  * - 文件扩展名管理（Tag 增删）
  * - 排除域名管理（快捷添加当前站点）
  * - 主题切换
+ * - 多语言支持（中/英）
  */
+
+import { initI18n, applyI18nToDOM, t, getLocale, saveLocale } from '@/utils/i18n';
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
@@ -23,9 +26,10 @@ const modeHint = $('#modeHint')!;
 const minSizeSelect = $<HTMLSelectElement>('#minSizeSelect');
 const notifyToggle = $<HTMLInputElement>('#notifyToggle');
 const themeBtn = $<HTMLButtonElement>('#themeBtn');
+const langBtn = $<HTMLButtonElement>('#langBtn');
+const langLabel = langBtn.querySelector('.lang-label')!;
 
 // 统计
-const statIntercepted = $('#statIntercepted')!;
 const statSent = $('#statSent')!;
 const statFailed = $('#statFailed')!;
 const resetStatsBtn = $<HTMLButtonElement>('#resetStatsBtn');
@@ -127,7 +131,7 @@ async function removeExtension(ext: string) {
     settings.interceptExtensions = exts;
     await chrome.storage.sync.set({ settings });
     renderExtTags(exts);
-    showToast(`已移除 ${ext}`);
+    showToast(t('fileType.removed', { ext }));
   }
 }
 
@@ -138,7 +142,7 @@ async function addExtension(ext: string) {
 
   // 验证格式
   if (!/^\.\w+$/.test(ext)) {
-    showToast('扩展名格式无效', 'error');
+    showToast(t('fileType.invalidFormat'), 'error');
     return;
   }
 
@@ -147,7 +151,7 @@ async function addExtension(ext: string) {
   const exts: string[] = settings.interceptExtensions || [];
 
   if (exts.includes(ext)) {
-    showToast(`${ext} 已存在`, 'error');
+    showToast(t('fileType.exists', { ext }), 'error');
     return;
   }
 
@@ -155,7 +159,7 @@ async function addExtension(ext: string) {
   settings.interceptExtensions = exts;
   await chrome.storage.sync.set({ settings });
   renderExtTags(exts);
-  showToast(`已添加 ${ext}`);
+  showToast(t('fileType.added', { ext }));
 }
 
 // ===== 域名管理 =====
@@ -199,7 +203,7 @@ async function removeDomain(domain: string) {
     settings.excludeDomains = domains;
     await chrome.storage.sync.set({ settings });
     renderDomainList(domains);
-    showToast(`已移除 ${domain}`);
+    showToast(t('domain.removed', { domain }));
   }
 }
 
@@ -212,7 +216,7 @@ async function addDomain(domain: string) {
   const domains: string[] = settings.excludeDomains || [];
 
   if (domains.includes(domain)) {
-    showToast(`${domain} 已在排除列表中`, 'error');
+    showToast(t('domain.exists', { domain }), 'error');
     return;
   }
 
@@ -220,33 +224,36 @@ async function addDomain(domain: string) {
   settings.excludeDomains = domains;
   await chrome.storage.sync.set({ settings });
   renderDomainList(domains);
-  showToast(`已排除 ${domain}`);
+  showToast(t('domain.excluded', { domain }));
 }
 
 // ===== 统计 =====
 async function loadStats() {
   const result = await chrome.storage.local.get('stats');
-  const stats = result.stats || { intercepted: 0, sent: 0, failed: 0, date: '' };
+  const stats = result.stats || { sent: 0, failed: 0, date: '' };
 
   // 检查是否是今天的统计
   const today = new Date().toDateString();
   if (stats.date !== today) {
     // 新的一天，重置
-    const resetStats = { intercepted: 0, sent: 0, failed: 0, date: today };
+    const resetStats = { sent: 0, failed: 0, date: today };
     await chrome.storage.local.set({ stats: resetStats });
-    statIntercepted.textContent = '0';
     statSent.textContent = '0';
     statFailed.textContent = '0';
     return;
   }
 
-  statIntercepted.textContent = String(stats.intercepted || 0);
   statSent.textContent = String(stats.sent || 0);
   statFailed.textContent = String(stats.failed || 0);
 }
 
 // ===== 初始化 =====
 async function init() {
+  // 初始化 i18n（必须先于 UI 渲染）
+  await initI18n();
+  applyI18nToDOM();
+  updateLangButton();
+
   await initTheme();
 
   // 获取连接状态和设置
@@ -255,10 +262,10 @@ async function init() {
   // 更新连接状态
   if (response.connected) {
     statusBadge.className = 'status-badge connected';
-    statusText.textContent = '已连接';
+    statusText.textContent = t('header.connected');
   } else {
     statusBadge.className = 'status-badge disconnected';
-    statusText.textContent = '未连接';
+    statusText.textContent = t('header.disconnected');
   }
 
   // 更新设置 UI
@@ -283,20 +290,46 @@ async function init() {
 }
 
 function updateEnableHint(enabled: boolean) {
-  enableHint.textContent = enabled ? '已开启' : '已关闭';
+  enableHint.textContent = enabled ? t('switch.enabled') : t('switch.disabled');
 }
 
-const MODE_HINTS: Record<string, string> = {
-  smart: '综合文件名、类型、大小智能判断',
-  extension: '仅按 URL/文件名扩展名拦截',
-  all: '拦截所有下载（除排除域名外）',
+type ModeKey = 'settings.hintSmart' | 'settings.hintExtension' | 'settings.hintAll';
+
+const MODE_HINT_KEYS: Record<string, ModeKey> = {
+  smart: 'settings.hintSmart',
+  extension: 'settings.hintExtension',
+  all: 'settings.hintAll',
 };
 
 function updateModeHint(mode: string) {
-  modeHint.textContent = MODE_HINTS[mode] || '';
+  const key = MODE_HINT_KEYS[mode];
+  modeHint.textContent = key ? t(key) : '';
+}
+
+// ===== 语言切换 =====
+function isZh(): boolean {
+  return getLocale().startsWith('zh');
+}
+
+function updateLangButton() {
+  langLabel.textContent = isZh() ? '中' : 'EN';
+  langBtn.title = isZh() ? 'Switch to English' : '切换到中文';
+}
+
+async function toggleLang() {
+  const next = isZh() ? 'en' : 'zh-CN';
+  await saveLocale(next);
+  applyI18nToDOM();
+  updateLangButton();
+  // 刷新动态文本
+  updateEnableHint(enableToggle.checked);
+  updateModeHint(interceptModeSelect.value);
 }
 
 // ===== 事件绑定 =====
+
+// 语言切换
+langBtn.addEventListener('click', toggleLang);
 
 // 主题切换
 themeBtn.addEventListener('click', toggleTheme);
@@ -367,22 +400,21 @@ addCurrentDomainBtn.addEventListener('click', async () => {
       if (hostname) {
         await addDomain(hostname);
       } else {
-        showToast('无法获取当前页面域名', 'error');
+        showToast(t('domain.cannotGetDomain'), 'error');
       }
     }
   } catch {
-    showToast('无法获取当前页面域名', 'error');
+    showToast(t('domain.cannotGetDomain'), 'error');
   }
 });
 
 // 重置统计
 resetStatsBtn.addEventListener('click', async () => {
   const today = new Date().toDateString();
-  await chrome.storage.local.set({ stats: { intercepted: 0, sent: 0, failed: 0, date: today } });
-  statIntercepted.textContent = '0';
+  await chrome.storage.local.set({ stats: { sent: 0, failed: 0, date: today } });
   statSent.textContent = '0';
   statFailed.textContent = '0';
-  showToast('统计已重置');
+  showToast(t('stats.resetDone'));
 });
 
 // ===== 启动 =====

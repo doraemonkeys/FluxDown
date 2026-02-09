@@ -1,0 +1,20 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { FloatingNavbar } from "../components/ui/floating-navbar";
+import HeroSection from "../components/HeroSection";
+import FeaturesSection from "../components/FeaturesSection";
+import ExtensionSection from "../components/ExtensionSection";
+import DownloadSection from "../components/DownloadSection";
+import Footer from "../components/Footer";
+---
+
+<Layout>
+  <FloatingNavbar client:load />
+  <main>
+    <HeroSection client:load />
+    <FeaturesSection client:visible />
+    <ExtensionSection client:visible />
+    <DownloadSection client:visible />
+  </main>
+  <Footer client:load />
+</Layout>
