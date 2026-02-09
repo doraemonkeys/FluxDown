@@ -1,0 +1,731 @@
+import 'dart:math';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shadcn_ui/shadcn_ui.dart';
+import '../models/download_controller.dart';
+import '../models/download_task.dart';
+import '../theme/app_colors.dart';
+
+/// IDM 风格分片配色 — 最多 16 色循环
+/// 第一个颜色跟随主题色（accent），其余固定
+const _segmentColorsFixed = [
+  Color(0xFF22C55E), // 绿
+  Color(0xFFF59E0B), // 橙
+  Color(0xFFA855F7), // 紫
+  Color(0xFF06B6D4), // 青
+  Color(0xFFEC4899), // 粉
+  Color(0xFF14B8A6), // 碧
+  Color(0xFFEF4444), // 红
+  Color(0xFF8B5CF6), // 靛
+  Color(0xFFF97316), // 深橙
+  Color(0xFF10B981), // 翠
+  Color(0xFFE11D48), // 玫红
+  Color(0xFF0EA5E9), // 天蓝
+  Color(0xFFD946EF), // 品红
+  Color(0xFF84CC16), // 黄绿
+  Color(0xFF64748B), // 灰蓝
+];
+
+Color _colorForSegment(int index, Color accent) {
+  if (index % (_segmentColorsFixed.length + 1) == 0) return accent;
+  return _segmentColorsFixed[(index - 1) % _segmentColorsFixed.length];
+}
+
+class DetailPanel extends StatelessWidget {
+  final DownloadController controller;
+  final VoidCallback onClose;
+
+  const DetailPanel({
+    super.key,
+    required this.controller,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final task = controller.selectedTask;
+        return Container(
+          color: c.surface1,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 顶部占位，与 titlebar 齐平
+              SizedBox(
+                height: 42,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: c.border, width: 1),
+                    ),
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+              _buildHeader(c),
+              if (task == null)
+                Expanded(child: _buildNoSelection(c))
+              else ...[
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildFileInfo(c, task),
+                        const SizedBox(height: 20),
+                        _buildProgress(c, task),
+                        const SizedBox(height: 20),
+                        _buildInfoTable(c, task),
+                      ],
+                    ),
+                  ),
+                ),
+                _buildActions(c, task),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildHeader(AppColors c) {
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.border, width: 1)),
+      ),
+      child: Row(
+        children: [
+          Text(
+            '详情',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: c.textPrimary,
+            ),
+          ),
+          const Spacer(),
+          ShadButton.ghost(
+            onPressed: onClose,
+            size: ShadButtonSize.sm,
+            width: 28,
+            height: 28,
+            padding: EdgeInsets.zero,
+            child: Icon(LucideIcons.x, size: 14, color: c.textMuted),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoSelection(AppColors c) {
+    return Center(
+      child: Text(
+        '选择一个任务查看详情',
+        style: TextStyle(fontSize: 12, color: c.textMuted),
+      ),
+    );
+  }
+
+  Widget _buildFileInfo(AppColors c, DownloadTask task) {
+    return Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: c.surface2,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Text(
+              task.fileExtension,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: c.textSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            task.fileName,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 13, color: c.textPrimary),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 进度区域：百分比 + 分段进度条 + IDM 网格 + 图例
+  // ---------------------------------------------------------------------------
+
+  Widget _buildProgress(AppColors c, DownloadTask task) {
+    final segs = task.segments;
+    final hasSegs = segs != null && segs.isNotEmpty && task.totalBytes > 0;
+
+    // 百分比：有分片数据时用分片累加，否则 fallback
+    final double pctValue;
+    if (hasSegs) {
+      final dlSum = segs.fold<int>(0, (s, seg) => s + seg.downloadedBytes);
+      pctValue = (dlSum / task.totalBytes).clamp(0.0, 1.0);
+    } else {
+      pctValue = task.progress;
+    }
+    final pctStr = (pctValue * 100).toStringAsFixed(1);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 百分比大字
+        Text(
+          '$pctStr%',
+          style: TextStyle(
+            fontSize: 26,
+            fontWeight: FontWeight.w600,
+            color: c.textPrimary,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // 分段进度条
+        if (hasSegs)
+          _buildSegmentedBar(c, segs, task.totalBytes)
+        else
+          _buildSimpleBar(c, pctValue),
+
+        // IDM 网格可视化
+        if (hasSegs) ...[
+          const SizedBox(height: 16),
+          _buildSegmentGrid(c, segs, task.totalBytes),
+        ],
+
+        // 分片图例
+        if (hasSegs && segs.length > 1) ...[
+          const SizedBox(height: 12),
+          _buildSegmentLegend(c, segs),
+        ],
+      ],
+    );
+  }
+
+  /// 无分片数据时的简单进度条
+  Widget _buildSimpleBar(AppColors c, double progress) {
+    return Container(
+      height: 4,
+      decoration: BoxDecoration(
+        color: c.surface3,
+        borderRadius: BorderRadius.circular(2),
+      ),
+      child: FractionallySizedBox(
+        alignment: Alignment.centerLeft,
+        widthFactor: progress,
+        child: Container(
+          decoration: BoxDecoration(
+            color: c.accent,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 分段进度条 — 每个分片按字节范围比例占位，内部按下载量填充
+  Widget _buildSegmentedBar(
+    AppColors c,
+    List<SegmentData> segs,
+    int totalBytes,
+  ) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(3),
+      child: SizedBox(
+        height: 6,
+        child: CustomPaint(
+          size: const Size(double.infinity, 6),
+          painter: _SegmentBarPainter(
+            segments: segs,
+            totalBytes: totalBytes,
+            emptyColor: c.surface3,
+            accent: c.accent,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// IDM 风格网格可视化
+  Widget _buildSegmentGrid(
+    AppColors c,
+    List<SegmentData> segs,
+    int totalBytes,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '下载分布',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            color: c.textMuted,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            color: c.surface2,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: c.border, width: 1),
+          ),
+          padding: const EdgeInsets.all(6),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              const cellSize = 5.0;
+              const cellGap = 1.5;
+              final cols = ((constraints.maxWidth - 0) / (cellSize + cellGap))
+                  .floor();
+              // 行数：根据分片数自适应，至少 8 行，最多 20 行
+              final targetCells = cols * max(8, min(20, segs.length * 3 + 4));
+              final rows = (targetCells / cols).ceil();
+              final totalCells = cols * rows;
+              final height = rows * (cellSize + cellGap) - cellGap;
+              return SizedBox(
+                height: height,
+                child: CustomPaint(
+                  size: Size(constraints.maxWidth, height),
+                  painter: _SegmentGridPainter(
+                    segments: segs,
+                    totalBytes: totalBytes,
+                    totalCells: totalCells,
+                    cols: cols,
+                    cellSize: cellSize,
+                    cellGap: cellGap,
+                    emptyColor: c.surface3,
+                    isDark: c.bg.computeLuminance() < 0.5,
+                    accent: c.accent,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 分片图例 — 每个分片一行，显示颜色块 + 序号 + 进度
+  Widget _buildSegmentLegend(AppColors c, List<SegmentData> segs) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 6,
+      children: [
+        for (final seg in segs)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: _colorForSegment(seg.index, c.accent),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '#${seg.index + 1} ${(seg.progress * 100).toStringAsFixed(0)}%',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: c.textMuted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 信息表
+  // ---------------------------------------------------------------------------
+
+  Widget _buildInfoTable(AppColors c, DownloadTask task) {
+    final segs = task.segments;
+    final segCount = segs != null && segs.isNotEmpty ? segs.length : null;
+
+    return Column(
+      children: [
+        _buildInfoRow('大小', task.sizeText, c),
+        _buildInfoRow('已下载', task.downloadedText, c),
+        _buildInfoRow('速度', task.speedText, c),
+        _buildInfoRow('剩余', task.etaText, c),
+        _buildInfoRow('状态', task.statusText, c),
+        if (segCount != null) _buildInfoRow('线程', '$segCount 线程（动态分配）', c),
+        _buildInfoRow('路径', task.saveDir, c),
+        _buildUrlRow(c, task.url),
+        if (task.errorMessage.isNotEmpty)
+          _buildInfoRow('错误', task.errorMessage, c),
+      ],
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value, AppColors c) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(
+              label,
+              style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 11,
+                color: c.textSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUrlRow(AppColors c, String url) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(
+              '地址',
+              style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              url,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                color: c.textSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          _CopyUrlButton(url: url, color: c.textMuted),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 操作按钮
+  // ---------------------------------------------------------------------------
+
+  Widget _buildActions(AppColors c, DownloadTask task) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: c.border, width: 1)),
+      ),
+      child: Column(
+        children: [
+          // 暂停 / 恢复
+          if (task.status == TaskStatus.downloading ||
+              task.status == TaskStatus.pending)
+            SizedBox(
+              width: double.infinity,
+              child: ShadButton(
+                onPressed: () => controller.pauseTask(task.id),
+                backgroundColor: c.accent,
+                hoverBackgroundColor: c.accentHover,
+                child: const Text(
+                  '暂停',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            )
+          else if (task.status == TaskStatus.resuming)
+            SizedBox(
+              width: double.infinity,
+              child: ShadButton(
+                onPressed: () => controller.pauseTask(task.id),
+                backgroundColor: c.accent,
+                hoverBackgroundColor: c.accentHover,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white.withValues(alpha: 0.8),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      '恢复中...（点击暂停）',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.white,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (task.status == TaskStatus.paused ||
+              task.status == TaskStatus.error)
+            SizedBox(
+              width: double.infinity,
+              child: ShadButton(
+                onPressed: () => controller.resumeTask(task.id),
+                backgroundColor: c.accent,
+                hoverBackgroundColor: c.accentHover,
+                child: const Text(
+                  '继续',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: ShadButton.destructive(
+              onPressed: () =>
+                  controller.deleteTask(task.id, deleteFiles: true),
+              child: const Text(
+                '删除',
+                style: TextStyle(fontSize: 13, color: Colors.white),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 分段进度条 Painter
+// =============================================================================
+
+class _SegmentBarPainter extends CustomPainter {
+  final List<SegmentData> segments;
+  final int totalBytes;
+  final Color emptyColor;
+  final Color accent;
+
+  _SegmentBarPainter({
+    required this.segments,
+    required this.totalBytes,
+    required this.emptyColor,
+    required this.accent,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 背景
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(3)),
+      Paint()..color = emptyColor,
+    );
+
+    if (totalBytes <= 0) return;
+
+    for (final seg in segments) {
+      final segSize = seg.endByte - seg.startByte + 1;
+      if (segSize <= 0) continue;
+
+      final xStart = (seg.startByte / totalBytes) * size.width;
+      final segWidth = (segSize / totalBytes) * size.width;
+      final fillRatio = (seg.downloadedBytes / segSize).clamp(0.0, 1.0);
+      final fillWidth = segWidth * fillRatio;
+
+      if (fillWidth > 0) {
+        final rect = Rect.fromLTWH(xStart, 0, fillWidth, size.height);
+        canvas.drawRect(
+          rect,
+          Paint()..color = _colorForSegment(seg.index, accent),
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_SegmentBarPainter old) => true;
+}
+
+// =============================================================================
+// IDM 风格网格 Painter
+// =============================================================================
+
+class _SegmentGridPainter extends CustomPainter {
+  final List<SegmentData> segments;
+  final int totalBytes;
+  final int totalCells;
+  final int cols;
+  final double cellSize;
+  final double cellGap;
+  final Color emptyColor;
+  final bool isDark;
+  final Color accent;
+
+  _SegmentGridPainter({
+    required this.segments,
+    required this.totalBytes,
+    required this.totalCells,
+    required this.cols,
+    required this.cellSize,
+    required this.cellGap,
+    required this.emptyColor,
+    required this.isDark,
+    required this.accent,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (totalBytes <= 0 || totalCells <= 0) return;
+
+    final bytesPerCell = totalBytes / totalCells;
+    final radius = Radius.circular(1);
+
+    for (int i = 0; i < totalCells; i++) {
+      final col = i % cols;
+      final row = i ~/ cols;
+      final x = col * (cellSize + cellGap);
+      final y = row * (cellSize + cellGap);
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, y, cellSize, cellSize),
+        radius,
+      );
+
+      final cellStart = (i * bytesPerCell).round();
+      final cellEnd = ((i + 1) * bytesPerCell).round() - 1;
+      final cellMid = (cellStart + cellEnd) ~/ 2;
+
+      // 找到拥有这个字节位置的分片
+      SegmentData? owner;
+      for (final seg in segments) {
+        if (cellMid >= seg.startByte && cellMid <= seg.endByte) {
+          owner = seg;
+          break;
+        }
+      }
+
+      if (owner == null) {
+        canvas.drawRRect(rect, Paint()..color = emptyColor);
+        continue;
+      }
+
+      // 该 cell 对应的字节范围在分片内的偏移
+      final offsetInSeg = cellMid - owner.startByte;
+      final isDownloaded = offsetInSeg < owner.downloadedBytes;
+
+      if (isDownloaded) {
+        canvas.drawRRect(
+          rect,
+          Paint()..color = _colorForSegment(owner.index, accent),
+        );
+      } else {
+        // 未下载：分片色半透明
+        canvas.drawRRect(
+          rect,
+          Paint()
+            ..color = _colorForSegment(
+              owner.index,
+              accent,
+            ).withValues(alpha: isDark ? 0.12 : 0.15),
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_SegmentGridPainter old) => true;
+}
+
+// =============================================================================
+// 复制按钮（带勾号反馈）
+// =============================================================================
+
+class _CopyUrlButton extends StatefulWidget {
+  final String url;
+  final Color color;
+
+  const _CopyUrlButton({required this.url, required this.color});
+
+  @override
+  State<_CopyUrlButton> createState() => _CopyUrlButtonState();
+}
+
+class _CopyUrlButtonState extends State<_CopyUrlButton> {
+  bool _copied = false;
+
+  Future<void> _onCopy() async {
+    await Clipboard.setData(ClipboardData(text: widget.url));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    ShadSonner.of(context).show(
+      const ShadToast(title: Text('已复制下载地址'), duration: Duration(seconds: 2)),
+    );
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ShadButton.ghost(
+      onPressed: _onCopy,
+      size: ShadButtonSize.sm,
+      width: 24,
+      height: 24,
+      padding: EdgeInsets.zero,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        child: Icon(
+          _copied ? LucideIcons.check : LucideIcons.copy,
+          key: ValueKey(_copied),
+          size: 12,
+          color: _copied ? const Color(0xFF22C55E) : widget.color,
+        ),
+      ),
+    );
+  }
+}

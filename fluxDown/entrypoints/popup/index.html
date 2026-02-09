@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=360, initial-scale=1.0">
+  <title>FluxDown</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 头部 -->
+    <header class="header">
+      <div class="logo">
+        <img src="/icon/fluxdown_logo.png" alt="FluxDown" width="22" height="22">
+        <span class="title">FluxDown</span>
+      </div>
+      <div class="header-right">
+        <button class="icon-btn" id="themeBtn" title="切换主题">
+          <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+        <div class="status-badge" id="statusBadge">
+          <span class="status-dot"></span>
+          <span class="status-text">检测中...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 主开关 -->
+    <section class="section switch-section">
+      <div class="row">
+        <div class="switch-info">
+          <span class="label">下载拦截</span>
+          <span class="hint" id="enableHint">已开启</span>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="enableToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <!-- 今日统计 -->
+    <section class="section stats-section">
+      <div class="section-title">今日统计</div>
+      <div class="stats-grid">
+        <div class="stat-item">
+          <span class="stat-value" id="statIntercepted">0</span>
+          <span class="stat-label">已拦截</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
+          <span class="stat-value" id="statSent">0</span>
+          <span class="stat-label">已发送</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
+          <span class="stat-value" id="statFailed">0</span>
+          <span class="stat-label">失败</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 快捷设置 -->
+    <section class="section">
+      <div class="section-title">快捷设置</div>
+      <div class="row">
+        <span class="label">最小文件大小</span>
+        <select id="minSizeSelect">
+          <option value="0">不限</option>
+          <option value="102400">100 KB</option>
+          <option value="524288">512 KB</option>
+          <option value="1048576" selected>1 MB</option>
+          <option value="5242880">5 MB</option>
+          <option value="10485760">10 MB</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="label">桌面通知</span>
+        <label class="toggle">
+          <input type="checkbox" id="notifyToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <!-- 文件类型管理 -->
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">拦截文件类型</span>
+        <button class="icon-btn small" id="addExtBtn" title="添加扩展名">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+      </div>
+      <!-- 添加扩展名输入框（默认隐藏） -->
+      <div class="ext-input-row hidden" id="extInputRow">
+        <input type="text" id="extInput" placeholder="输入扩展名，如 .pdf" autocomplete="off">
+        <button class="btn-small confirm" id="extConfirmBtn">添加</button>
+        <button class="btn-small cancel" id="extCancelBtn">取消</button>
+      </div>
+      <div class="tags-container" id="extTagsContainer">
+        <!-- 动态生成 -->
+      </div>
+    </section>
+
+    <!-- 排除域名 -->
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">排除域名</span>
+        <button class="btn-small accent" id="addCurrentDomainBtn" title="添加当前页面域名">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          当前站点
+        </button>
+      </div>
+      <div class="domain-list" id="domainList">
+        <div class="empty-hint" id="domainEmptyHint">暂无排除域名</div>
+        <!-- 动态生成 -->
+      </div>
+    </section>
+
+    <!-- 底部 -->
+    <footer class="footer">
+      <span>v1.0.0</span>
+      <button class="link-btn" id="resetStatsBtn">重置统计</button>
+    </footer>
+  </div>
+
+  <script src="./main.ts" type="module"></script>
+</body>
+</html>
