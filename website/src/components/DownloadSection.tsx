@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Monitor, Apple, Terminal, Download, Check, Loader2, ChevronDown, Chrome, Puzzle } from "lucide-react";
+import { Monitor, Apple, Terminal, Download, Check, Loader2, ChevronDown, Chrome, Puzzle, TrendingUp } from "lucide-react";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
 
@@ -21,6 +21,7 @@ interface ReleaseInfo {
   version: string;
   tag: string;
   published_at: string;
+  total_downloads: number;
   assets: {
     setup: ReleaseAsset | null;
     portable: ReleaseAsset | null;
@@ -231,14 +232,23 @@ export default function DownloadSection() {
             </div>
           </motion.div>
 
-          {/* Tech stack */}
+          {/* Tech stack + Downloads counter */}
           <motion.div
-            className="text-center"
+            className="flex flex-col items-center gap-4"
             initial={{ opacity: 0 }}
             whileInView={{ opacity: 1 }}
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.3 }}
           >
+            {release && release.total_downloads > 0 && (
+              <div className="inline-flex items-center gap-2 text-sm text-dark-text-secondary">
+                <TrendingUp className="w-4 h-4 text-success" />
+                <span>
+                  <span className="font-semibold text-dark-text">{release.total_downloads.toLocaleString()}</span>
+                  {" "}{t("dl.totalDownloads")}
+                </span>
+              </div>
+            )}
             <div className="inline-flex items-center gap-3 sm:gap-6 rounded-full border border-dark-border bg-dark-surface1/50 px-4 sm:px-6 py-2.5 sm:py-3 backdrop-blur-sm">
               {techStack.map((ts, i) => (
                 <span key={ts.name}>

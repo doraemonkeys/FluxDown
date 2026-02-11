@@ -25,18 +25,18 @@ export default function Footer() {
           <div>
             <h3 className="text-sm font-semibold text-dark-text mb-4">{t("footer.product")}</h3>
             <ul className="space-y-2.5">
-              <li><a href="#features" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.features")}</a></li>
-              <li><a href="#extension" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.browserExtension")}</a></li>
-              <li><a href="#download" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.download")}</a></li>
+              <li><a href="/#features" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.features")}</a></li>
+              <li><a href="/#extension" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.browserExtension")}</a></li>
+              <li><a href="/#download" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.download")}</a></li>
             </ul>
           </div>
 
           <div>
             <h3 className="text-sm font-semibold text-dark-text mb-4">{t("footer.support")}</h3>
             <ul className="space-y-2.5">
-              <li><a href="#" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.documentation")}</a></li>
-              <li><a href="#" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.faq")}</a></li>
-              <li><a href="#" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.contact")}</a></li>
+              <li><a href="/faq" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.faq")}</a></li>
+              <li><a href="/feedback" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.feedback")}</a></li>
+              <li><a href="/feedback" className="text-sm text-dark-text-secondary hover:text-dark-text transition-colors">{t("footer.contact")}</a></li>
             </ul>
           </div>
         </div>

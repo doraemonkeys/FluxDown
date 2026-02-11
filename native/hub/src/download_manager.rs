@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures_util::FutureExt;
 use reqwest::Client;
@@ -16,9 +17,48 @@ use crate::ftp_downloader;
 use crate::signals::{AllTasks, SegmentDetail, SegmentProgress, TaskProgress};
 use crate::speed_limiter::SpeedLimiter;
 
+/// Extract a human-readable message from a panic payload.
+fn panic_message(panic_info: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic_info.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "internal panic".to_string()
+    }
+}
+
+/// Handle a panicked download task: log the error, persist error status to DB,
+/// and send an error progress update to Dart.
+///
+/// This is the common panic-recovery logic shared by all download task spawns
+/// (HTTP, FTP, BT — both create and resume paths).
+async fn handle_task_panic(
+    task_id: &str,
+    msg: &str,
+    db: &Db,
+    progress_tx: &mpsc::Sender<ProgressUpdate>,
+) {
+    rinf::debug_print!("[download] PANIC in task {}: {}", task_id, msg);
+    let _ = db.update_task_status(task_id, 4, msg).await;
+    let _ = progress_tx
+        .send(ProgressUpdate {
+            task_id: task_id.to_string(),
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            status: 4,
+            error_message: msg.to_string(),
+            file_name: String::new(),
+            segment_details: None,
+        })
+        .await;
+}
+
 /// Determine if a URL uses the FTP protocol (case-insensitive).
 fn is_ftp_url(url: &str) -> bool {
-    url.len() >= 6 && url[..6].eq_ignore_ascii_case("ftp://")
+    url.get(..6)
+        .map(|prefix| prefix.eq_ignore_ascii_case("ftp://"))
+        .unwrap_or(false)
 }
 
 /// Determine if a URL is a magnet link.
@@ -77,16 +117,24 @@ pub struct DownloadManager {
     progress_rx: Option<mpsc::Receiver<ProgressUpdate>>,
     done_tx: mpsc::Sender<TaskDone>,
     done_rx: Option<mpsc::Receiver<TaskDone>>,
-    /// Maximum number of concurrent active downloads.  0 = unlimited.
+    /// Maximum number of concurrent active HTTP/FTP downloads.  0 = unlimited.
+    /// BT tasks are excluded from this limit because each BT download is
+    /// inherently multi-peer concurrent and managed by the shared librqbit
+    /// session (which has its own `concurrent_init_limit`).
     max_concurrent: usize,
-    /// FIFO queue of tasks waiting for a free slot.
-    pending_queue: Vec<QueuedTask>,
+    /// FIFO queue of tasks waiting for a free slot (HTTP/FTP only — BT tasks
+    /// bypass the queue entirely).
+    pending_queue: VecDeque<QueuedTask>,
+    /// Set of task_ids that are BT (magnet) downloads.  Used to exclude BT
+    /// tasks from the HTTP/FTP concurrency limit in `has_capacity()`.
+    bt_task_ids: HashSet<String>,
     /// Global speed limiter shared with all HTTP/FTP download tasks.
     speed_limiter: SpeedLimiter,
     /// Shared BT session — lazily initialised on first BT download.
     /// All BT tasks share a single `librqbit::Session` (DHT, trackers,
     /// listening port, speed limits) to avoid per-task resource waste.
-    bt_session: Option<SharedBtSession>,
+    /// Wrapped in `Arc` so spawned download tasks can cache handles.
+    bt_session: Option<Arc<SharedBtSession>>,
     /// Default save directory used to initialise the BT session.
     default_save_dir: String,
 }
@@ -114,7 +162,8 @@ impl DownloadManager {
             done_tx,
             done_rx: Some(done_rx),
             max_concurrent,
-            pending_queue: Vec::new(),
+            pending_queue: VecDeque::new(),
+            bt_task_ids: HashSet::new(),
             speed_limiter: limiter,
             bt_session: None,
             default_save_dir,
@@ -141,6 +190,15 @@ impl DownloadManager {
         self.max_concurrent = max;
         // Try to start queued tasks if we now have capacity.
         self.drain_queue().await;
+    }
+
+    /// Update the default save directory.  This is used when initialising a
+    /// new BT session and as the fallback for new tasks.  If the BT session
+    /// is already running, it won't move — but new `add_torrent` calls use
+    /// per-torrent `output_folder` overrides, so this primarily affects
+    /// future session re-creation (e.g. after app restart).
+    pub fn set_default_save_dir(&mut self, dir: String) {
+        self.default_save_dir = dir;
     }
 
     /// Update global speed limit (bytes/sec).  Takes effect immediately on
@@ -178,28 +236,39 @@ impl DownloadManager {
             .map_err(|e| downloader::DownloadError::Other(
                 format!("BT session init thread panicked: {e}"),
             ))??;
-            self.bt_session = Some(session);
+            self.bt_session = Some(Arc::new(session));
         }
         Ok(())
     }
 
-    /// Whether we have a free slot for a new download.
+    /// Whether we have a free slot for a new HTTP/FTP download.
+    /// BT tasks are excluded from this count because they are managed by the
+    /// shared librqbit session with its own concurrency controls.
     fn has_capacity(&self) -> bool {
-        self.max_concurrent == 0 || self.active_tokens.len() < self.max_concurrent
+        if self.max_concurrent == 0 {
+            return true;
+        }
+        // Use saturating_sub to guard against underflow if bt_task_ids
+        // temporarily contains an entry not yet cleaned from active_tokens
+        // (e.g. generation mismatch in on_task_done).
+        let http_ftp_active = self.active_tokens.len().saturating_sub(self.bt_task_ids.len());
+        http_ftp_active < self.max_concurrent
     }
 
     /// Try to start tasks from the pending queue until we run out of capacity.
     async fn drain_queue(&mut self) {
         while self.has_capacity() {
-            let Some(queued) = self.pending_queue.first() else {
+            let Some(queued) = self.pending_queue.front() else {
                 break;
             };
             // Check if task is already running (edge case: resume while queued).
             if self.active_tokens.contains_key(&queued.task_id) {
-                self.pending_queue.remove(0);
+                self.pending_queue.pop_front();
                 continue;
             }
-            let queued = self.pending_queue.remove(0);
+            let Some(queued) = self.pending_queue.pop_front() else {
+                break;
+            };
             if queued.is_resume {
                 self.do_resume_task(&queued.task_id).await;
             } else {
@@ -228,6 +297,7 @@ impl DownloadManager {
             && *stored_gen == generation {
                 self.active_tokens.remove(task_id);
                 self.active_handles.remove(task_id);
+                self.bt_task_ids.remove(task_id);
             }
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
@@ -324,10 +394,15 @@ impl DownloadManager {
         }
         .send_signal_to_dart();
 
-        // Check concurrency limit before starting.
-        if self.has_capacity() {
+        // BT tasks bypass the HTTP/FTP concurrency queue — they are managed
+        // by the shared librqbit session with its own concurrency controls.
+        let is_bt = is_magnet(&url);
+        if is_bt || self.has_capacity() {
             self.do_start_task(task_id, url, save_dir, file_name, seg, cookies)
                 .await;
+            // If do_start_task failed early (e.g. BT session init), the slot
+            // was freed — drain the queue so pending tasks can proceed.
+            self.drain_queue().await;
         } else {
             rinf::debug_print!(
                 "[manager] queuing task {} (active={}, max={})",
@@ -335,7 +410,7 @@ impl DownloadManager {
                 self.active_tokens.len(),
                 self.max_concurrent
             );
-            self.pending_queue.push(QueuedTask {
+            self.pending_queue.push_back(QueuedTask {
                 task_id,
                 url,
                 save_dir,
@@ -366,6 +441,10 @@ impl DownloadManager {
         let use_ftp = is_ftp_url(&url);
         let use_bt = is_magnet(&url);
 
+        if use_bt {
+            self.bt_task_ids.insert(task_id.clone());
+        }
+
         let done_tx = self.done_tx.clone();
         let panic_progress_tx = self.progress_tx.clone();
         let panic_task_id = task_id.clone();
@@ -388,21 +467,27 @@ impl DownloadManager {
                     })
                     .await;
                 self.active_tokens.remove(&task_id);
+                self.bt_task_ids.remove(&task_id);
                 return;
             }
-            // bt_session is now guaranteed to be Some after ensure_bt_session().
-            let bt_ref = self.bt_session.as_ref().unwrap_or_else(|| unreachable!());
+            // bt_session is guaranteed to be Some after ensure_bt_session().
+            let Some(bt_ref) = self.bt_session.as_ref() else {
+                rinf::debug_print!("[manager] BUG: bt_session is None after ensure_bt_session succeeded");
+                self.active_tokens.remove(&task_id);
+                return;
+            };
 
             let bt_params = BtDownloadParams {
                 task_id: task_id.clone(),
                 magnet_url: url,
                 save_dir,
-                file_name,
                 db: self.db.clone(),
                 progress_tx: self.progress_tx.clone(),
                 cancel_token,
                 session: bt_ref.session(),
                 bt_runtime: bt_ref.runtime_handle(),
+                shared_bt: bt_ref.clone(),
+                existing_handle: None,
             };
 
             tokio::spawn(async move {
@@ -411,26 +496,8 @@ impl DownloadManager {
                     .await;
 
                 if let Err(panic_info) = result {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "internal panic".to_string()
-                    };
-                    rinf::debug_print!("[download] PANIC in BT task {}: {}", panic_task_id, msg);
-                    let _ = panic_db.update_task_status(&panic_task_id, 4, &msg).await;
-                    let _ = panic_progress_tx
-                        .send(ProgressUpdate {
-                            task_id: panic_task_id.clone(),
-                            downloaded_bytes: 0,
-                            total_bytes: 0,
-                            status: 4,
-                            error_message: msg,
-                            file_name: String::new(),
-                            segment_details: None,
-                        })
-                        .await;
+                    let msg = panic_message(&panic_info);
+                    handle_task_panic(&panic_task_id, &msg, &panic_db, &panic_progress_tx).await;
                 }
 
                 let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
@@ -463,26 +530,8 @@ impl DownloadManager {
                 };
 
                 if let Err(panic_info) = result {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "internal panic".to_string()
-                    };
-                    rinf::debug_print!("[download] PANIC in task {}: {}", panic_task_id, msg);
-                    let _ = panic_db.update_task_status(&panic_task_id, 4, &msg).await;
-                    let _ = panic_progress_tx
-                        .send(ProgressUpdate {
-                            task_id: panic_task_id.clone(),
-                            downloaded_bytes: 0,
-                            total_bytes: 0,
-                            status: 4,
-                            error_message: msg,
-                            file_name: String::new(),
-                            segment_details: None,
-                        })
-                        .await;
+                    let msg = panic_message(&panic_info);
+                    handle_task_panic(&panic_task_id, &msg, &panic_db, &panic_progress_tx).await;
                 }
 
                 let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
@@ -515,6 +564,17 @@ impl DownloadManager {
 
         if let Some((token, _gen)) = self.active_tokens.remove(task_id) {
             token.cancel();
+            self.bt_task_ids.remove(task_id);
+
+            // For BT tasks, explicitly pause the torrent in the session so
+            // that the handle stays cached for fast resume.  This is a
+            // no-op if the download loop already called session.pause on
+            // cancellation detection, but covers edge cases (e.g. pause
+            // during metadata resolution).
+            if let Some(ref bt) = self.bt_session {
+                let _ = bt.pause_task(task_id).await;
+            }
+
             let _ = self.db.update_task_status(task_id, 2, "").await;
 
             if let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
@@ -551,9 +611,18 @@ impl DownloadManager {
             return;
         }
 
-        // Check concurrency limit before starting.
-        if self.has_capacity() {
+        // BT tasks bypass the HTTP/FTP concurrency queue.
+        let is_bt = self.db.load_task_by_id(task_id).await
+            .ok()
+            .flatten()
+            .map(|t| is_magnet(&t.url))
+            .unwrap_or(false);
+
+        if is_bt || self.has_capacity() {
             self.do_resume_task(task_id).await;
+            // If do_resume_task failed early (e.g. BT session init), drain
+            // the queue so pending tasks can proceed.
+            self.drain_queue().await;
         } else {
             rinf::debug_print!(
                 "[manager] queuing resume for task {} (active={}, max={})",
@@ -563,7 +632,7 @@ impl DownloadManager {
             );
             // Load task info for the queue entry.
             if let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
-                self.pending_queue.push(QueuedTask {
+                self.pending_queue.push_back(QueuedTask {
                     task_id: task_id.to_string(),
                     url: t.url,
                     save_dir: t.save_dir,
@@ -596,6 +665,10 @@ impl DownloadManager {
         let use_ftp = is_ftp_url(&task.url);
         let use_bt = is_magnet(&task.url);
 
+        if use_bt {
+            self.bt_task_ids.insert(task_id.to_string());
+        }
+
         let tid = task_id.to_string();
         let done_tx = self.done_tx.clone();
         let panic_progress_tx = self.progress_tx.clone();
@@ -619,21 +692,59 @@ impl DownloadManager {
                     })
                     .await;
                 self.active_tokens.remove(task_id);
+                self.bt_task_ids.remove(task_id);
                 return;
             }
-            // bt_session is now guaranteed to be Some after ensure_bt_session().
-            let bt_ref = self.bt_session.as_ref().unwrap_or_else(|| unreachable!());
+            // bt_session is guaranteed to be Some after ensure_bt_session().
+            let Some(bt_ref) = self.bt_session.as_ref() else {
+                rinf::debug_print!("[manager] BUG: bt_session is None after ensure_bt_session succeeded");
+                self.active_tokens.remove(task_id);
+                return;
+            };
+
+            // Try to resume from a cached handle (pause→resume within the
+            // same app session).  If the handle is found, unpause it and
+            // pass it to the download loop so it skips add_torrent entirely.
+            let mut existing = match bt_ref.resume_task(task_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    rinf::debug_print!("[manager] BT resume_task error (will re-add): {}", e);
+                    None
+                }
+            };
+
+            // Guard: if the user deleted the download files while the task
+            // was paused (within the same app session), the cached handle's
+            // in-memory piece bitfield is stale.  Reusing it would produce a
+            // corrupt file because librqbit thinks pieces are present when
+            // the underlying data is gone.  Detect this by checking whether
+            // the output path still exists on disk.  If not, discard the
+            // cached handle so that add_torrent runs full re-verification.
+            if existing.is_some() && !task.file_name.is_empty() {
+                let output_path = PathBuf::from(&task.save_dir).join(&task.file_name);
+                if !output_path.exists() {
+                    rinf::debug_print!(
+                        "[manager] BT task {} output missing ({}), discarding cached handle for re-verify",
+                        task_id, output_path.display()
+                    );
+                    // Delete the stale torrent from the session so add_torrent
+                    // can re-add it fresh with proper piece verification.
+                    bt_ref.delete_task(task_id, false).await;
+                    existing = None;
+                }
+            }
 
             let bt_params = BtDownloadParams {
                 task_id: tid.clone(),
                 magnet_url: task.url,
                 save_dir: task.save_dir,
-                file_name: task.file_name,
                 db: self.db.clone(),
                 progress_tx: self.progress_tx.clone(),
                 cancel_token,
                 session: bt_ref.session(),
                 bt_runtime: bt_ref.runtime_handle(),
+                shared_bt: bt_ref.clone(),
+                existing_handle: existing,
             };
 
             tokio::spawn(async move {
@@ -642,26 +753,8 @@ impl DownloadManager {
                     .await;
 
                 if let Err(panic_info) = result {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "internal panic".to_string()
-                    };
-                    rinf::debug_print!("[download] PANIC in BT task {}: {}", panic_task_id, msg);
-                    let _ = panic_db.update_task_status(&panic_task_id, 4, &msg).await;
-                    let _ = panic_progress_tx
-                        .send(ProgressUpdate {
-                            task_id: panic_task_id.clone(),
-                            downloaded_bytes: 0,
-                            total_bytes: 0,
-                            status: 4,
-                            error_message: msg,
-                            file_name: String::new(),
-                            segment_details: None,
-                        })
-                        .await;
+                    let msg = panic_message(&panic_info);
+                    handle_task_panic(&panic_task_id, &msg, &panic_db, &panic_progress_tx).await;
                 }
 
                 let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
@@ -694,26 +787,8 @@ impl DownloadManager {
                 };
 
                 if let Err(panic_info) = result {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "internal panic".to_string()
-                    };
-                    rinf::debug_print!("[download] PANIC in task {}: {}", panic_task_id, msg);
-                    let _ = panic_db.update_task_status(&panic_task_id, 4, &msg).await;
-                    let _ = panic_progress_tx
-                        .send(ProgressUpdate {
-                            task_id: panic_task_id.clone(),
-                            downloaded_bytes: 0,
-                            total_bytes: 0,
-                            status: 4,
-                            error_message: msg,
-                            file_name: String::new(),
-                            segment_details: None,
-                        })
-                        .await;
+                    let msg = panic_message(&panic_info);
+                    handle_task_panic(&panic_task_id, &msg, &panic_db, &panic_progress_tx).await;
                 }
 
                 let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
@@ -730,7 +805,18 @@ impl DownloadManager {
 
         if let Some((token, _gen)) = self.active_tokens.remove(task_id) {
             token.cancel();
+            self.bt_task_ids.remove(task_id);
+
+            // For BT tasks, explicitly pause the torrent in the session so
+            // that fast-resume data is preserved and the user can resume later.
+            // This mirrors what pause_task does for BT tasks.
+            if let Some(ref bt) = self.bt_session {
+                let _ = bt.pause_task(task_id).await;
+            }
         }
+        // Clean up the JoinHandle so it doesn't linger after cancellation.
+        self.active_handles.remove(task_id);
+
         let _ = self.db.update_task_status(task_id, 4, "cancelled").await;
 
         // Send update with actual task info if available
@@ -772,6 +858,7 @@ impl DownloadManager {
         // to exit, ensuring all network sockets and file handles are closed.
         if let Some((token, _gen)) = self.active_tokens.remove(task_id) {
             token.cancel();
+            self.bt_task_ids.remove(task_id);
         }
         if let Some(handle) = self.active_handles.remove(task_id) {
             // Timeout guard: don't block forever if the task misbehaves.
@@ -784,12 +871,32 @@ impl DownloadManager {
 
         if let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
             let path = PathBuf::from(&t.save_dir).join(&t.file_name);
-            // Always clean up the in-progress temp file (.fdownloading)
-            let temp_path = PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
-            let _ = tokio::fs::remove_file(&temp_path).await;
 
-            if delete_files {
-                let _ = tokio::fs::remove_file(&path).await;
+            if is_magnet(&t.url) {
+                // Permanently remove from librqbit session (clears
+                // persistence data and optionally deletes files via
+                // librqbit's own cleanup).
+                if let Some(ref bt) = self.bt_session {
+                    bt.delete_task(task_id, delete_files).await;
+                }
+                // Fallback: if librqbit didn't delete files (e.g. session
+                // wasn't initialised), clean up manually.
+                if delete_files && path.exists() {
+                    if path.is_dir() {
+                        let _ = tokio::fs::remove_dir_all(&path).await;
+                    } else {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                }
+            } else {
+                // HTTP / FTP: always clean up the in-progress temp file
+                let temp_path =
+                    PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
+                let _ = tokio::fs::remove_file(&temp_path).await;
+
+                if delete_files {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
             }
         }
 
@@ -797,6 +904,33 @@ impl DownloadManager {
 
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
+    }
+}
+
+impl Drop for DownloadManager {
+    fn drop(&mut self) {
+        // Cancel all active downloads (non-blocking, just sets atomic flags).
+        for (_tid, (token, _gen)) in self.active_tokens.drain() {
+            token.cancel();
+        }
+        self.bt_task_ids.clear();
+        self.pending_queue.clear();
+
+        // Shut down the BT session on a dedicated thread to avoid deadlock.
+        // `SharedBtSession::shutdown()` calls `runtime.block_on()`, which
+        // panics if called from within a tokio runtime context.  Spawning a
+        // std thread guarantees we are outside any runtime.
+        if let Some(bt) = self.bt_session.take() {
+            std::thread::spawn(move || {
+                match Arc::try_unwrap(bt) {
+                    Ok(owned) => owned.shutdown(),
+                    Err(shared) => shared.shutdown(),
+                }
+            });
+            // Note: we intentionally don't join the thread — the BT runtime
+            // shutdown is best-effort on app exit.  The OS will reclaim
+            // resources if it doesn't finish in time.
+        }
     }
 }
 

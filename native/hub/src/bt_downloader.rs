@@ -17,14 +17,22 @@
 //! - `add_torrent` blocks while resolving magnet metadata from DHT/peers, so
 //!   we report "preparing" status to Dart while we wait.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use librqbit::{AddTorrent, AddTorrentOptions, PeerConnectionOptions, Session, SessionOptions};
-use tokio::sync::mpsc;
+use librqbit::{
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
+    PeerConnectionOptions, Session, SessionOptions, SessionPersistenceConfig,
+};
+
+/// Alias for librqbit's `BtHandle` (`Arc<ManagedTorrent>`).
+/// The upstream type is not re-exported, so we define it locally.
+pub type BtHandle = Arc<ManagedTorrent>;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
@@ -34,9 +42,19 @@ use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
 // Public helpers
 // ---------------------------------------------------------------------------
 
+/// Truncate an identifier to at most 8 characters for log output.
+/// Returns the full string if shorter than 8 characters, avoiding panic
+/// from direct byte-index slicing on short or multi-byte strings.
+#[inline]
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 /// Returns `true` if the URL looks like a magnet link.
 pub fn is_magnet_url(url: &str) -> bool {
-    url.len() >= 8 && url[..8].eq_ignore_ascii_case("magnet:?")
+    url.get(..8)
+        .map(|prefix| prefix.eq_ignore_ascii_case("magnet:?"))
+        .unwrap_or(false)
 }
 
 /// Extract the `dn=` (display name) parameter from a magnet URI, if present.
@@ -49,22 +67,67 @@ fn magnet_display_name(url: &str) -> Option<String> {
         .map(urlencoding_decode)
 }
 
-/// Minimal percent-decoding for `dn=` values.
+/// Minimal percent-decoding for `dn=` values (UTF-8 safe).
+///
+/// Collects percent-encoded bytes into a buffer and decodes them as UTF-8,
+/// correctly handling multi-byte characters (e.g. CJK, emoji).
+///
+/// Incomplete `%` sequences at the end of the input (e.g. `%`, `%A`) are
+/// treated as literal characters rather than silently padded with zeros.
 fn urlencoding_decode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let mut chars = input.as_bytes().iter();
-    while let Some(&b) = chars.next() {
-        match b {
-            b'+' => out.push(' '),
-            b'%' => {
-                let hi = chars.next().copied().unwrap_or(b'0');
-                let lo = chars.next().copied().unwrap_or(b'0');
-                let val = hex_val(hi) << 4 | hex_val(lo);
-                out.push(val as char);
+    let mut bytes_buf: Vec<u8> = Vec::new();
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    // Flush accumulated percent-encoded bytes as UTF-8 into `out`.
+    let flush = |buf: &mut Vec<u8>, out: &mut String| {
+        if !buf.is_empty() {
+            match std::str::from_utf8(buf) {
+                Ok(s) => out.push_str(s),
+                Err(_) => {
+                    // Fallback: replace invalid UTF-8 with replacement char
+                    out.push(char::REPLACEMENT_CHARACTER);
+                }
             }
-            _ => out.push(b as char),
+            buf.clear();
+        }
+    };
+
+    while i < len {
+        match bytes[i] {
+            b'+' => {
+                flush(&mut bytes_buf, &mut out);
+                out.push(' ');
+                i += 1;
+            }
+            b'%' if i + 2 < len => {
+                // Full %XX sequence — decode as a byte.
+                let hi = bytes[i + 1];
+                let lo = bytes[i + 2];
+                bytes_buf.push(hex_val(hi) << 4 | hex_val(lo));
+                i += 3;
+            }
+            b'%' => {
+                // Incomplete `%` at end of string — emit as literal.
+                flush(&mut bytes_buf, &mut out);
+                out.push('%');
+                i += 1;
+                // Also emit any remaining characters after `%` literally.
+                while i < len {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            b => {
+                flush(&mut bytes_buf, &mut out);
+                out.push(b as char);
+                i += 1;
+            }
         }
     }
+    flush(&mut bytes_buf, &mut out);
     out
 }
 
@@ -88,57 +151,37 @@ fn hex_val(b: u8) -> u8 {
 /// Strategy: CN/Asia trackers first (better peer locality for domestic users),
 /// then international trackers.  UDP-heavy (lowest overhead), with HTTPS
 /// fallbacks for restrictive network environments where UDP may be blocked.
+///
+/// Kept to ~25 high-availability trackers to minimise DNS/connect overhead
+/// while still providing excellent global peer coverage.  All tracker
+/// connections are async and parallel, so startup impact is minimal.
 const PUBLIC_TRACKERS: &[&str] = &[
     // ─── CN / Asia — better peer discovery for domestic users ───
     "udp://tracker.dler.com:6969/announce",
     "udp://admin.52ywp.com:6969/announce",
     "udp://tracker.dler.org:6969/announce",
-    "udp://tracker.ixuexi.click:6969/announce",
-    "http://tracker.renfei.net:8080/announce",
     "https://tracker.moeblog.cn:443/announce",
-    "https://tracker.zhuqiy.com:443/announce",
-    "https://tr.nyacat.pw:443/announce",
     "http://nyaa.tracker.wf:7777/announce",
     "https://tr.zukizuki.org:443/announce",
-    // ─── International — top-tier, low latency, high uptime ───
+    // ─── International — top-tier, highest uptime ───
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.dstud.io:6969/announce",
     "udp://tracker-udp.gbitt.info:80/announce",
     "udp://open.stealth.si:80/announce",
     "udp://tracker.torrent.eu.org:451/announce",
-    "udp://open.demonii.com:1337/announce",
     "udp://exodus.desync.com:6969/announce",
     "udp://explodie.org:6969/announce",
-    "udp://tracker.fnix.net:6969/announce",
     "udp://tracker.srv00.com:6969/announce",
     "udp://tracker.qu.ax:6969/announce",
     "udp://opentracker.io:6969/announce",
     "udp://tracker.bittor.pw:1337/announce",
-    "udp://leet-tracker.moe:1337/announce",
     "udp://tracker.theoks.net:6969/announce",
-    "udp://tracker.corpscorp.online:80/announce",
     "udp://tracker.opentorrent.top:6969/announce",
-    "udp://tracker.torrust-demo.com:6969/announce",
-    "udp://tracker.gmi.gd:6969/announce",
-    "udp://tracker.1h.is:1337/announce",
-    "udp://retracker.lanta.me:2710/announce",
-    "udp://tracker.ducks.party:1984/announce",
     "udp://open.demonoid.ch:6969/announce",
-    "udp://utracker.ghostchu-services.top:6969/announce",
-    "udp://evan.im:6969/announce",
-    "udp://tracker.plx.im:6969/announce",
     "udp://tracker.t-1.org:6969/announce",
-    "udp://tracker.flatuslifir.is:6969/announce",
-    "udp://tracker.sharebro.in:6969/announce",
-    "udp://tracker.playground.ru:6969/announce",
-    "udp://tracker.bluefrog.pw:2710/announce",
-    "udp://wepzone.net:6969/announce",
-    "udp://udp.tracker.projectk.org:23333/announce",
     // ─── HTTPS fallbacks — for networks that block UDP ───
     "https://tracker.ghostchu-services.top:443/announce",
-    "https://tracker.iochimari.moe:443/announce",
     "https://tracker.bt4g.com:443/announce",
-    "https://t.213891.xyz:443/announce",
     "https://1337.abcvg.info:443/announce",
     "http://tracker.bt4g.com:2095/announce",
 ];
@@ -151,9 +194,19 @@ const PUBLIC_TRACKERS: &[&str] = &[
 /// single `librqbit::Session`.  All BT tasks share this instance, which
 /// means they share DHT routing tables, tracker connections, and the
 /// listening port — dramatically reducing resource usage.
+///
+/// Torrent handles are cached in `handles` so that pause/resume cycles
+/// use the native `Session::pause` / `Session::unpause` API instead of
+/// deleting and re-adding the torrent.  This preserves fast-resume data
+/// (piece bitfield) and avoids expensive re-verification of already
+/// downloaded pieces.
 pub struct SharedBtSession {
     runtime: tokio::runtime::Runtime,
     session: Arc<Session>,
+    /// Maps our `task_id` → librqbit `BtHandle`.
+    /// Protected by an async Mutex because it's accessed from both the
+    /// main actor (pause/delete) and spawned download tasks (add/finish).
+    handles: Mutex<HashMap<String, BtHandle>>,
 }
 
 impl SharedBtSession {
@@ -184,7 +237,11 @@ impl SharedBtSession {
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        let download_bps = NonZeroU32::new(speed_limit_bps as u32);
+        let download_bps = NonZeroU32::new(speed_limit_bps.min(u32::MAX as u64) as u32);
+
+        // Persistence folder: store session.json + {hash}.bitv + {hash}.torrent
+        // alongside the download database so everything is co-located.
+        let persistence_folder = PathBuf::from(default_save_dir).join(".fluxdown_bt");
 
         let save_dir = default_save_dir.to_owned();
         let session = rt.block_on(async {
@@ -208,8 +265,14 @@ impl SharedBtSession {
                     read_write_timeout: Some(Duration::from_secs(20)),
                     ..Default::default()
                 }),
+                // Enable persistence so that session.json and per-torrent
+                // .bitv (piece bitfield) files are written to disk.
+                persistence: Some(SessionPersistenceConfig::Json {
+                    folder: Some(persistence_folder),
+                }),
                 // Fast-resume: persist piece completion state so that
                 // paused/restarted torrents can skip re-verification.
+                // Requires `persistence` to be set to take effect.
                 fastresume: true,
                 // Buffer up to 128 MiB of writes in memory before flushing
                 // to disk.  Reduces I/O contention from many small pieces
@@ -226,20 +289,24 @@ impl SharedBtSession {
         }).map_err(|e| DownloadError::Other(format!("BT session init failed: {e}")))?;
 
         rinf::debug_print!(
-            "[BT] shared session created (DHT + {} trackers, speed_limit={} B/s, worker_threads={})",
+            "[BT] shared session created (DHT + {} trackers, speed_limit={} B/s, worker_threads={}, persistence=on)",
             PUBLIC_TRACKERS.len(),
             speed_limit_bps,
             worker_threads
         );
 
-        Ok(Self { runtime: rt, session })
+        Ok(Self {
+            runtime: rt,
+            session,
+            handles: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Update the global download speed limit at runtime.
     /// `bps == 0` means unlimited.  Takes effect immediately on all active
     /// BT downloads.
     pub fn set_speed_limit(&self, bps: u64) {
-        let limit = NonZeroU32::new(bps as u32);
+        let limit = NonZeroU32::new(bps.min(u32::MAX as u64) as u32);
         self.session.ratelimits.set_download_bps(limit);
         rinf::debug_print!("[BT] shared session speed limit updated to {} B/s", bps);
     }
@@ -253,6 +320,97 @@ impl SharedBtSession {
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
     }
+
+    /// Store a torrent handle for a task so it can be paused/resumed later.
+    pub async fn store_handle(&self, task_id: &str, handle: BtHandle) {
+        self.handles.lock().await.insert(task_id.to_string(), handle);
+    }
+
+    /// Remove and return the cached handle for a task.
+    pub async fn take_handle(&self, task_id: &str) -> Option<BtHandle> {
+        self.handles.lock().await.remove(task_id)
+    }
+
+    /// Pause a BT torrent by task_id.  The handle stays cached so that
+    /// `resume_handle` can unpause it without re-adding.
+    pub async fn pause_task(&self, task_id: &str) -> Result<(), DownloadError> {
+        // Clone the Arc handle and release the lock immediately so that
+        // the async session.pause() call doesn't block other handle ops.
+        let handle = self.handles.lock().await.get(task_id).cloned();
+        if let Some(handle) = handle {
+            // If already paused or initializing, ignore silently.
+            if !handle.is_paused() {
+                self.session.pause(&handle).await.map_err(|e| {
+                    DownloadError::Other(format!("BT pause failed: {e}"))
+                })?;
+            }
+            rinf::debug_print!("[BT] task={} paused via session API", short_id(task_id));
+        }
+        Ok(())
+    }
+
+    /// Resume a previously paused BT torrent.  Returns the handle if
+    /// successful, or `None` if no cached handle exists (caller should
+    /// fall back to `add_torrent`).
+    pub async fn resume_task(&self, task_id: &str) -> Result<Option<BtHandle>, DownloadError> {
+        // Clone the Arc handle and release the lock immediately.
+        let handle = self.handles.lock().await.get(task_id).cloned();
+        if let Some(handle) = handle {
+            if handle.is_paused() {
+                self.session.unpause(&handle).await.map_err(|e| {
+                    DownloadError::Other(format!("BT unpause failed: {e}"))
+                })?;
+                rinf::debug_print!("[BT] task={} resumed via session API", short_id(task_id));
+            }
+            Ok(Some(handle))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Gracefully shut down the BT session and runtime.
+    ///
+    /// Pauses all active torrents, then shuts down the runtime with a timeout.
+    /// Called when the application exits to ensure clean resource release.
+    pub fn shutdown(&self) {
+        rinf::debug_print!("[BT] shutting down shared session...");
+        // Use the runtime to gracefully close the session.  The session's
+        // drop will attempt to persist DHT state and piece bitfields.
+        // We give it a generous timeout to allow disk writes to complete.
+        self.runtime.block_on(async {
+            // Pause all tracked torrents so they flush state to disk.
+            let handles: Vec<(String, BtHandle)> = {
+                let map = self.handles.lock().await;
+                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            };
+            for (tid, handle) in &handles {
+                if !handle.is_paused()
+                    && let Err(e) = self.session.pause(handle).await
+                {
+                    rinf::debug_print!("[BT] shutdown: failed to pause task {}: {}", short_id(tid), e);
+                }
+            }
+        });
+        // The Runtime::drop will be called after this, which blocks until
+        // all spawned tasks finish (or the runtime forces them to stop).
+        rinf::debug_print!("[BT] shared session shutdown complete");
+    }
+
+    /// Permanently delete a torrent from the session, removing persistence
+    /// data.  `delete_files` controls whether downloaded data is also removed.
+    pub async fn delete_task(&self, task_id: &str, delete_files: bool) {
+        // Remove from map first (under lock), then perform async deletion
+        // outside the lock to minimise contention.
+        let handle = self.handles.lock().await.remove(task_id);
+        if let Some(handle) = handle {
+            let torrent_id = handle.id();
+            if let Err(e) = self.session.delete(torrent_id.into(), delete_files).await {
+                rinf::debug_print!("[BT] task={} session.delete error: {}", short_id(task_id), e);
+            } else {
+                rinf::debug_print!("[BT] task={} deleted from session (delete_files={})", short_id(task_id), delete_files);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +421,6 @@ pub struct BtDownloadParams {
     pub task_id: String,
     pub magnet_url: String,
     pub save_dir: String,
-    pub file_name: String,
     pub db: Db,
     pub progress_tx: mpsc::Sender<ProgressUpdate>,
     pub cancel_token: CancellationToken,
@@ -271,6 +428,11 @@ pub struct BtDownloadParams {
     pub session: Arc<Session>,
     /// Handle to the shared BT runtime.
     pub bt_runtime: tokio::runtime::Handle,
+    /// Shared session wrapper — used to cache the handle after add_torrent.
+    pub shared_bt: Arc<SharedBtSession>,
+    /// If resuming a paused torrent, this is the existing handle.
+    /// When `Some`, we skip `add_torrent` and go straight to the progress loop.
+    pub existing_handle: Option<BtHandle>,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,21 +451,21 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     let task_id = params.task_id.clone();
 
     // 1. Switch to "preparing" status
-    let _ = params.db.update_task_status(&task_id, 5, "").await;
+    let _ = params.db.update_task_status(&task_id, STATUS_PREPARING, "").await;
     let _ = params
         .progress_tx
         .send(ProgressUpdate {
             task_id: task_id.clone(),
             downloaded_bytes: 0,
             total_bytes: 0,
-            status: 5,
+            status: STATUS_PREPARING,
             error_message: String::new(),
             file_name: String::new(),
             segment_details: None,
         })
         .await;
 
-    rinf::debug_print!("[BT] task={} starting bt download (shared session)...", &task_id[..8]);
+    rinf::debug_print!("[BT] task={} starting bt download (shared session)...", short_id(&task_id));
 
     // 2. Run the actual BT download on the shared multi-thread runtime.
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -321,27 +483,32 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     let db = params.db.clone();
     let magnet_url = params.magnet_url.clone();
     let save_dir = params.save_dir.clone();
-    let file_name = params.file_name.clone();
     let tid = task_id.clone();
     let session = params.session.clone();
     let bt_runtime = params.bt_runtime.clone();
+    let shared_bt = params.shared_bt.clone();
+    let existing_handle = params.existing_handle;
 
-    // spawn_blocking so we can .block_on the BT runtime from within
-    // the main current_thread runtime without conflict.
+    // Spawn the BT download on the shared multi-thread BT runtime.
+    // The returned JoinHandle can be safely .await-ed from any runtime
+    // (including our current_thread main runtime) — it uses waker-based
+    // notification, not runtime-specific polling.  This avoids occupying
+    // a thread from tokio's blocking thread pool for the entire download
+    // duration, which previously caused thread-pool starvation under
+    // many concurrent BT tasks.
     let inner_params = BtInnerParams {
         task_id: tid,
         magnet_url,
         save_dir,
-        file_name,
         db,
         progress_tx,
         cancelled: cancelled_clone,
         session,
+        shared_bt,
+        existing_handle,
     };
-    let result = tokio::task::spawn_blocking(move || {
-        bt_runtime.block_on(async move {
-            bt_download_inner(inner_params).await
-        })
+    let result = bt_runtime.spawn(async move {
+        bt_download_inner(inner_params).await
     })
     .await;
 
@@ -363,13 +530,23 @@ struct BtInnerParams {
     task_id: String,
     magnet_url: String,
     save_dir: String,
-    #[allow(dead_code)]
-    file_name: String,
     db: Db,
     progress_tx: mpsc::Sender<ProgressUpdate>,
     cancelled: Arc<AtomicBool>,
     session: Arc<Session>,
+    shared_bt: Arc<SharedBtSession>,
+    existing_handle: Option<BtHandle>,
 }
+
+// ---------------------------------------------------------------------------
+// Task status codes — must match Dart TaskStatus enum values.
+// ---------------------------------------------------------------------------
+const STATUS_DOWNLOADING: i32 = 1;
+#[allow(dead_code)]
+const STATUS_PAUSED: i32 = 2;
+const STATUS_COMPLETED: i32 = 3;
+const STATUS_ERROR: i32 = 4;
+const STATUS_PREPARING: i32 = 5;
 
 /// Number of virtual segments for single-file BT progress visualization.
 const BT_VIRTUAL_SEGMENTS: i32 = 16;
@@ -567,11 +744,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         task_id,
         magnet_url,
         save_dir,
-        file_name: _file_name,
         db,
         progress_tx,
         cancelled,
         session,
+        shared_bt,
+        existing_handle,
     } = p;
     // -----------------------------------------------------------------------
     // Phase 1: Send initial file name from dn= parameter so user sees something
@@ -585,7 +763,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 task_id: task_id.clone(),
                 downloaded_bytes: 0,
                 total_bytes: 0,
-                status: 5,
+                status: STATUS_PREPARING,
                 error_message: String::new(),
                 file_name: dn_name.clone(),
                 segment_details: None,
@@ -594,66 +772,91 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2: Add torrent to the shared session
+    // Phase 2: Obtain torrent handle
     //
-    // We specify output_folder per-torrent so each task saves to its own dir.
-    // The shared session's default folder is not used.
+    // If we have an existing handle (resumed from pause), just unpause it.
+    // Otherwise add a new torrent to the session.
     // -----------------------------------------------------------------------
 
-    let add_opts = AddTorrentOptions {
-        overwrite: true,
-        output_folder: Some(save_dir.clone()),
-        ..Default::default()
-    };
+    let handle = if let Some(h) = existing_handle {
+        rinf::debug_print!("[BT] task={} reusing existing handle (resume)", short_id(&task_id));
+        // Handle was already unpaused by SharedBtSession::resume_task,
+        // so we can go straight to the progress loop.
+        h
+    } else {
+        let add_opts = AddTorrentOptions {
+            overwrite: true,
+            output_folder: Some(save_dir.clone()),
+            ..Default::default()
+        };
 
-    rinf::debug_print!(
-        "[BT] task={} adding magnet to shared session (metadata resolution may take a while)...",
-        &task_id[..8]
-    );
+        rinf::debug_print!(
+            "[BT] task={} adding magnet to shared session (metadata resolution may take a while)...",
+            short_id(&task_id)
+        );
 
-    let session_for_add = session.clone();
-    let magnet_for_add = magnet_url.clone();
-    let add_handle = tokio::spawn(async move {
-        session_for_add
-            .add_torrent(AddTorrent::from_url(&magnet_for_add), Some(add_opts))
-            .await
-    });
+        let session_for_add = session.clone();
+        let magnet_for_add = magnet_url.clone();
+        let add_handle = tokio::spawn(async move {
+            session_for_add
+                .add_torrent(AddTorrent::from_url(&magnet_for_add), Some(add_opts))
+                .await
+        });
 
-    // Send "preparing" heartbeats while waiting for metadata.
-    let mut add_handle = add_handle;
-    let handle = loop {
-        if cancelled.load(Ordering::SeqCst) {
-            add_handle.abort();
-            return Err(DownloadError::Cancelled);
-        }
-
-        tokio::select! {
-            biased;
-            result = &mut add_handle => {
-                let resp = result
-                    .map_err(|e| DownloadError::Other(format!("BT add task panicked: {e}")))?
-                    .map_err(|e| DownloadError::Other(format!("BT add torrent failed: {e}")))?;
-                let h = resp.into_handle().ok_or_else(|| {
-                    DownloadError::Other("torrent returned no handle (list_only or duplicate?)".into())
-                })?;
-                rinf::debug_print!("[BT] task={} torrent added, id={}", &task_id[..8], h.id());
-                break h;
+        // Send "preparing" heartbeats while waiting for metadata.
+        let mut add_handle = add_handle;
+        let h = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                add_handle.abort();
+                return Err(DownloadError::Cancelled);
             }
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                rinf::debug_print!("[BT] task={} still resolving metadata...", &task_id[..8]);
-                let _ = progress_tx
-                    .send(ProgressUpdate {
-                        task_id: task_id.clone(),
-                        downloaded_bytes: 0,
-                        total_bytes: 0,
-                        status: 5, // preparing
-                        error_message: String::new(),
-                        file_name: String::new(),
-                        segment_details: None,
-                    })
-                    .await;
+
+            tokio::select! {
+                biased;
+                result = &mut add_handle => {
+                    let resp = result
+                        .map_err(|e| DownloadError::Other(format!("BT add task panicked: {e}")))?
+                        .map_err(|e| DownloadError::Other(format!("BT add torrent failed: {e}")))?;
+                    let h = match resp {
+                        AddTorrentResponse::Added(_id, handle) => {
+                            rinf::debug_print!("[BT] task={} torrent added, id={}", short_id(&task_id), _id);
+                            handle
+                        }
+                        AddTorrentResponse::AlreadyManaged(_id, handle) => {
+                            rinf::debug_print!("[BT] task={} torrent already in session, id={}", short_id(&task_id), _id);
+                            // Unpause if it was paused from a previous session
+                            if handle.is_paused() {
+                                let _ = session.unpause(&handle).await;
+                            }
+                            handle
+                        }
+                        AddTorrentResponse::ListOnly(_) => {
+                            return Err(DownloadError::Other(
+                                "torrent returned list_only response".into(),
+                            ));
+                        }
+                    };
+                    break h;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    rinf::debug_print!("[BT] task={} still resolving metadata...", short_id(&task_id));
+                    let _ = progress_tx
+                        .send(ProgressUpdate {
+                            task_id: task_id.clone(),
+                            downloaded_bytes: 0,
+                            total_bytes: 0,
+                            status: STATUS_PREPARING,
+                            error_message: String::new(),
+                            file_name: String::new(),
+                            segment_details: None,
+                        })
+                        .await;
+                }
             }
-        }
+        };
+        // Cache the handle for future pause/resume cycles.
+        shared_bt.store_handle(&task_id, h.clone()).await;
+        h
     };
 
     // -----------------------------------------------------------------------
@@ -664,7 +867,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let total_bytes = stats.total_bytes as i64;
     let resolved_name = handle.name().unwrap_or_else(|| {
         if dn_name.is_empty() {
-            format!("BT_{}", &task_id[..8])
+            format!("BT_{}", short_id(&task_id))
         } else {
             dn_name.clone()
         }
@@ -672,7 +875,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
     rinf::debug_print!(
         "[BT] task={} metadata resolved: name={}, total={} bytes",
-        &task_id[..8], &resolved_name, total_bytes
+        short_id(&task_id), &resolved_name, total_bytes
     );
 
     // Extract file layout info and piece count from torrent metadata.
@@ -691,7 +894,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
     rinf::debug_print!(
         "[BT] task={} files={}, total_pieces={}",
-        &task_id[..8],
+        short_id(&task_id),
         file_offsets.len(),
         total_pieces
     );
@@ -699,7 +902,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let _ = db
         .update_task_file_info(&task_id, &resolved_name, total_bytes)
         .await;
-    let _ = db.update_task_status(&task_id, 1, "").await;
+    let _ = db.update_task_status(&task_id, STATUS_DOWNLOADING, "").await;
 
     // Notify Dart of the transition to "downloading" with resolved info
     let init_progress = stats.progress_bytes as i64;
@@ -713,7 +916,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             task_id: task_id.clone(),
             downloaded_bytes: init_progress,
             total_bytes,
-            status: 1,
+            status: STATUS_DOWNLOADING,
             error_message: String::new(),
             file_name: resolved_name.clone(),
             segment_details: Some(build_bt_segments(
@@ -735,11 +938,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let mut last_db_save = Instant::now();
 
     loop {
-        // Check cancellation
+        // Check cancellation — the manager layer (pause_task / cancel_task)
+        // is responsible for calling session.pause() on the torrent handle,
+        // so we only need to exit the loop here.  This avoids a double-pause
+        // race where both the inner loop and the manager call session.pause().
         if cancelled.load(Ordering::SeqCst) {
-            rinf::debug_print!("[BT] task={} cancelled", &task_id[..8]);
-            let torrent_id = handle.id();
-            let _ = session.delete(torrent_id.into(), false).await;
+            rinf::debug_print!("[BT] task={} cancelled → exiting download loop", short_id(&task_id));
             return Err(DownloadError::Cancelled);
         }
 
@@ -751,33 +955,31 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             total_bytes
         };
 
-        // Check for error
+        // Check for error — keep the handle cached so user can retry.
         if let Some(ref err) = stats.error {
             let msg = format!("BT error: {err}");
-            rinf::debug_print!("[BT] task={} error: {}", &task_id[..8], &msg);
-            let _ = db.update_task_status(&task_id, 4, &msg).await;
+            rinf::debug_print!("[BT] task={} error: {}", short_id(&task_id), &msg);
+            let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
             let _ = progress_tx
                 .send(ProgressUpdate {
                     task_id: task_id.clone(),
                     downloaded_bytes: progress,
                     total_bytes: total,
-                    status: 4,
+                    status: STATUS_ERROR,
                     error_message: msg.clone(),
                     file_name: String::new(),
                     segment_details: None,
                 })
                 .await;
-            let torrent_id = handle.id();
-            let _ = session.delete(torrent_id.into(), false).await;
             return Err(DownloadError::Other(msg));
         }
 
         // Check if finished
         if stats.finished {
-            rinf::debug_print!("[BT] task={} finished! total={}", &task_id[..8], total);
+            rinf::debug_print!("[BT] task={} finished! total={}", short_id(&task_id), total);
 
             let final_total = if total > 0 { total } else { progress };
-            let _ = db.update_task_status(&task_id, 3, "").await;
+            let _ = db.update_task_status(&task_id, STATUS_COMPLETED, "").await;
             let _ = db.update_task_progress(&task_id, final_total).await;
             let _ = db.update_task_total_bytes(&task_id, final_total).await;
 
@@ -795,20 +997,25 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     task_id: task_id.clone(),
                     downloaded_bytes: final_total,
                     total_bytes: final_total,
-                    status: 3,
+                    status: STATUS_COMPLETED,
                     error_message: String::new(),
                     file_name: resolved_name.clone(),
                     segment_details: Some(finished_segs),
                 })
                 .await;
 
+            // Download complete — remove from session to free resources.
+            // Keep files on disk (delete_files=false).  Also remove from
+            // the handle cache since we no longer need to pause/resume.
+            shared_bt.take_handle(&task_id).await;
             let torrent_id = handle.id();
             let _ = session.delete(torrent_id.into(), false).await;
             return Ok(());
         }
 
-        // Periodic progress reporting (every 500ms)
-        if last_report.elapsed() >= Duration::from_millis(500) {
+        // Progress reporting — runs on every poll cycle (500ms).
+        // The elapsed check is kept as a safety guard against sleep jitter.
+        if last_report.elapsed() >= Duration::from_millis(450) {
             // Speed: librqbit Speed.mbps is actually MiB/s
             let speed_bps = stats
                 .live
@@ -838,15 +1045,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .unwrap_or(0);
 
             let status_code = match stats.state {
-                librqbit::TorrentStatsState::Live => 1,        // downloading
-                librqbit::TorrentStatsState::Initializing => 5, // preparing
-                librqbit::TorrentStatsState::Paused => 5,       // preparing (transitional)
-                librqbit::TorrentStatsState::Error => 4,        // error
+                librqbit::TorrentStatsState::Live => STATUS_DOWNLOADING,
+                librqbit::TorrentStatsState::Initializing => STATUS_PREPARING,
+                librqbit::TorrentStatsState::Paused => STATUS_PREPARING, // transitional
+                librqbit::TorrentStatsState::Error => STATUS_ERROR,
             };
 
             rinf::debug_print!(
                 "[BT] task={} state={:?} progress={}/{} pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={})",
-                &task_id[..8], stats.state, progress, total,
+                short_id(&task_id), stats.state, progress, total,
                 downloaded_pieces, total_pieces, speed_bps, upload_speed_bps,
                 peers_live, peers_connecting, peers_queued, peers_seen, peers_dead
             );
@@ -884,7 +1091,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             last_db_save = Instant::now();
         }
 
-        // Poll interval
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll interval — aligned with the progress reporting interval (500ms)
+        // to avoid wasted cycles.  Cancel detection latency of 500ms is
+        // acceptable since the manager layer handles session.pause() directly.
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }

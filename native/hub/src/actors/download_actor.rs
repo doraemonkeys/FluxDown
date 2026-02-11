@@ -9,7 +9,7 @@ use crate::native_messaging::{self};
 use crate::signals::{
     CheckForUpdate, ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateTask,
     DownloadUpdate, ExternalDownloadRequest, InstallUpdate, RequestAllTasks, RequestConfig,
-    SaveConfig,
+    SaveConfig, UpdateCheckResult,
 };
 use crate::updater;
 
@@ -153,6 +153,10 @@ pub async fn run(db_dir: PathBuf) {
                             manager.set_speed_limit(v);
                         }
                     }
+                    "default_save_dir" => {
+                        rinf::debug_print!("[actor] updating default_save_dir to {}", msg.value);
+                        manager.set_default_save_dir(msg.value);
+                    }
                     _ => {} // other config keys — no runtime action needed
                 }
             }
@@ -207,7 +211,21 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = check_update_recv.recv() => {
                 let version = signal.message.current_version;
                 tokio::spawn(async move {
-                    updater::check(&version).await;
+                    let result = std::panic::AssertUnwindSafe(
+                        updater::check(&version)
+                    );
+                    if futures_util::FutureExt::catch_unwind(result).await.is_err() {
+                        rinf::debug_print!("[updater] check panicked for version={}", version);
+                        UpdateCheckResult {
+                            has_update: false,
+                            latest_version: String::new(),
+                            current_version: version,
+                            download_url: String::new(),
+                            file_size: 0,
+                            published_at: String::new(),
+                            error_message: "internal error (panic)".to_string(),
+                        }.send_signal_to_dart();
+                    }
                 });
             }
             Some(signal) = download_update_recv.recv() => {

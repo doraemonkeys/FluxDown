@@ -22,9 +22,10 @@ export function FloatingNavbar({
   const { locale, setLocale, t } = useLocale();
 
   const navItems = [
-    { name: t("nav.features"), link: "#features" },
-    { name: t("nav.extension"), link: "#download" },
-    { name: t("nav.download"), link: "#download" },
+    { name: t("nav.features"), link: "/#features" },
+    { name: t("nav.extension"), link: "/#extension" },
+    { name: t("nav.download"), link: "/#download" },
+    { name: t("nav.feedback"), link: "/feedback" },
   ];
 
   useEffect(() => {
@@ -135,7 +136,7 @@ export function FloatingNavbar({
 
             {/* CTA */}
             <a
-              href="#download"
+              href="/#download"
               className="inline-flex items-center gap-1.5 rounded-full bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors"
             >
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

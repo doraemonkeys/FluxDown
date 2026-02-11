@@ -224,8 +224,9 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     TrayService.instance.refreshMenu();
   }
 
-  /// 优雅退出 — 等待待处理通知完成 → 销毁托盘 → 销毁窗口。
+  /// 优雅退出 — 隐藏窗口 → 清理资源 → 销毁窗口。
   /// 由托盘「退出」菜单和窗口关闭（closeToTray=false）共用。
+  /// 先隐藏窗口让用户感知「秒退」，再后台执行清理。
   Future<void> _performGracefulExit() async {
     logInfo(
       'FluxDownApp',
@@ -236,14 +237,18 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     _isExiting = true;
 
     try {
-      // 标记通知服务停止接受新请求
+      // 立即隐藏窗口，给用户「秒退」的视觉反馈
+      logInfo('FluxDownApp', 'hiding window immediately...');
+      await windowManager.hide();
+
+      // 后台清理：通知服务 → 托盘图标
       logInfo('FluxDownApp', 'shutting down NotificationService...');
       NotificationService.instance.shutdown();
-      // 等待所有正在创建中的通知窗口完成，避免通知丢失
       logInfo('FluxDownApp', 'waiting for pending notifications...');
       await NotificationService.instance.waitForPending();
       logInfo('FluxDownApp', 'destroying tray...');
       await TrayService.instance.destroy();
+
       logInfo('FluxDownApp', 'destroying window...');
       await windowManager.destroy();
       logInfo('FluxDownApp', 'graceful exit complete');

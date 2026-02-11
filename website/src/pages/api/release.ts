@@ -30,6 +30,7 @@ const CACHE_TTL = 60_000;
 interface GitHubAsset {
   name: string;
   size: number;
+  download_count: number;
   url: string; // API URL, 需要 token 才能下载
   browser_download_url: string;
 }
@@ -112,10 +113,19 @@ export const GET: APIRoute = async () => {
       };
     };
 
+    // 累计所有 release 的下载量
+    let totalDownloads = 0;
+    for (const release of releases) {
+      for (const asset of release.assets) {
+        totalDownloads += asset.download_count;
+      }
+    }
+
     const data = {
       version,
       tag: latest.tag_name,
       published_at: latest.published_at,
+      total_downloads: totalDownloads,
       assets: {
         setup: formatAsset(setupAsset),
         portable: formatAsset(portableAsset),

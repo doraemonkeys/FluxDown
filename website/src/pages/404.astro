@@ -1,0 +1,14 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { FloatingNavbar } from "../components/ui/floating-navbar";
+import NotFoundContent from "../components/NotFoundContent";
+import Footer from "../components/Footer";
+---
+
+<Layout title="404 - FluxDown" description="Page not found.">
+  <FloatingNavbar client:load />
+  <main class="pt-24">
+    <NotFoundContent client:load />
+  </main>
+  <Footer client:load />
+</Layout>

@@ -195,7 +195,7 @@ class S {
   String get infoSpeed => _t('速度', 'Speed');
   String get infoRemaining => _t('剩余', 'Remaining');
   String get infoStatus => _t('状态', 'Status');
-  String infoThreads(int n) => _t('$n 线程（动态分配）', '$n threads (dynamic)');
+  String infoThreads(int n) => _t('$n 线程', '$n threads');
   String get infoPath => _t('路径', 'Path');
   String get infoError => _t('错误', 'Error');
   String get infoUrl => _t('地址', 'URL');

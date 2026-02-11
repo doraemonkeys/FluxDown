@@ -1,0 +1,14 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { FloatingNavbar } from "../components/ui/floating-navbar";
+import FaqSection from "../components/FaqSection";
+import Footer from "../components/Footer";
+---
+
+<Layout title="FAQ - FluxDown" description="Frequently asked questions about FluxDown download manager.">
+  <FloatingNavbar client:load />
+  <main class="pt-24">
+    <FaqSection client:load />
+  </main>
+  <Footer client:load />
+</Layout>

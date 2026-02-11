@@ -81,12 +81,19 @@ class UpdateService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _checkTimeoutTimer?.cancel();
     _checkSub?.cancel();
     _progressSub?.cancel();
     super.dispose();
   }
 
   // ── Actions ────────────────────────────────────────────────────────────
+
+  /// Timer that resets [_status] to [idle] if no response arrives from Rust
+  /// within [_checkTimeout]. This prevents the UI from spinning forever when
+  /// the Rust task silently panics or the network is unreachable at boot.
+  Timer? _checkTimeoutTimer;
+  static const _checkTimeout = Duration(seconds: 20);
 
   /// Trigger a version check via Rust → website API.
   void checkForUpdate() {
@@ -99,7 +106,22 @@ class UpdateService extends ChangeNotifier {
     _errorMessage = '';
     notifyListeners();
 
+    // Start a timeout guard — if Rust never responds, fall back to error.
+    _checkTimeoutTimer?.cancel();
+    _checkTimeoutTimer = Timer(_checkTimeout, _onCheckTimeout);
+
     CheckForUpdate(currentVersion: _appVersion).sendSignalToRust();
+  }
+
+  void _onCheckTimeout() {
+    if (_status != UpdateStatus.checking) return;
+    logInfo(
+      'UpdateService',
+      'check timed out after ${_checkTimeout.inSeconds}s',
+    );
+    _status = UpdateStatus.error;
+    _errorMessage = 'Check timed out';
+    notifyListeners();
   }
 
   /// Start downloading the update installer.
@@ -130,6 +152,9 @@ class UpdateService extends ChangeNotifier {
   // ── Signal handlers ────────────────────────────────────────────────────
 
   void _onCheckResult(RustSignalPack<UpdateCheckResult> pack) {
+    _checkTimeoutTimer?.cancel();
+    _checkTimeoutTimer = null;
+
     final msg = pack.message;
     logInfo(
       'UpdateService',

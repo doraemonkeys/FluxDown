@@ -42,13 +42,19 @@ class NotificationService {
   /// 是否有正在创建中的通知窗口
   bool get hasPending => _pendingCount > 0;
 
-  /// 等待所有待处理的通知窗口创建完成。
+  /// 等待所有待处理的通知窗口创建完成（最多等 3 秒）。
   /// 在应用退出前调用，确保通知不会因进程销毁而丢失。
+  /// 超时后直接返回，避免阻塞退出流程导致窗口卡死。
   Future<void> waitForPending() {
     logInfo(_tag, 'waitForPending: _pendingCount=$_pendingCount');
     if (_pendingCount == 0) return Future.value();
     _allDoneCompleter ??= Completer<void>();
-    return _allDoneCompleter!.future;
+    return _allDoneCompleter!.future.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () {
+        logInfo(_tag, 'waitForPending timed out, proceeding with exit');
+      },
+    );
   }
 
   /// 显示下载完成的桌面通知窗口

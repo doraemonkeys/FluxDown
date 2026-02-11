@@ -1,0 +1,14 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { FloatingNavbar } from "../components/ui/floating-navbar";
+import FeedbackSection from "../components/FeedbackSection";
+import Footer from "../components/Footer";
+---
+
+<Layout title="Feedback - FluxDown" description="Submit your feedback, feature requests, or bug reports for FluxDown.">
+  <FloatingNavbar client:load />
+  <main class="pt-24">
+    <FeedbackSection client:load />
+  </main>
+  <Footer client:load />
+</Layout>
