@@ -59,6 +59,9 @@ class SettingsProvider extends ChangeNotifier {
     logInfo('Settings', 'dispose');
     _configSub?.cancel();
     _fileAssocSub?.cancel();
+    if (globalInstance == this) {
+      globalInstance = null;
+    }
     super.dispose();
   }
 

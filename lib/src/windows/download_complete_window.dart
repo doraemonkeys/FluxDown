@@ -211,7 +211,7 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
                           fileExt.toLowerCase(),
                           style: TextStyle(
                             fontSize: 10,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.w600,
                             color: c.accent,
                             letterSpacing: 0.3,
                           ),

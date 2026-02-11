@@ -104,8 +104,8 @@ pub fn build_client() -> Result<Client, DownloadError> {
         // No global timeout — downloads can be very long
         // Connection pool — close idle connections after 90s to avoid
         // stale connections, and keep at most 8 idle per host.
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(4)
         // Cookies — needed for session-based downloads (Google Drive, etc.).
         // reqwest follows RFC 6265: cookies are scoped to their domain.
         .cookie_store(true)
@@ -115,16 +115,9 @@ pub fn build_client() -> Result<Client, DownloadError> {
         //  2. Range-based multi-segment downloads use correct byte offsets.
         //  3. The integrity check (file size vs Content-Length) works reliably.
         //
-        // IMPORTANT: The gzip/brotli/deflate Cargo *features* are enabled in
-        // Cargo.toml (needed so reqwest links the decompression libs).  Even
-        // though we never call `.gzip(true)` etc., reqwest still advertises
-        // `Accept-Encoding: gzip, br, deflate` by default once those features
-        // are compiled in.  Servers/CDNs (e.g. GitHub raw, Cloudflare) may
-        // then respond with compressed content whose Content-Length reflects
-        // the *compressed* size, while reqwest transparently decompresses the
-        // body — causing a size mismatch at our integrity check.
-        //
-        // Fix: explicitly set `Accept-Encoding: identity` so the server never
+        // The gzip/brotli/deflate Cargo features are intentionally NOT enabled
+        // to keep the binary small and avoid accidental decompression.
+        // We explicitly set `Accept-Encoding: identity` so the server never
         // sends compressed content and Content-Length always equals raw bytes.
         .default_headers({
             let mut h = reqwest::header::HeaderMap::new();

@@ -26,7 +26,13 @@ impl Db {
     pub fn open(dir: &Path) -> Result<Self, DbError> {
         let db_path = dir.join("flux_down.db");
         let conn = Connection::open(db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             PRAGMA foreign_keys=ON;\
+             PRAGMA cache_size=-512;\
+             PRAGMA temp_store=MEMORY;\
+             PRAGMA mmap_size=0;",
+        )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,

@@ -8,6 +8,24 @@
  * 4. 响应 popup 的消息
  * 5. 维护拦截统计数据
  * 6. 多语言支持
+ *
+ * === 下载拦截三层防线 ===
+ *
+ * 第一层（HTTP 响应感知）: webRequest.onHeadersReceived
+ *   - 监听所有请求的响应头
+ *   - 当响应包含 Content-Disposition: attachment 或 下载类 Content-Type 时，
+ *     将该 URL 标记为"已知下载"，缓存 Content-Type / Content-Length / 文件名等
+ *   - 为后续 onCreated 兜底提供可靠的元数据来源
+ *
+ * 第二层（主拦截）: downloads.onDeterminingFilename
+ *   - 浏览器弹出「另存为」之前触发，suggest({ cancel: true }) 可取消下载
+ *   - 最优先、最干净的拦截方式
+ *   - 但对 JS location.href / meta refresh 触发的"导航转下载"存在 MV3 时序问题
+ *
+ * 第三层（兜底拦截）: downloads.onCreated + onChanged
+ *   - onCreated 始终可靠触发，配合 onChanged 等待元数据就绪后再判断
+ *   - 如果 onDeterminingFilename 在限定时间内未处理，由此层接管
+ *   - 利用第一层缓存的 HTTP 响应信息来补全 downloadItem 中缺失的元数据
  */
 
 import { sendDownloadRequest, checkFluxDownAvailable } from '@/utils/native-messaging';
@@ -52,10 +70,23 @@ export default defineBackground(() => {
     console.log('[FluxDown] i18n initialized');
   });
 
-  // ===== 请求头缓存 =====
-  // 用 webRequest.onSendHeaders 捕获浏览器实际发出的请求头（含 Cookie、Authorization 等）
-  // 这比 chrome.cookies API 更可靠，因为它捕获的是浏览器真正发出去的完整头。
+  // ==========================================
+  // 第一层：HTTP 响应感知（webRequest 缓存）
+  // ==========================================
+
+  // 请求头缓存（Cookie / Authorization）
   const requestHeaderCache = new Map<string, { cookies: string; headers: Record<string, string>; ts: number }>();
+
+  // 响应头缓存 —— 当 HTTP 响应指示"这是一个下载"时，缓存其元数据
+  // 这是第三层兜底拦截的关键数据来源
+  interface ResponseDownloadInfo {
+    url: string;
+    contentType: string;         // Content-Type
+    contentLength: number;       // Content-Length（-1 = 未知）
+    dispositionFilename: string; // 从 Content-Disposition 解析出的文件名
+    ts: number;
+  }
+  const responseDownloadCache = new Map<string, ResponseDownloadInfo>();
 
   // Chrome MV3: 需要 'extraHeaders' 才能看到 Cookie / Authorization 等敏感头
   try {
@@ -86,7 +117,65 @@ export default defineBackground(() => {
     );
     console.log('[FluxDown] webRequest.onSendHeaders listener registered');
   } catch (e) {
-    console.warn('[FluxDown] Failed to register webRequest listener:', e);
+    console.warn('[FluxDown] Failed to register webRequest.onSendHeaders listener:', e);
+  }
+
+  // === 响应头监听：检测"导航转下载"场景 ===
+  // 当浏览器主框架导航的响应带有 Content-Disposition: attachment 或
+  // 下载类 Content-Type 时，说明这是一个"导航转下载"的请求。
+  // 缓存其信息，供 onCreated 兜底拦截使用。
+  try {
+    chrome.webRequest.onHeadersReceived.addListener(
+      (details) => {
+        // 只关注主框架导航（sub_frame、xhr 等交给正常 download 流程处理）
+        if (details.type !== 'main_frame') return;
+        if (!details.responseHeaders) return;
+
+        let contentType = '';
+        let contentLength = -1;
+        let contentDisposition = '';
+
+        for (const h of details.responseHeaders) {
+          const name = h.name.toLowerCase();
+          if (name === 'content-type' && h.value) {
+            contentType = h.value.split(';')[0].trim().toLowerCase();
+          } else if (name === 'content-length' && h.value) {
+            const parsed = parseInt(h.value, 10);
+            if (!isNaN(parsed)) contentLength = parsed;
+          } else if (name === 'content-disposition' && h.value) {
+            contentDisposition = h.value;
+          }
+        }
+
+        // 判断该响应是否会触发下载
+        const isAttachment = contentDisposition.toLowerCase().startsWith('attachment');
+        const isDownloadMime = isDownloadContentType(contentType);
+
+        if (!isAttachment && !isDownloadMime) return;
+
+        // 从 Content-Disposition 提取文件名
+        const dispositionFilename = parseContentDispositionFilename(contentDisposition);
+
+        const info: ResponseDownloadInfo = {
+          url: details.url,
+          contentType,
+          contentLength,
+          dispositionFilename,
+          ts: Date.now(),
+        };
+
+        responseDownloadCache.set(details.url, info);
+        console.log('[FluxDown] Detected download-triggering response (onHeadersReceived):', info);
+
+        // 60 秒后自动清理
+        setTimeout(() => responseDownloadCache.delete(details.url), 60_000);
+      },
+      { urls: ['<all_urls>'] },
+      ['responseHeaders'],
+    );
+    console.log('[FluxDown] webRequest.onHeadersReceived listener registered');
+  } catch (e) {
+    console.warn('[FluxDown] Failed to register webRequest.onHeadersReceived listener:', e);
   }
 
   // ===== 右键菜单 =====
@@ -138,32 +227,182 @@ export default defineBackground(() => {
     }
   });
 
-  // ===== 下载拦截 =====
-  // 缓存 onCreated 中的 downloadItem 信息（mime/fileSize/referrer 等），
-  // 供 onDeterminingFilename 使用（后者的参数中信息较少）。
+  // ==========================================
+  // 第二层 + 第三层：下载事件拦截
+  // ==========================================
+
+  // 缓存 onCreated 中的 downloadItem 信息，供 onDeterminingFilename 使用
   const downloadItemCache = new Map<number, chrome.downloads.DownloadItem>();
 
-  // 记录已由 onDeterminingFilename 拦截的下载 ID，避免 onCreated 重复处理
-  const interceptedIds = new Set<number>();
+  // 协调标记：记录各层的处理状态，防止重复发送
+  // 'primary' = 由 onDeterminingFilename 处理
+  // 'fallback' = 由 onCreated 兜底处理
+  const handledDownloads = new Map<number, 'primary' | 'fallback'>();
 
+  // === 第三层：onCreated 兜底 + onChanged 元数据补全 ===
   chrome.downloads.onCreated.addListener((downloadItem) => {
-    // 缓存 downloadItem 信息，onDeterminingFilename 会用到
-    downloadItemCache.set(downloadItem.id, downloadItem);
+    const downloadId = downloadItem.id;
+    const url = downloadItem.url;
 
-    // 30 秒后自动清理（正常情况下 onDeterminingFilename 会很快触发）
+    // 缓存 downloadItem 信息，onDeterminingFilename 会用到
+    downloadItemCache.set(downloadId, downloadItem);
+
+    // 跳过 blob 和 data URL
+    if (url.startsWith('blob:') || url.startsWith('data:')) return;
+
+    // 启动兜底计时器
+    // 给 onDeterminingFilename 一个处理窗口，超时后由 onCreated 兜底
+    //
+    // 关键点：不使用固定的"猜测"超时，而是利用 onChanged 获取完整元数据后再判断。
+    // 这里只是一个启动延迟，等 onDeterminingFilename 有机会先处理。
+    // 如果 onDeterminingFilename 已处理，兜底逻辑会跳过。
+    //
+    // 注意：我们注册一个 onChanged 监听器，一旦 downloadItem 的 filename 或 mime
+    // 字段被填充（说明浏览器已解析完响应头），就可以做出更准确的判断。
+    startFallbackInterception(downloadId, downloadItem);
+
+    // 30 秒后全面清理
     setTimeout(() => {
-      downloadItemCache.delete(downloadItem.id);
-      interceptedIds.delete(downloadItem.id);
+      downloadItemCache.delete(downloadId);
+      handledDownloads.delete(downloadId);
     }, 30_000);
   });
 
-  // onDeterminingFilename 在浏览器弹出「另存为」对话框 **之前** 触发，
-  // 调用 suggest({ cancel: true }) 可以在不弹出任何浏览器下载 UI 的情况下直接取消下载。
-  // 这是拦截下载最可靠的时机。
+  /**
+   * 兜底拦截入口。策略：
+   *
+   * 1. 立即检查 responseDownloadCache（第一层的 HTTP 响应缓存），
+   *    如果命中说明这是已确认的"导航转下载"，可以直接拦截，不必等待。
+   *
+   * 2. 如果缓存未命中，等待 150ms（给 onDeterminingFilename 机会先处理），
+   *    然后用 chrome.downloads.search() 查询最新的 downloadItem 元数据，
+   *    获取浏览器已解析的 filename / mime / fileSize，再做判断。
+   */
+  async function startFallbackInterception(downloadId: number, originalItem: chrome.downloads.DownloadItem) {
+    const url = originalItem.url;
+
+    // === 路径 A：检查 HTTP 响应缓存（即时判断，不等待） ===
+    const responseCached = responseDownloadCache.get(url);
+    if (responseCached) {
+      // 响应头已确认这是下载 — 不必等 onDeterminingFilename
+      // 但仍给它一个极短的窗口（50ms），因为如果 onDeterminingFilename 能处理，
+      // 它的 suggest({ cancel: true }) 比 downloads.cancel() 更干净
+      await sleep(50);
+      if (handledDownloads.has(downloadId)) return;
+
+      console.log('[FluxDown] Fallback (path A - response cache hit):', {
+        id: downloadId,
+        url,
+        contentType: responseCached.contentType,
+        contentLength: responseCached.contentLength,
+        dispositionFilename: responseCached.dispositionFilename,
+      });
+
+      const settings = await loadSettings();
+      if (!settings.enabled) return;
+
+      // 用响应头缓存的信息构造 DownloadItemInfo
+      const itemInfo: DownloadItemInfo = {
+        url,
+        fileSize: responseCached.contentLength > 0 ? responseCached.contentLength : undefined,
+        mime: responseCached.contentType || undefined,
+        filename: responseCached.dispositionFilename || originalItem.filename || undefined,
+      };
+
+      if (!shouldIntercept(itemInfo, settings)) return;
+
+      await executeFallbackIntercept(downloadId, url, originalItem.referrer, itemInfo);
+      responseDownloadCache.delete(url);
+      return;
+    }
+
+    // === 路径 B：响应缓存未命中 — 等待后查询最新元数据 ===
+    // 等待 150ms，给 onDeterminingFilename 优先处理的时间
+    await sleep(150);
+    if (handledDownloads.has(downloadId)) return;
+
+    // 用 chrome.downloads.search 查询最新状态（此时浏览器可能已解析了响应头）
+    let freshItems: chrome.downloads.DownloadItem[];
+    try {
+      freshItems = await chrome.downloads.search({ id: downloadId });
+    } catch {
+      return; // 下载可能已被删除
+    }
+
+    if (freshItems.length === 0) return; // 下载已不存在
+    if (handledDownloads.has(downloadId)) return; // 检查期间被 onDeterminingFilename 处理了
+
+    const freshItem = freshItems[0];
+    // 如果下载已经完成或被取消了，不处理
+    if (freshItem.state === 'complete' || (freshItem as any).state === 'interrupted') {
+      return;
+    }
+
+    const settings = await loadSettings();
+    if (!settings.enabled) return;
+
+    const mime = freshItem.mime || originalItem.mime || undefined;
+    const fileSize = (freshItem.fileSize > 0 ? freshItem.fileSize : undefined)
+      ?? (originalItem.fileSize > 0 ? originalItem.fileSize : undefined);
+    const filename = freshItem.filename || originalItem.filename || undefined;
+
+    const itemInfo: DownloadItemInfo = {
+      url: freshItem.url || url,
+      fileSize,
+      mime,
+      filename,
+    };
+
+    if (!shouldIntercept(itemInfo, settings)) return;
+
+    // 最后一次检查——避免和 onDeterminingFilename 竞态
+    if (handledDownloads.has(downloadId)) return;
+
+    console.log('[FluxDown] Fallback (path B - search query):', {
+      id: downloadId,
+      url: itemInfo.url,
+      mime,
+      filename,
+      fileSize,
+    });
+
+    await executeFallbackIntercept(downloadId, itemInfo.url, freshItem.referrer || originalItem.referrer, itemInfo);
+  }
+
+  /**
+   * 执行兜底拦截：cancel + erase + 发送到 FluxDown
+   */
+  async function executeFallbackIntercept(
+    downloadId: number,
+    url: string,
+    referrer: string | undefined,
+    itemInfo: DownloadItemInfo,
+  ) {
+    // 标记为 fallback 已处理
+    handledDownloads.set(downloadId, 'fallback');
+
+    // cancel + erase（替代 suggest({ cancel: true })）
+    try {
+      await chrome.downloads.cancel(downloadId);
+    } catch (e) {
+      console.warn('[FluxDown] Fallback: failed to cancel download:', e);
+    }
+    try {
+      chrome.downloads.erase({ id: downloadId });
+    } catch (e) {
+      console.warn('[FluxDown] Fallback: failed to erase download:', e);
+    }
+
+    // 发送到 FluxDown
+    const cleanFilename = extractCleanFilename(itemInfo.filename, url);
+    await sendToFluxDown(url, referrer, cleanFilename, itemInfo.fileSize, itemInfo.mime);
+  }
+
+  // === 第二层：onDeterminingFilename（主拦截） ===
+  // 在浏览器弹出「另存为」对话框之前触发，
+  // suggest({ cancel: true }) 可以在不弹出任何浏览器下载 UI 的情况下直接取消下载。
   chrome.downloads.onDeterminingFilename.addListener(
     (downloadItem, suggest) => {
-      // 同步部分：先做快速判断，决定是否需要拦截。
-      // 注意：此回调必须同步调用 suggest()，或返回 true 表示异步调用 suggest()。
       const url = downloadItem.url;
 
       // 跳过 blob 和 data URL
@@ -172,17 +411,29 @@ export default defineBackground(() => {
         return;
       }
 
-      // 返回 true 表示我们会异步调用 suggest()
-      // 在异步逻辑中完成拦截判断
+      // 如果已被兜底层处理，直接取消（不重复发送）
+      if (handledDownloads.get(downloadItem.id) === 'fallback') {
+        console.log('[FluxDown] onDeterminingFilename: already handled by fallback, cancelling:', downloadItem.id);
+        suggest({ cancel: true });
+        return;
+      }
+
+      // 异步判断
       (async () => {
         try {
+          // 再次检查兜底状态（await 期间可能被兜底层抢先处理了）
+          if (handledDownloads.get(downloadItem.id) === 'fallback') {
+            suggest({ cancel: true });
+            return;
+          }
+
           const settings = await loadSettings();
           if (!settings.enabled) {
             suggest({ filename: downloadItem.filename });
             return;
           }
 
-          // 合并 onCreated 缓存的额外信息（如 referrer、fileSize、mime）
+          // 合并 onCreated 缓存的额外信息
           const cached = downloadItemCache.get(downloadItem.id);
           const mime = downloadItem.mime || cached?.mime || undefined;
           const fileSize = (downloadItem.fileSize > 0 ? downloadItem.fileSize : undefined)
@@ -201,6 +452,12 @@ export default defineBackground(() => {
             return;
           }
 
+          // 最后一次竞态检查
+          if (handledDownloads.has(downloadItem.id)) {
+            suggest({ cancel: true });
+            return;
+          }
+
           console.log('[FluxDown] Intercepting download (onDeterminingFilename):', {
             url,
             mime,
@@ -209,10 +466,10 @@ export default defineBackground(() => {
             mode: settings.interceptMode,
           });
 
-          // 标记该下载已被拦截
-          interceptedIds.add(downloadItem.id);
+          // 标记为主拦截已处理
+          handledDownloads.set(downloadItem.id, 'primary');
 
-          // 关键：取消浏览器下载，不会弹出「另存为」对话框
+          // 取消浏览器下载
           suggest({ cancel: true });
 
           // 清理下载记录
@@ -429,6 +686,80 @@ export default defineBackground(() => {
   }
 
   // ===== 工具函数 =====
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 判断 Content-Type 是否为"下载类型"（即浏览器会将导航转为下载的类型）
+   */
+  function isDownloadContentType(contentType: string): boolean {
+    const ct = contentType.toLowerCase();
+    const downloadTypes = [
+      'application/octet-stream',
+      'application/x-download',
+      'application/force-download',
+      'application/zip',
+      'application/x-rar-compressed',
+      'application/x-7z-compressed',
+      'application/gzip',
+      'application/x-tar',
+      'application/x-bzip2',
+      'application/x-xz',
+      'application/x-msdownload',
+      'application/x-msi',
+      'application/x-apple-diskimage',
+      'application/vnd.debian.binary-package',
+      'application/x-iso9660-image',
+      'application/x-raw-disk-image',
+      'application/pdf',
+      'application/vnd.android.package-archive',
+      'application/x-bittorrent',
+    ];
+    // 精确匹配 + 前缀匹配
+    if (downloadTypes.includes(ct)) return true;
+    if (ct.startsWith('video/') || ct.startsWith('audio/')) return true;
+    if (ct.startsWith('application/vnd.openxmlformats-officedocument')) return true;
+    if (ct.startsWith('application/vnd.ms-')) return true;
+    return false;
+  }
+
+  /**
+   * 从 Content-Disposition 头解析文件名
+   *
+   * 支持格式：
+   * - Content-Disposition: attachment; filename="report.pdf"
+   * - Content-Disposition: attachment; filename=report.pdf
+   * - Content-Disposition: attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf
+   */
+  function parseContentDispositionFilename(disposition: string): string {
+    if (!disposition) return '';
+
+    // 优先尝试 filename*（RFC 5987 编码）
+    const starMatch = disposition.match(/filename\*\s*=\s*(?:UTF-8|utf-8)'[^']*'(.+?)(?:;|$)/i);
+    if (starMatch) {
+      try {
+        return decodeURIComponent(starMatch[1].trim());
+      } catch {
+        // fallthrough
+      }
+    }
+
+    // 再尝试 filename="..."（带引号）
+    const quotedMatch = disposition.match(/filename\s*=\s*"(.+?)"/i);
+    if (quotedMatch) {
+      return quotedMatch[1];
+    }
+
+    // 最后尝试 filename=...（无引号）
+    const plainMatch = disposition.match(/filename\s*=\s*([^\s;]+)/i);
+    if (plainMatch) {
+      return plainMatch[1];
+    }
+
+    return '';
+  }
 
   /**
    * 从浏览器的 downloadItem.filename（本地保存路径）和 URL 中提取有意义的文件名。

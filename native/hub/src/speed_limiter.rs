@@ -26,6 +26,9 @@ struct Inner {
     tokens: AtomicU64,
     /// Notify waiters when tokens are replenished.
     notify: Notify,
+    /// Notify the refill task to wake from its idle sleep when the limit
+    /// changes from unlimited (0) to a positive value.
+    refill_wake: Arc<Notify>,
 }
 
 /// Refill interval — 50 ms gives smooth throughput without too many wake-ups.
@@ -40,6 +43,7 @@ impl SpeedLimiter {
                 limit_bps: AtomicU64::new(limit_bps),
                 tokens: AtomicU64::new(0),
                 notify: Notify::new(),
+                refill_wake: Arc::new(Notify::new()),
             }),
         }
     }
@@ -49,6 +53,9 @@ impl SpeedLimiter {
         self.inner.limit_bps.store(limit_bps, Ordering::Relaxed);
         // Wake any waiters so they re-evaluate immediately.
         self.inner.notify.notify_waiters();
+        // Wake the refill task from its idle sleep (when transitioning from
+        // unlimited to limited) so tokens start flowing without delay.
+        self.inner.refill_wake.notify_one();
     }
 
     /// Current configured limit (bytes/sec).  0 = unlimited.
@@ -102,7 +109,7 @@ impl SpeedLimiter {
     /// Spawn the background refill task.  Must be called once after creation.
     /// The task runs until the `SpeedLimiter` (and all its clones) are dropped.
     pub fn spawn_refill_task(&self) {
-        let inner = Arc::downgrade(&self.inner);
+        let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_millis(REFILL_INTERVAL_MS));
@@ -111,7 +118,7 @@ impl SpeedLimiter {
 
             loop {
                 interval.tick().await;
-                let Some(inner) = inner.upgrade() else {
+                let Some(inner) = weak.upgrade() else {
                     // All SpeedLimiter handles dropped — exit.
                     break;
                 };
@@ -122,6 +129,18 @@ impl SpeedLimiter {
                     // (they will see limit==0 and pass through).
                     inner.tokens.store(0, Ordering::Relaxed);
                     inner.notify.notify_waiters();
+                    // Clone the Arc<Notify> so we can await it after dropping
+                    // the strong reference to `inner`.
+                    let refill_wake = Arc::clone(&inner.refill_wake);
+                    drop(inner);
+                    let wake = refill_wake.notified();
+                    // Sleep longer when unlimited — no need for frequent ticks.
+                    // `refill_wake` cuts this short if the limit changes, so
+                    // tokens start flowing without delay.
+                    tokio::select! {
+                        () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                        () = wake => {}
+                    }
                     continue;
                 }
 

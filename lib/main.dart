@@ -422,8 +422,8 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
       await TrayService.instance.destroy();
 
       logInfo('FluxDownApp', 'destroying window...');
+      await LogService.instance.dispose();
       await windowManager.destroy();
-      logInfo('FluxDownApp', 'graceful exit complete');
     } catch (e, stack) {
       logError('FluxDownApp', '_performGracefulExit error', e, stack);
       // 兜底：无论如何都尝试销毁窗口

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:flutter/foundation.dart';
+
 /// 文件日志服务 — 将日志写入 exe 同级 logs/ 目录，按日期分文件。
 ///
 /// 使用缓冲写入 + 定时刷盘，兼顾性能和崩溃前日志完整度。
@@ -49,9 +51,11 @@ class LogService {
           '${_pad2(now.hour)}:${_pad2(now.minute)}:${_pad2(now.second)}.${_pad3(now.millisecond)}';
       final line = '$ts [$tag] $message\n';
       _raf?.writeStringSync(line);
-      // 同时输出到控制台方便调试
-      // ignore: avoid_print
-      print(line.trimRight());
+      // 仅在 debug 模式下输出到控制台，避免 release 模式的字符串缓存开销
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print(line.trimRight());
+      }
     } catch (e) {
       // 日志服务本身不应该抛异常影响业务
       // ignore: avoid_print
