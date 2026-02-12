@@ -33,6 +33,17 @@ import type { DownloadRequest } from '@/utils/native-messaging';
 import { loadSettings, shouldIntercept } from '@/utils/settings';
 import type { DownloadItemInfo } from '@/utils/settings';
 import { initI18n, t } from '@/utils/i18n';
+import { isSniffableContentType, classifyResource, extractFilenameFromUrl } from '@/utils/resource-types';
+import type { ResourceMessagePayload } from '@/utils/resource-types';
+import {
+  addResources,
+  addSniffedResource,
+  getResourcesForTab,
+  getResourceCountForTab,
+  clearResourcesForTab,
+  updateBadgeForTab,
+  initTabLifecycleListeners,
+} from '@/utils/resource-store';
 
 // ===== 统计相关 =====
 interface DailyStats {
@@ -69,6 +80,9 @@ export default defineBackground(() => {
   initI18n().then(() => {
     console.log('[FluxDown] i18n initialized');
   });
+
+  // 初始化 tab 生命周期监听器（自动清理关闭/导航的 tab 资源）
+  initTabLifecycleListeners();
 
   // ==========================================
   // 第一层：HTTP 响应感知（webRequest 缓存）
@@ -176,6 +190,87 @@ export default defineBackground(() => {
     console.log('[FluxDown] webRequest.onHeadersReceived listener registered');
   } catch (e) {
     console.warn('[FluxDown] Failed to register webRequest.onHeadersReceived listener:', e);
+  }
+
+  // ==========================================
+  // 资源嗅探层：监听所有 media / XHR 类型请求的响应头
+  // 检测可下载的媒体资源，加入资源列表供 UI 展示
+  // ==========================================
+  try {
+    chrome.webRequest.onHeadersReceived.addListener(
+      (details) => {
+        // 跳过无效或非 tab 请求
+        if (details.tabId < 0 || !details.responseHeaders) return;
+
+        let contentType = '';
+        let contentLength = -1;
+        let contentDisposition = '';
+
+        for (const h of details.responseHeaders) {
+          const name = h.name.toLowerCase();
+          if (name === 'content-type' && h.value) {
+            contentType = h.value.split(';')[0].trim().toLowerCase();
+          } else if (name === 'content-length' && h.value) {
+            const parsed = parseInt(h.value, 10);
+            if (!isNaN(parsed)) contentLength = parsed;
+          } else if (name === 'content-disposition' && h.value) {
+            contentDisposition = h.value;
+          }
+        }
+
+        // 判断是否是有价值的资源
+        const isSniffable = isSniffableContentType(contentType);
+        const isAttachment = contentDisposition.toLowerCase().startsWith('attachment');
+
+        if (!isSniffable && !isAttachment) return;
+
+        // 提取文件名
+        let filename = '';
+        if (contentDisposition) {
+          filename = parseContentDispositionFilename(contentDisposition);
+        }
+        if (!filename) {
+          filename = extractFilenameFromUrl(details.url);
+        }
+
+        // 添加到资源存储（传递 isAttachment 标记用于可信度计算）
+        const added = addSniffedResource(
+          details.tabId,
+          details.url,
+          contentType,
+          contentLength,
+          filename,
+          isAttachment,
+        );
+
+        if (added > 0) {
+          // 更新 Badge
+          updateBadgeForTab(details.tabId);
+          // 推送给 Content Script UI
+          notifyContentScript(details.tabId);
+        }
+      },
+      { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other'] },
+      ['responseHeaders'],
+    );
+    console.log('[FluxDown] Resource sniffer (onHeadersReceived for media) registered');
+  } catch (e) {
+    console.warn('[FluxDown] Failed to register resource sniffer:', e);
+  }
+
+  /**
+   * 向指定 tab 的 Content Script 推送最新资源列表
+   */
+  async function notifyContentScript(tabId: number): Promise<void> {
+    const resources = getResourcesForTab(tabId);
+    try {
+      await chrome.tabs.sendMessage(tabId, {
+        action: 'resourcesUpdated',
+        resources,
+      });
+    } catch {
+      // Content script 可能还未注入
+    }
   }
 
   // ===== 右键菜单 =====
@@ -496,9 +591,9 @@ export default defineBackground(() => {
     },
   );
 
-  // ===== Popup 消息处理 =====
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    handlePopupMessage(message).then(sendResponse);
+  // ===== 消息处理（Popup + Content Script） =====
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    handleMessage(message, sender).then(sendResponse);
     return true; // 保持消息通道开放（异步响应）
   });
 
@@ -649,9 +744,10 @@ export default defineBackground(() => {
     }
   }
 
-  // ===== Popup 消息处理逻辑 =====
-  async function handlePopupMessage(message: any): Promise<any> {
+  // ===== 统一消息处理（Popup + Content Script） =====
+  async function handleMessage(message: any, sender: chrome.runtime.MessageSender): Promise<any> {
     switch (message.action) {
+      // --- Popup 消息 ---
       case 'getStatus': {
         const available = await checkFluxDownAvailable();
         const settings = await loadSettings();
@@ -678,6 +774,58 @@ export default defineBackground(() => {
       case 'checkConnection': {
         const isAvailable = await checkFluxDownAvailable();
         return { connected: isAvailable };
+      }
+
+      // --- Content Script: 资源检测上报 ---
+      case 'resourceDetected': {
+        const tabId = sender.tab?.id;
+        if (!tabId || tabId < 0) return { success: false };
+
+        const pageUrl = sender.tab?.url || sender.url || '';
+        const payloads: ResourceMessagePayload[] = message.resources || [];
+
+        if (payloads.length === 0) return { success: true, added: 0 };
+
+        const added = addResources(tabId, pageUrl, payloads);
+        if (added > 0) {
+          await updateBadgeForTab(tabId);
+          await notifyContentScript(tabId);
+        }
+        return { success: true, added };
+      }
+
+      // --- Content Script UI: 请求当前 tab 的资源列表 ---
+      case 'getResources': {
+        const tabId = sender.tab?.id;
+        if (!tabId || tabId < 0) return { resources: [] };
+        return { resources: getResourcesForTab(tabId) };
+      }
+
+      // --- Content Script UI / Popup: 触发单个资源下载 ---
+      case 'downloadResource': {
+        const url = message.url as string;
+        if (!url) return { success: false, message: 'No URL' };
+        await sendToFluxDown(
+          url,
+          message.referrer,
+          message.filename,
+          message.fileSize,
+          message.mimeType,
+        );
+        return { success: true };
+      }
+
+      // --- Popup: 切换资源面板显示（发消息给当前活跃 tab 的 Content Script） ---
+      case 'toggleResourcePanel': {
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (activeTab?.id) {
+            await chrome.tabs.sendMessage(activeTab.id, { action: 'toggleResourcePanel' });
+          }
+        } catch {
+          // tab 可能未注入 content script
+        }
+        return { success: true };
       }
 
       default:

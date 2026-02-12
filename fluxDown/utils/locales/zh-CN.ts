@@ -72,6 +72,17 @@ const zhCN = {
   'notify.sendFailed': '发送失败',
   'notify.connectionFailed': '无法连接到 FluxDown 应用: {message}',
 
+  // Resource sniffer & panel
+  'sniffer.title': '资源嗅探',
+  'sniffer.resourceSniffing': '资源嗅探',
+  'sniffer.resourceSniffingHint': '自动检测网页中的可下载资源',
+  'sniffer.showFloatingButton': '视频浮动按钮',
+  'sniffer.showFloatingButtonHint': '在视频元素上显示快速下载按钮',
+  'sniffer.showResourcePanel': '资源面板',
+  'sniffer.showResourcePanelHint': '页面底部显示检测到的资源列表',
+  'sniffer.sniffImages': '图片嗅探',
+  'sniffer.sniffImagesHint': '检测网页中的大图片资源（>100KB）',
+
   // Manifest
   'manifest.description': '拦截浏览器下载，发送到 FluxDown 桌面应用进行高速下载',
 } as const;

@@ -18,6 +18,12 @@ export default defineConfig({
       'scripting',
     ],
     host_permissions: ['<all_urls>'],
+    web_accessible_resources: [
+      {
+        resources: ['/fetch-interceptor.js'],
+        matches: ['<all_urls>'],
+      },
+    ],
     action: {
       default_icon: {
         16: '/icon/16.png',

@@ -24,6 +24,16 @@ export interface FluxDownSettings {
   /** 排除的域名列表 */
   excludeDomains: string[];
 
+  // === 资源嗅探 & 页面内 UI 设置 ===
+
+  /** 是否启用资源嗅探（检测页面中的可下载资源） */
+  resourceSniffing: boolean;
+  /** 是否在视频元素上显示浮动下载按钮 */
+  showFloatingButton: boolean;
+  /** 是否显示底部资源面板 */
+  showResourcePanel: boolean;
+  /** 是否嗅探图片资源（默认关闭，开启后显示 >100KB 的图片） */
+  sniffImages: boolean;
 }
 
 const DEFAULT_SETTINGS: FluxDownSettings = {
@@ -83,6 +93,12 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
     'application/x-bittorrent',
   ],
   excludeDomains: [],
+
+  // 资源嗅探 & 页面内 UI
+  resourceSniffing: true,
+  showFloatingButton: true,
+  showResourcePanel: true,
+  sniffImages: false,
 };
 
 /**

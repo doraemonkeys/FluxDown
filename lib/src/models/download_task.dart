@@ -285,7 +285,9 @@ class DownloadTask {
         smoothedSpeed = p.speed; // first update — use raw value
       }
     } else {
-      smoothedSpeed = p.speed;
+      // Non-downloading states: force speed to 0 defensively,
+      // even if Rust accidentally sends a non-zero value.
+      smoothedSpeed = 0;
     }
 
     return copyWith(
@@ -305,9 +307,18 @@ class DownloadTask {
 
   /// 下载进度 [0.0, 1.0]
   double get progress {
+    // 已完成的任务强制返回 100%，避免未知大小文件完成后仍显示 0%
+    if (status == TaskStatus.completed) return 1.0;
     if (totalBytes <= 0) return 0;
     return (downloadedBytes / totalBytes).clamp(0.0, 1.0);
   }
+
+  /// 是否为不确定进度（文件大小未知且处于活跃下载阶段）
+  bool get isIndeterminate =>
+      totalBytes <= 0 &&
+      (status == TaskStatus.downloading ||
+          status == TaskStatus.preparing ||
+          status == TaskStatus.resuming);
 
   /// 文件扩展名（用于图标显示）
   String get fileExtension {

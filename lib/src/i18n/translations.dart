@@ -575,6 +575,40 @@ class S {
   ).split(',')..addAll(['proxy', 'socks', 'http']);
 
   // ─────────────────────────────────────────────
+  // Feedback
+  // ─────────────────────────────────────────────
+
+  String get feedback => _t('反馈', 'Feedback');
+  String get feedbackTitle => _t('提交反馈', 'Submit Feedback');
+  String get feedbackDesc => _t(
+    '告诉我们你的想法，帮助改进 FluxDown',
+    'Share your thoughts to help improve FluxDown',
+  );
+  String get feedbackTypeLabel => _t('反馈类型', 'Feedback Type');
+  String get feedbackTypeFeature => _t('功能建议', 'Feature Request');
+  String get feedbackTypeBug => _t('问题反馈', 'Bug Report');
+  String get feedbackTypeOther => _t('其他', 'Other');
+  String get feedbackTitleLabel => _t('标题', 'Title');
+  String get feedbackTitlePlaceholder =>
+      _t('简要描述你的反馈', 'Briefly describe your feedback');
+  String get feedbackDescLabel => _t('详细描述', 'Description');
+  String get feedbackDescPlaceholder =>
+      _t('请详细说明...', 'Please describe in detail...');
+  String get feedbackContactLabel => _t('联系方式', 'Contact');
+  String get feedbackContactPlaceholder =>
+      _t('邮箱或其他联系方式', 'Email or other contact info');
+  String get feedbackOptional => _t('可选', 'Optional');
+  String get feedbackSubmit => _t('提交', 'Submit');
+  String get feedbackSubmitting => _t('提交中...', 'Submitting...');
+  String get feedbackSuccess => _t('感谢你的反馈！', 'Thank you for your feedback!');
+  String get feedbackError =>
+      _t('提交失败，请稍后重试', 'Submission failed, please try again later');
+  String get feedbackRateLimited =>
+      _t('提交过于频繁，请稍后再试', 'Too many requests, please try again later');
+  String feedbackTitleCount(int n) => _t('$n/200', '$n/200');
+  String feedbackDescCount(int n) => _t('$n/5000', '$n/5000');
+
+  // ─────────────────────────────────────────────
   // TrayService
   // ─────────────────────────────────────────────
 

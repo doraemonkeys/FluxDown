@@ -4,6 +4,7 @@ import '../models/download_controller.dart';
 import '../models/download_task.dart';
 import '../i18n/locale_provider.dart';
 import '../theme/app_colors.dart';
+import 'feedback_dialog.dart';
 
 class StatusBar extends StatelessWidget {
   final DownloadController controller;
@@ -70,6 +71,27 @@ class StatusBar extends StatelessWidget {
                 style: TextStyle(fontSize: 10.5, color: c.textMuted),
               ),
               const Spacer(),
+              // 反馈按钮
+              GestureDetector(
+                onTap: () => showFeedbackDialog(context),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Row(
+                    children: [
+                      Icon(
+                        LucideIcons.messageSquarePlus,
+                        size: 11,
+                        color: c.textMuted,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        s.feedback,
+                        style: TextStyle(fontSize: 10.5, color: c.textMuted),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         );

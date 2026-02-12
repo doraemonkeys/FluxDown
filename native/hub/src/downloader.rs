@@ -698,12 +698,25 @@ pub async fn run_download(params: DownloadParams) {
             let msg = e.to_string();
             rinf::debug_print!("[download] task {} error: {}", task_id_log, msg);
             let _ = params.db.update_task_status(&params.task_id, 4, &msg).await;
+
+            // Preserve actual progress from DB so the UI doesn't jump back to 0%.
+            let (dl, total) = match params.db.load_task_by_id(&params.task_id).await {
+                Ok(Some(t)) => (t.downloaded_bytes, t.total_bytes),
+                other => {
+                    rinf::debug_print!(
+                        "[download] task {} warning: failed to read progress from DB: {:?}",
+                        task_id_log,
+                        other.err()
+                    );
+                    (0, 0)
+                }
+            };
             let _ = params
                 .progress_tx
                 .send(ProgressUpdate {
                     task_id: params.task_id,
-                    downloaded_bytes: 0,
-                    total_bytes: 0,
+                    downloaded_bytes: dl,
+                    total_bytes: total,
                     status: 4,
                     error_message: msg,
                     file_name: String::new(),
@@ -949,6 +962,24 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         }
     }
 
+    // Determine the actual downloaded size.  When the server didn't report
+    // Content-Length (total_bytes == 0), read the real file size from disk so
+    // that the completion signal carries accurate byte counts.
+    let actual_total = if info.total_bytes > 0 {
+        info.total_bytes
+    } else {
+        match tokio::fs::metadata(&temp_path).await {
+            Ok(m) => m.len() as i64,
+            Err(e) => {
+                rinf::debug_print!(
+                    "[download] task {} warning: cannot read temp file size: {}",
+                    p.task_id, e
+                );
+                0
+            }
+        }
+    };
+
     // All data verified — rename temp file to final destination.
     // This is the atomic moment the file "appears" as complete.
     tokio::fs::rename(&temp_path, &dest_path).await.map_err(|e| {
@@ -967,7 +998,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         dest_path.display()
     );
 
-    Ok(info.total_bytes)
+    Ok(actual_total)
 }
 
 // ---------------------------------------------------------------------------

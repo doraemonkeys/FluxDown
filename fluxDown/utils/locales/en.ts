@@ -74,6 +74,17 @@ const en: Record<MessageKey, string> = {
   'notify.sendFailed': 'Send Failed',
   'notify.connectionFailed': 'Cannot connect to FluxDown app: {message}',
 
+  // Resource sniffer & panel
+  'sniffer.title': 'Resource Sniffer',
+  'sniffer.resourceSniffing': 'Resource Sniffing',
+  'sniffer.resourceSniffingHint': 'Auto-detect downloadable resources on web pages',
+  'sniffer.showFloatingButton': 'Video Float Button',
+  'sniffer.showFloatingButtonHint': 'Show quick download button on video elements',
+  'sniffer.showResourcePanel': 'Resource Panel',
+  'sniffer.showResourcePanelHint': 'Show detected resources panel at page bottom',
+  'sniffer.sniffImages': 'Image Sniffing',
+  'sniffer.sniffImagesHint': 'Detect large images on web pages (>100KB)',
+
   // Manifest
   'manifest.description': 'Intercept browser downloads and send to FluxDown app for high-speed downloading',
 };

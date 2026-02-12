@@ -173,6 +173,8 @@ class _TaskListItemState extends State<TaskListItem> {
   Widget _buildProgress(AppColors c) {
     final task = widget.task;
     final percentage = (task.progress * 100).toStringAsFixed(1);
+    final progressColor = _progressColor(task, c);
+
     return Padding(
       padding: const EdgeInsets.only(right: 12),
       child: Column(
@@ -188,21 +190,24 @@ class _TaskListItemState extends State<TaskListItem> {
                     color: c.surface3,
                     borderRadius: BorderRadius.circular(1.5),
                   ),
-                  child: FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: task.progress,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: _progressColor(task, c),
-                        borderRadius: BorderRadius.circular(1.5),
-                      ),
-                    ),
-                  ),
+                  clipBehavior: Clip.hardEdge,
+                  child: task.isIndeterminate
+                      ? _IndeterminateBar(color: progressColor)
+                      : FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: task.progress,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: progressColor,
+                              borderRadius: BorderRadius.circular(1.5),
+                            ),
+                          ),
+                        ),
                 ),
               ),
               const SizedBox(width: 8),
               Text(
-                '$percentage%',
+                task.isIndeterminate ? '—' : '$percentage%',
                 style: TextStyle(
                   fontSize: 12,
                   color: c.textSecondary,
@@ -267,6 +272,60 @@ class _TaskListItemState extends State<TaskListItem> {
     return Text(
       task.statusText,
       style: TextStyle(fontSize: 12, color: statusColor),
+    );
+  }
+}
+
+// =============================================================================
+// 不确定进度条（未知大小文件下载中）
+// =============================================================================
+
+class _IndeterminateBar extends StatefulWidget {
+  final Color color;
+  const _IndeterminateBar({required this.color});
+
+  @override
+  State<_IndeterminateBar> createState() => _IndeterminateBarState();
+}
+
+class _IndeterminateBarState extends State<_IndeterminateBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final CurvedAnimation _curve;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat(reverse: true);
+    _curve = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _curve.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _curve,
+      builder: (context, _) {
+        return FractionallySizedBox(
+          alignment: Alignment(-1.0 + 2.0 * _curve.value, 0),
+          widthFactor: 0.3,
+          child: Container(
+            decoration: BoxDecoration(
+              color: widget.color,
+              borderRadius: BorderRadius.circular(1.5),
+            ),
+          ),
+        );
+      },
     );
   }
 }

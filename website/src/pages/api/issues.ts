@@ -1,7 +1,8 @@
 /**
  * GET /api/issues?state=open&label=enhancement&page=1&per_page=15
  *
- * 获取 user-feedback 标签的 GitHub Issues 列表（分页）。
+ * 获取反馈相关的 GitHub Issues 列表（分页）。
+ * 数据源：user-feedback 标签 + bug 标签的 Issue（合并去重）。
  * 排除带有 subscription 标签的 Issue。
  *
  * Query params:
@@ -102,12 +103,11 @@ function parseLinkNext(header: string | null): string | null {
   return match ? match[1] : null;
 }
 
-/** 拉取 GitHub Issues（自动分页），只获取带 user-feedback 标签的 */
-async function fetchAllFeedbackIssues(state: string): Promise<GitHubIssue[]> {
+/** 按单个标签拉取 GitHub Issues（自动分页） */
+async function fetchIssuesByLabel(label: string, state: string): Promise<GitHubIssue[]> {
   const all: GitHubIssue[] = [];
-  // GitHub API: labels 参数筛选带 user-feedback 的 issue
   let url: string | null =
-    `https://api.github.com/repos/${GITHUB_REPO}/issues?labels=user-feedback&state=${state}&per_page=100&sort=created&direction=desc`;
+    `https://api.github.com/repos/${GITHUB_REPO}/issues?labels=${encodeURIComponent(label)}&state=${state}&per_page=100&sort=created&direction=desc`;
 
   while (url) {
     const res = await fetch(url, {
@@ -129,6 +129,35 @@ async function fetchAllFeedbackIssues(state: string): Promise<GitHubIssue[]> {
   }
 
   return all;
+}
+
+/**
+ * 拉取反馈相关的 GitHub Issues（自动分页）。
+ * 同时获取 user-feedback 和 bug 标签的 issue，合并去重，
+ * 确保待处理列表包含 bug 反馈，而不仅仅是功能反馈。
+ */
+async function fetchAllFeedbackIssues(state: string): Promise<GitHubIssue[]> {
+  const [feedbackIssues, bugIssues] = await Promise.all([
+    fetchIssuesByLabel("user-feedback", state),
+    fetchIssuesByLabel("bug", state),
+  ]);
+
+  // 按 issue number 去重（bug issue 可能同时带有 user-feedback 标签）
+  const seen = new Set<number>();
+  const merged: GitHubIssue[] = [];
+  for (const issue of [...feedbackIssues, ...bugIssues]) {
+    if (!seen.has(issue.number)) {
+      seen.add(issue.number);
+      merged.push(issue);
+    }
+  }
+
+  // 按创建时间降序排列
+  merged.sort((a, b) =>
+    new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+
+  return merged;
 }
 
 /**

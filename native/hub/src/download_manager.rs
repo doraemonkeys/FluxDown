@@ -99,6 +99,9 @@ struct TaskSpeedState {
     /// carries segment_details, regardless of rate-limiting.  This ensures
     /// the next send always has the latest segment data available.
     cached_segments: Option<Vec<SegmentProgressInfo>>,
+    /// Last status sent to Dart.  Used to detect status transitions so that
+    /// they are always forwarded immediately (not rate-limited).
+    last_sent_status: i32,
 }
 
 /// Information needed to start a queued task later.
@@ -1156,6 +1159,7 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 last_time: now,
                 file_name: String::new(),
                 cached_segments: None,
+                last_sent_status: -1, // never sent yet
             }
         });
 
@@ -1185,7 +1189,10 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
         // For terminal states (completed / error / paused) always send immediately.
         // For downloading (status=1) and preparing (status=5), rate-limit to avoid flooding Dart.
         let is_terminal = update.status != 1 && update.status != 5;
-        let should_send = is_terminal || {
+        // Status transitions (e.g. preparing→downloading) must also be sent
+        // immediately so the UI never skips an intermediate state.
+        let is_status_change = update.status != state.last_sent_status;
+        let should_send = is_terminal || is_status_change || {
             let last = last_dart_send.get(&update.task_id);
             last.is_none() || now.duration_since(*last.unwrap_or(&now)).as_millis() >= MIN_DART_INTERVAL_MS
         };
@@ -1263,6 +1270,7 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 );
             }
 
+            state.last_sent_status = update.status;
             last_dart_send.insert(update.task_id.clone(), now);
         }
 
@@ -1288,14 +1296,31 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
             }
         }
 
-        // When a task completes, persist final downloaded_bytes to DB so that
-        // subsequent app restarts load the correct 100% progress value.
+        // When a task completes, persist final downloaded_bytes *and*
+        // total_bytes to DB so that subsequent app restarts load correct
+        // 100% progress.  For unknown-size downloads the total_bytes was 0
+        // during transfer but gets resolved to the actual file size upon
+        // completion — we must persist that final value too.
         // Completion writes are awaited (not fire-and-forget) to guarantee
-        // the final value is persisted before we clean up state.
-        if update.status == 3 && update.total_bytes > 0 {
-            let _ = db
-                .update_task_progress(&update.task_id, update.total_bytes)
-                .await;
+        // the final values are persisted before we clean up state.
+        if update.status == 3 {
+            if update.downloaded_bytes > 0 {
+                let _ = db
+                    .update_task_progress(&update.task_id, update.downloaded_bytes)
+                    .await;
+            }
+            // Use total_bytes when available; fall back to downloaded_bytes
+            // for unknown-size downloads where total_bytes may still be 0.
+            let final_total = if update.total_bytes > 0 {
+                update.total_bytes
+            } else {
+                update.downloaded_bytes
+            };
+            if final_total > 0 {
+                let _ = db
+                    .update_task_total_bytes(&update.task_id, final_total)
+                    .await;
+            }
         }
 
         // Clean up tasks that are no longer actively downloading.
