@@ -366,16 +366,12 @@ export function normalizeUrlForDedup(url: string): string {
 
 /**
  * 基于归一化 URL 生成资源唯一 ID
+ *
+ * 直接使用归一化后的 URL 作为 ID，避免 32 位 djb2 哈希的碰撞风险。
+ * Map 查找 string key 的性能在现代引擎中足够好（V8 对短字符串做了内联哈希优化）。
  */
 export function generateResourceId(url: string): string {
-  const normalized = normalizeUrlForDedup(url);
-  let hash = 0;
-  for (let i = 0; i < normalized.length; i++) {
-    const char = normalized.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return 'r_' + Math.abs(hash).toString(36);
+  return normalizeUrlForDedup(url);
 }
 
 // ===== 工具函数 =====
@@ -449,11 +445,38 @@ export function isStreamingUrl(url: string): boolean {
     lower.includes('/playlist');
 }
 
+/**
+ * 判断 URL 是否是流媒体分片（.m4s / .ts）
+ *
+ * .ts 扩展名有歧义（TypeScript 文件 vs MPEG-TS 分片），
+ * 通过 HLS 上下文特征来区分：
+ * - URL 中包含 HLS 特征路径（/seg, /chunk, /fragment, /hls）
+ * - URL 包含分片序号模式（seg001, chunk-3, -00042）
+ * - 纯 .m4s 始终视为 DASH 分片
+ */
 export function isStreamSegment(url: string): boolean {
   const ext = extractExtension(url);
-  // m4s = DASH fragment, ts 只有在 HLS 上下文才是分片
-  // ts 也可能是 TypeScript（不太可能出现在媒体 URL）或合法的 MPEG-TS 文件
-  return ext === 'm4s' || ext === 'ts';
+
+  // .m4s 一定是 DASH fragment
+  if (ext === 'm4s') return true;
+
+  // .ts 需要结合上下文判断
+  if (ext === 'ts') {
+    const lower = url.toLowerCase();
+    // HLS 特征路径
+    if (lower.includes('/seg') || lower.includes('/chunk') || lower.includes('/fragment')
+      || lower.includes('/hls') || lower.includes('/ts/') || lower.includes('/segments/')) {
+      return true;
+    }
+    // 分片序号模式（如 segment001.ts, chunk-3.ts, media-00042.ts）
+    if (/[_-]\d{2,}\.ts/i.test(url) || /seg\d+/i.test(url)) {
+      return true;
+    }
+    // 没有 HLS 特征 → 可能是合法的 MPEG-TS 文件或 TypeScript 文件，不视为分片
+    return false;
+  }
+
+  return false;
 }
 
 export function isSniffableContentType(contentType: string): boolean {

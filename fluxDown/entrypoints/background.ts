@@ -28,8 +28,8 @@
  *   - 利用第一层缓存的 HTTP 响应信息来补全 downloadItem 中缺失的元数据
  */
 
-import { sendDownloadRequest, checkFluxDownAvailable } from '@/utils/native-messaging';
-import type { DownloadRequest } from '@/utils/native-messaging';
+import { sendDownloadRequest, sendBatchDownloadRequest, checkFluxDownAvailable } from '@/utils/native-messaging';
+import type { DownloadRequest, BatchDownloadItem } from '@/utils/native-messaging';
 import { loadSettings, shouldIntercept } from '@/utils/settings';
 import type { DownloadItemInfo } from '@/utils/settings';
 import { initI18n, t } from '@/utils/i18n';
@@ -119,10 +119,21 @@ export default defineBackground(() => {
         }
         requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now() });
 
-        // 清理 60 秒前的缓存条目
-        for (const [url, entry] of requestHeaderCache) {
-          if (Date.now() - entry.ts > 60_000) {
-            requestHeaderCache.delete(url);
+        // 清理 60 秒前的缓存条目 + 强制大小上限（防止高流量页面短时间内积累过多条目）
+        const now = Date.now();
+        for (const [cachedUrl, entry] of requestHeaderCache) {
+          if (now - entry.ts > 60_000) {
+            requestHeaderCache.delete(cachedUrl);
+          }
+        }
+        if (requestHeaderCache.size > 1000) {
+          // 超过上限时删除最旧的条目（Map 迭代顺序 = 插入顺序）
+          const excess = requestHeaderCache.size - 800;
+          let deleted = 0;
+          for (const key of requestHeaderCache.keys()) {
+            if (deleted >= excess) break;
+            requestHeaderCache.delete(key);
+            deleted++;
           }
         }
       },
@@ -183,6 +194,23 @@ export default defineBackground(() => {
 
         // 60 秒后自动清理
         setTimeout(() => responseDownloadCache.delete(details.url), 60_000);
+
+        // 同时将 main_frame 下载资源加入嗅探面板
+        // （资源嗅探层只监听 media/xhr/object/other，main_frame 会绕过它）
+        if (details.tabId >= 0) {
+          const added = addSniffedResource(
+            details.tabId,
+            details.url,
+            contentType,
+            contentLength,
+            dispositionFilename,
+            isAttachment,
+          );
+          if (added > 0) {
+            updateBadgeForTab(details.tabId);
+            notifyContentScript(details.tabId);
+          }
+        }
       },
       { urls: ['<all_urls>'] },
       ['responseHeaders'],
@@ -201,6 +229,9 @@ export default defineBackground(() => {
       (details) => {
         // 跳过无效或非 tab 请求
         if (details.tabId < 0 || !details.responseHeaders) return;
+
+        // 跳过非成功响应（重定向、客户端/服务器错误）
+        if (details.statusCode < 200 || details.statusCode >= 400) return;
 
         let contentType = '';
         let contentLength = -1;
@@ -250,7 +281,7 @@ export default defineBackground(() => {
           notifyContentScript(details.tabId);
         }
       },
-      { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other'] },
+      { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other', 'sub_frame'] },
       ['responseHeaders'],
     );
     console.log('[FluxDown] Resource sniffer (onHeadersReceived for media) registered');
@@ -813,6 +844,57 @@ export default defineBackground(() => {
           message.mimeType,
         );
         return { success: true };
+      }
+
+      // --- Content Script UI: 批量下载多个资源 ---
+      // 将所有选中资源的 URL 合并为一个请求发送给桌面应用，
+      // 由 Flutter 端的快速下载对话框按换行符拆分后批量创建任务。
+      // 不应循环发送多次请求，而是一次性添加全部。
+      case 'batchDownload': {
+        const items = message.items as Array<{
+          url: string;
+          referrer?: string;
+          filename?: string;
+          fileSize?: number;
+          mimeType?: string;
+        }>;
+        if (!Array.isArray(items) || items.length === 0) {
+          return { success: false, message: 'No items' };
+        }
+
+        // 为每个 URL 提取 cookies，构建 BatchDownloadItem 列表
+        const batchItems: BatchDownloadItem[] = [];
+        for (const item of items) {
+          let cookieString = '';
+          const cached = requestHeaderCache.get(item.url);
+          if (cached) {
+            cookieString = cached.cookies;
+            requestHeaderCache.delete(item.url);
+          }
+          if (!cookieString) {
+            try {
+              const cookies = await chrome.cookies.getAll({ url: item.url });
+              cookieString = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+            } catch { /* ignore */ }
+          }
+          batchItems.push({
+            url: item.url,
+            referrer: item.referrer || '',
+            filename: item.filename,
+            cookies: cookieString,
+            fileSize: item.fileSize,
+            mimeType: item.mimeType,
+          });
+        }
+
+        // 单次 HTTP POST 发送所有 URL（用换行符连接）
+        const response = await sendBatchDownloadRequest(batchItems);
+        if (response.success) {
+          await incrementStat('sent');
+        } else {
+          await incrementStat('failed');
+        }
+        return { success: response.success, sent: items.length };
       }
 
       // --- Popup: 切换资源面板显示（发消息给当前活跃 tab 的 Content Script） ---

@@ -620,5 +620,8 @@ class S {
   // ─────────────────────────────────────────────
 
   String get downloadCompleted => _t('下载完成', 'Download Complete');
+  String batchDownloadCompleted(int count) =>
+      _t('$count 个任务下载完成', '$count Downloads Complete');
+  String andMoreFiles(int count) => _t('等 $count 个文件', 'and $count more');
   String get openFileFolder => _t('打开文件夹', 'Open Folder');
 }

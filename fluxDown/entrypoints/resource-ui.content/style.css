@@ -136,13 +136,13 @@
 }
 
 .fluxdown-dot.right .dot-badge {
-  right: -4px;
-  left: auto;
+  left: -4px;
+  right: auto;
 }
 
 .fluxdown-dot.left .dot-badge {
-  left: -4px;
-  right: auto;
+  right: -4px;
+  left: auto;
 }
 
 .fluxdown-dot .dot-badge.show {

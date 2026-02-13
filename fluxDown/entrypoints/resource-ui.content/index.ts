@@ -12,18 +12,20 @@
 
 import type { DetectedResource, ResourceType, ConfidenceLevel } from '@/utils/resource-types';
 import { formatFileSize, getResourceTypeIcon } from '@/utils/resource-types';
+import type { MessageKey } from '@/utils/locales/zh-CN';
+import { initI18n, setLocale, t } from '@/utils/i18n';
 import './style.css';
 
 /* ===== 常量 ===== */
-interface TabDef { key: 'all' | ResourceType; zh: string; en: string }
+interface TabDef { key: 'all' | ResourceType; i18nKey: MessageKey }
 const TABS: TabDef[] = [
-  { key: 'all', zh: '全部', en: 'All' },
-  { key: 'video', zh: '视频', en: 'Video' },
-  { key: 'audio', zh: '音频', en: 'Audio' },
-  { key: 'document', zh: '文档', en: 'Docs' },
-  { key: 'archive', zh: '压缩包', en: 'Archive' },
-  { key: 'stream', zh: '流媒体', en: 'Stream' },
-  { key: 'other', zh: '其他', en: 'Other' },
+  { key: 'all', i18nKey: 'panel.tabAll' },
+  { key: 'video', i18nKey: 'panel.tabVideo' },
+  { key: 'audio', i18nKey: 'panel.tabAudio' },
+  { key: 'document', i18nKey: 'panel.tabDocs' },
+  { key: 'archive', i18nKey: 'panel.tabArchive' },
+  { key: 'stream', i18nKey: 'panel.tabStream' },
+  { key: 'other', i18nKey: 'panel.tabOther' },
 ];
 
 const SVG_DOWNLOAD = '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>';
@@ -44,12 +46,14 @@ export default defineContentScript({
   async main(ctx) {
     console.log('[FluxDown UI] starting');
 
+    /* ========== i18n 初始化 ========== */
+    await initI18n();
+
     /* ========== 状态 ========== */
     let resources: DetectedResource[] = [];
     let activeTab: string = 'all';
     const selectedIds = new Set<string>();
     let panelOpen = false;
-    const isZh = navigator.language.startsWith('zh');
     let side: 'left' | 'right' = 'right';
 
     /* ========== DOM 引用 ========== */
@@ -62,6 +66,7 @@ export default defineContentScript({
     let selectAllEl: HTMLInputElement;
     let batchCountEl: HTMLElement;
     let batchBtnEl: HTMLButtonElement;
+    let selectAllText: Text;
     let floatBtnEl: HTMLElement;
 
     /* ========== Shadow UI ========== */
@@ -86,6 +91,18 @@ export default defineContentScript({
       }
       if (msg.action === 'toggleResourcePanel') {
         togglePanel();
+      }
+    });
+
+    /* ========== 语言变化监听 ========== */
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['fluxdown_locale']) {
+        const newLocale = changes['fluxdown_locale'].newValue;
+        if (newLocale) {
+          setLocale(newLocale);
+          refreshStaticTexts();
+          render();
+        }
       }
     });
 
@@ -266,7 +283,8 @@ export default defineContentScript({
       selectAllEl = document.createElement('input');
       selectAllEl.type = 'checkbox';
       label.appendChild(selectAllEl);
-      label.appendChild(document.createTextNode(isZh ? ' 全选' : ' Select All'));
+      selectAllText = document.createTextNode(` ${t('panel.selectAll')}`);
+      label.appendChild(selectAllText);
       selectAllEl.addEventListener('change', () => {
         const items = filtered();
         if (selectAllEl.checked) {
@@ -279,22 +297,29 @@ export default defineContentScript({
       batchBtnEl = document.createElement('button');
       batchBtnEl.className = 'batch-btn';
       batchBtnEl.disabled = true;
-      batchBtnEl.innerHTML = `${svg(SVG_DOWNLOAD)} ${isZh ? '批量下载' : 'Download'} (<span>0</span>)`;
+      batchBtnEl.innerHTML = `${svg(SVG_DOWNLOAD)} ${t('panel.batchDownload')} (<span>0</span>)`;
       batchCountEl = batchBtnEl.querySelector('span') as HTMLElement;
       batchBtnEl.addEventListener('click', () => {
         const items = resources.filter((r) => selectedIds.has(r.id));
-        for (const r of items) {
-          chrome.runtime.sendMessage({
-            action: 'downloadResource',
-            url: r.url, referrer: r.pageUrl || location.href,
+        if (items.length === 0) return;
+
+        // 一次性发送所有选中资源给 Background，由 Background 端顺序执行
+        // 避免循环 sendMessage 导致 Chrome MV3 消息通道串行阻塞，只有第一个被处理
+        chrome.runtime.sendMessage({
+          action: 'batchDownload',
+          items: items.map((r) => ({
+            url: r.url,
+            referrer: r.pageUrl || location.href,
             filename: r.filename,
             fileSize: r.size > 0 ? r.size : undefined,
             mimeType: r.mimeType,
-          }).catch(() => {});
-        }
+          })),
+        }).catch(() => {});
+
         selectedIds.clear();
         renderList();
         updateBatch();
+        updateSelectAll();
       });
 
       footer.appendChild(label);
@@ -436,18 +461,18 @@ export default defineContentScript({
       const n = resources.length;
       badgeEl.textContent = n > 99 ? '99+' : String(n);
       badgeEl.classList.toggle('show', n > 0);
-      if (countEl) countEl.textContent = n > 0 ? `${n} ${isZh ? '个资源' : 'resources'}` : '';
+      if (countEl) countEl.textContent = n > 0 ? `${n} ${t('panel.resources')}` : '';
     }
 
     function renderTabs(): void {
       if (!tabsEl) return;
       tabsEl.innerHTML = '';
-      for (const t of TABS) {
-        const count = t.key === 'all' ? resources.length : resources.filter((r) => r.type === t.key).length;
-        if (t.key !== 'all' && count === 0) continue;
-        const btn = h('button', `panel-tab${activeTab === t.key ? ' active' : ''}`);
-        btn.textContent = `${isZh ? t.zh : t.en} ${count}`;
-        btn.addEventListener('click', () => { activeTab = t.key; renderTabs(); renderList(); });
+      for (const tab of TABS) {
+        const count = tab.key === 'all' ? resources.length : resources.filter((r) => r.type === tab.key).length;
+        if (tab.key !== 'all' && count === 0) continue;
+        const btn = h('button', `panel-tab${activeTab === tab.key ? ' active' : ''}`);
+        btn.textContent = `${t(tab.i18nKey)} ${count}`;
+        btn.addEventListener('click', () => { activeTab = tab.key; renderTabs(); renderList(); });
         tabsEl.appendChild(btn);
       }
     }
@@ -462,7 +487,7 @@ export default defineContentScript({
         listEl.innerHTML = `
           <div class="panel-empty">
             ${svg(SVG_EMPTY)}
-            <span>${isZh ? '暂未检测到可下载资源' : 'No downloadable resources detected'}</span>
+            <span>${t('panel.empty')}</span>
           </div>
         `;
         return;
@@ -486,8 +511,8 @@ export default defineContentScript({
           <span class="low-conf-line"></span>
           <button class="low-conf-btn">
             ${showLowConf
-              ? (isZh ? '收起' : 'Collapse')
-              : (isZh ? `其他 ${low.length} 项` : `${low.length} more`)}
+              ? t('panel.collapse')
+              : t('panel.more', { count: String(low.length) })}
           </button>
           <span class="low-conf-line"></span>
         `;
@@ -528,7 +553,7 @@ export default defineContentScript({
             ${r.mimeType ? `<span>${esc(r.mimeType)}</span>` : ''}
           </div>
         </div>
-        <button class="dl-btn" title="${isZh ? '下载' : 'Download'}">${svg(SVG_DOWNLOAD)}</button>
+        <button class="dl-btn" title="${t('panel.download')}">${svg(SVG_DOWNLOAD)}</button>
       `;
 
       const cb = row.querySelector('.check') as HTMLInputElement;
@@ -563,6 +588,16 @@ export default defineContentScript({
       selectAllEl.checked = items.length > 0 && items.every((r) => selectedIds.has(r.id));
     }
 
+    /** 语言切换时刷新静态文本（全选 label、批量下载按钮） */
+    function refreshStaticTexts(): void {
+      if (selectAllText) selectAllText.textContent = ` ${t('panel.selectAll')}`;
+      if (batchBtnEl) {
+        batchBtnEl.innerHTML = `${svg(SVG_DOWNLOAD)} ${t('panel.batchDownload')} (<span>0</span>)`;
+        batchCountEl = batchBtnEl.querySelector('span') as HTMLElement;
+        updateBatch();
+      }
+    }
+
     function filtered(): DetectedResource[] {
       return activeTab === 'all' ? resources : resources.filter((r) => r.type === activeTab);
     }
@@ -582,7 +617,7 @@ export default defineContentScript({
       floatBtnEl.style.left = `${rect.right - 110}px`;
 
       const height = video.videoHeight;
-      let label = isZh ? '下载' : 'DL';
+      let label = t('panel.floatDL');
       if (height >= 2160) label = '4K';
       else if (height >= 1080) label = '1080p';
       else if (height >= 720) label = '720p';

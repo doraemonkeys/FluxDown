@@ -51,12 +51,11 @@ export default defineUnlistedScript(() => {
     if (notifiedUrls.has(key)) return;
     notifiedUrls.add(key);
 
-    // 防止集合无限增长
+    // 防止集合无限增长：整体清空而非删除前半部分
+    // 下游 Content Script (reportedUrls) 和 resource-store 仍有去重兜底，
+    // 最坏情况是短暂的重复通知被下游过滤掉
     if (notifiedUrls.size > 500) {
-      const firstHalf = Array.from(notifiedUrls).slice(0, 250);
-      for (const k of firstHalf) {
-        notifiedUrls.delete(k);
-      }
+      notifiedUrls.clear();
     }
 
     document.dispatchEvent(new CustomEvent(FLUXDOWN_EVENT, {

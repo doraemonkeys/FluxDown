@@ -36,6 +36,8 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
   String get fileSize => widget.args['fileSize'] as String? ?? '';
   String get fileExt => widget.args['fileExt'] as String? ?? '?';
   String get filePath => widget.args['filePath'] as String? ?? '';
+  int get taskCount => widget.args['taskCount'] as int? ?? 1;
+  bool get isBatch => taskCount > 1;
 
   static const _windowWidth = 340.0;
   static const _windowHeight = 158.0;
@@ -178,7 +180,9 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
                   ),
                   const SizedBox(width: 7),
                   Text(
-                    currentS.downloadCompleted,
+                    isBatch
+                        ? currentS.batchDownloadCompleted(taskCount)
+                        : currentS.downloadCompleted,
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
@@ -236,7 +240,9 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            fileSize,
+                            isBatch
+                                ? currentS.andMoreFiles(taskCount - 1)
+                                : fileSize,
                             style: TextStyle(fontSize: 11, color: c.textMuted),
                           ),
                         ],

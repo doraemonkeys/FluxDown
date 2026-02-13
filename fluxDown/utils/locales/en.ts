@@ -85,6 +85,23 @@ const en: Record<MessageKey, string> = {
   'sniffer.sniffImages': 'Image Sniffing',
   'sniffer.sniffImagesHint': 'Detect large images on web pages (>100KB)',
 
+  // Resource panel (content script)
+  'panel.selectAll': 'Select All',
+  'panel.batchDownload': 'Download',
+  'panel.resources': 'resources',
+  'panel.empty': 'No downloadable resources detected',
+  'panel.collapse': 'Collapse',
+  'panel.more': '{count} more',
+  'panel.download': 'Download',
+  'panel.floatDL': 'DL',
+  'panel.tabAll': 'All',
+  'panel.tabVideo': 'Video',
+  'panel.tabAudio': 'Audio',
+  'panel.tabDocs': 'Docs',
+  'panel.tabArchive': 'Archive',
+  'panel.tabStream': 'Stream',
+  'panel.tabOther': 'Other',
+
   // Manifest
   'manifest.description': 'Intercept browser downloads and send to FluxDown app for high-speed downloading',
 };

@@ -11,6 +11,7 @@
  */
 
 import type { ResourceMessagePayload, FetchInterceptDetail, ResourceType } from '@/utils/resource-types';
+import { classifyByExtension } from '@/utils/resource-types';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
@@ -152,12 +153,18 @@ export default defineContentScript({
           || href.startsWith('javascript:') || href.startsWith('#')) continue;
         if (!href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('ftp://')) continue;
 
-        // 仅收集有明确下载意图的链接（有 download 属性 或 看起来像文件 URL）
+        // 收集有下载意图的链接：
+        // 1. 有 download 属性（HTML5 明确标注为下载）
+        // 2. URL 包含已知可下载扩展名（含查询参数中的文件名）
+        // 3. URL 路径含下载关键词（/download, /file/ 等）
         if (a.download || isDownloadableUrl(href)) {
+          // download 属性可能包含建议的文件名
+          const filename = a.download || undefined;
+          const type = classifyByUrlExtension(href);
           resources.push({
             url: href,
-            type: classifyByUrlExtension(href),
-            filename: a.download || undefined,
+            type,
+            filename,
             detectedBy: 'dom-scan',
           });
         }
@@ -203,10 +210,11 @@ export default defineContentScript({
             detectedBy: 'mutation-observer',
           });
         }
-      } else if (tag === 'a') {
+    } else if (tag === 'a') {
         const a = el as HTMLAnchorElement;
-        if (a.href && (a.download || isDownloadableUrl(a.href))
-          && (a.href.startsWith('http://') || a.href.startsWith('https://'))) {
+        if (a.href
+          && (a.href.startsWith('http://') || a.href.startsWith('https://') || a.href.startsWith('ftp://'))
+          && (a.download || isDownloadableUrl(a.href))) {
           results.push({
             url: a.href,
             type: classifyByUrlExtension(a.href),
@@ -272,37 +280,86 @@ export default defineContentScript({
       'm3u8', 'mpd',
     ]);
 
-    function isDownloadableUrl(url: string): boolean {
-      try {
-        const pathname = new URL(url).pathname.toLowerCase();
-        const ext = pathname.split('.').pop() || '';
-        return DOWNLOADABLE_EXTS.has(ext);
-      } catch {
-        return false;
-      }
-    }
+    /** 常见下载路径关键词（无扩展名的下载链接识别） */
+    const DOWNLOAD_PATH_KEYWORDS = [
+      '/download', '/get/', '/fetch/', '/file/', '/files/',
+      '/attachment', '/export', '/dl/', '/release/',
+    ];
 
-    function classifyByUrlExtension(url: string): ResourceType {
+    /**
+     * 从 URL 中提取文件扩展名（多策略）
+     *
+     * 策略顺序：
+     * 1. 从 pathname 末尾提取 — 覆盖 /path/file.pdf 场景
+     * 2. 从查询参数值中提取 — 覆盖 /download?file=report.pdf 场景
+     * 3. 从 pathname 任意段提取 — 覆盖 /file.pdf/download 场景
+     */
+    function extractExtFromUrl(url: string): string {
       try {
-        const pathname = new URL(url).pathname.toLowerCase();
-        const ext = pathname.split('.').pop() || '';
-        const videoExts = new Set(['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'ts', 'm4v']);
-        const audioExts = new Set(['mp3', 'flac', 'wav', 'aac', 'ogg', 'wma', 'm4a', 'opus']);
-        const docExts = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']);
-        const archiveExts = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso', 'img']);
-        const streamExts = new Set(['m3u8', 'mpd']);
+        const u = new URL(url);
+        const pathname = u.pathname.toLowerCase();
 
-        if (videoExts.has(ext)) return 'video';
-        if (audioExts.has(ext)) return 'audio';
-        if (docExts.has(ext)) return 'document';
-        if (archiveExts.has(ext)) return 'archive';
-        if (streamExts.has(ext)) return 'stream';
-        if (ext === 'torrent') return 'torrent';
-        if (ext === 'exe' || ext === 'msi' || ext === 'dmg' || ext === 'apk') return 'executable';
+        // 策略 1: pathname 末尾的扩展名
+        const lastSegment = pathname.split('/').pop() || '';
+        const dotIndex = lastSegment.lastIndexOf('.');
+        if (dotIndex > 0 && dotIndex < lastSegment.length - 1) {
+          const ext = lastSegment.substring(dotIndex + 1);
+          if (DOWNLOADABLE_EXTS.has(ext)) return ext;
+        }
+
+        // 策略 2: 查询参数值中的扩展名（如 ?file=report.pdf&type=doc）
+        for (const val of u.searchParams.values()) {
+          const valLower = val.toLowerCase();
+          const valDot = valLower.lastIndexOf('.');
+          if (valDot > 0 && valDot < valLower.length - 1) {
+            const ext = valLower.substring(valDot + 1);
+            if (DOWNLOADABLE_EXTS.has(ext)) return ext;
+          }
+        }
+
+        // 策略 3: pathname 任意段含已知扩展名（如 /file.pdf/download）
+        const segments = pathname.split('/');
+        for (const seg of segments) {
+          const segDot = seg.lastIndexOf('.');
+          if (segDot > 0 && segDot < seg.length - 1) {
+            const ext = seg.substring(segDot + 1);
+            if (DOWNLOADABLE_EXTS.has(ext)) return ext;
+          }
+        }
       } catch {
         // ignore
       }
-      return 'other';
+      return '';
+    }
+
+    function isDownloadableUrl(url: string): boolean {
+      // 1. 扩展名匹配（多策略）
+      if (extractExtFromUrl(url)) return true;
+
+      // 2. 路径关键词匹配（无扩展名的下载链接）
+      try {
+        const pathname = new URL(url).pathname.toLowerCase();
+        for (const keyword of DOWNLOAD_PATH_KEYWORDS) {
+          if (pathname.includes(keyword)) return true;
+        }
+      } catch {
+        // ignore
+      }
+
+      return false;
+    }
+
+    /**
+     * 分类 URL 所指资源的类型。
+     * 复用 resource-types.ts 中统一的 EXTENSION_CATEGORIES 映射，
+     * 通过增强的 extractExtFromUrl 先提取扩展名再查表。
+     */
+    function classifyByUrlExtension(url: string): ResourceType {
+      const ext = extractExtFromUrl(url);
+      if (!ext) return 'other';
+      // classifyByExtension 内部使用 extractExtension(url) 只看 pathname 末尾，
+      // 这里我们已经确认 ext 存在，构造一个简单的 fake URL 让它查表
+      return classifyByExtension(`https://x/f.${ext}`);
     }
 
     function mapFetchEventType(type: string): ResourceType {

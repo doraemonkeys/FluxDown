@@ -83,6 +83,23 @@ const zhCN = {
   'sniffer.sniffImages': '图片嗅探',
   'sniffer.sniffImagesHint': '检测网页中的大图片资源（>100KB）',
 
+  // Resource panel (content script)
+  'panel.selectAll': '全选',
+  'panel.batchDownload': '批量下载',
+  'panel.resources': '个资源',
+  'panel.empty': '暂未检测到可下载资源',
+  'panel.collapse': '收起',
+  'panel.more': '其他 {count} 项',
+  'panel.download': '下载',
+  'panel.floatDL': '下载',
+  'panel.tabAll': '全部',
+  'panel.tabVideo': '视频',
+  'panel.tabAudio': '音频',
+  'panel.tabDocs': '文档',
+  'panel.tabArchive': '压缩包',
+  'panel.tabStream': '流媒体',
+  'panel.tabOther': '其他',
+
   // Manifest
   'manifest.description': '拦截浏览器下载，发送到 FluxDown 桌面应用进行高速下载',
 } as const;
