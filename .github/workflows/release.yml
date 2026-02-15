@@ -61,6 +61,7 @@ jobs:
         with:
           channel: stable
           cache: true
+          architecture: x64  # Flutter SDK 无 ARM64 Windows 版，x64 通过仿真层运行
 
       - name: Flutter version info
         run: flutter --version
@@ -79,6 +80,24 @@ jobs:
       # ── Build ──
       - name: Build Flutter Windows app
         run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
+
+      - name: Normalize build output path for ARM64
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $expected = "build\windows\arm64\runner\Release"
+          $fallback = "build\windows\x64\runner\Release"
+          if (-not (Test-Path $expected) -and (Test-Path $fallback)) {
+            Write-Host "Relocating x64 build output to arm64 path..."
+            New-Item -ItemType Directory -Path "build\windows\arm64\runner" -Force | Out-Null
+            Move-Item -Path $fallback -Destination $expected
+          }
+          if (Test-Path $expected) {
+            Write-Host "Build output verified at: $expected"
+          } else {
+            Write-Error "No build output found at $expected or $fallback"
+            exit 1
+          }
 
       # ── Inno Setup installer ──
       - name: Ensure Inno Setup is installed
