@@ -1,10 +1,45 @@
 import type { Messages } from "./en";
 
 const zhCN: Messages = {
+  // Announcement
+  "announcement.1": "投票进行中：建微信群、QQ群还是公众号？快来参与投票吧！",
+  "announcement.close": "关闭",
+  "announcement.badge": "公告",
+  "announcement.title": "最新",
+  "announcement.titleHighlight": "公告",
+  "announcement.subtitle": "了解 FluxDown 团队的最新动态、活动与更新。",
+  "announcement.active": "进行中",
+  "announcement.ended": "已结束",
+  "announcement.viewDetail": "查看详情",
+  "announcement.empty": "暂无公告。",
+
+  // Vote
+  "vote.badge": "社区投票",
+  "vote.title": "选择我们的",
+  "vote.titleHighlight": "社区平台",
+  "vote.subtitle": "帮助我们决定创建哪个社区平台。你的投票将塑造 FluxDown 社区的未来！",
+  "vote.wechat": "微信群",
+  "vote.wechatDesc": "日常沟通方便，支持语音消息，实时交流讨论。",
+  "vote.qq": "QQ 群",
+  "vote.qqDesc": "功能丰富，支持文件共享、屏幕分享，聊天记录持久保存。",
+  "vote.officialAccount": "微信公众号",
+  "vote.officialAccountDesc": "精选更新推送、功能预告、使用教程和团队文章。",
+  "vote.votes": "{n} 票",
+  "vote.totalVotes": "共 {n} 票",
+  "vote.submitVote": "投票",
+  "vote.submitting": "投票中...",
+  "vote.success": "感谢投票！",
+  "vote.alreadyVoted": "你已经投过票了",
+  "vote.error": "投票失败，请重试",
+  "vote.rateLimited": "请求过于频繁，请稍候",
+  "vote.loading": "加载中...",
+  "vote.loadError": "加载结果失败",
+
   // Nav
   "nav.features": "功能",
   "nav.extension": "浏览器扩展",
   "nav.download": "下载",
+  "nav.announcements": "公告",
   "nav.feedback": "反馈",
   "nav.changelog": "更新日志",
 

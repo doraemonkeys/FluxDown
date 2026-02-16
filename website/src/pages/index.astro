@@ -1,6 +1,7 @@
 ---
 import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
+import AnnouncementBar from "../components/AnnouncementBar";
 import HeroSection from "../components/HeroSection";
 import FeaturesSection from "../components/FeaturesSection";
 import ExtensionSection from "../components/ExtensionSection";
@@ -9,6 +10,7 @@ import Footer from "../components/Footer";
 ---
 
 <Layout>
+  <AnnouncementBar client:load />
   <FloatingNavbar client:load />
   <main>
     <HeroSection client:load />

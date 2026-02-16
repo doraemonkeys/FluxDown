@@ -1,8 +1,43 @@
 const en = {
+  // Announcement
+  "announcement.1": "Vote: Should we create a WeChat group, QQ group, or Official Account? Join the discussion!",
+  "announcement.close": "Close",
+  "announcement.badge": "Announcements",
+  "announcement.title": "Latest ",
+  "announcement.titleHighlight": "announcements",
+  "announcement.subtitle": "Stay up to date with the latest news, events, and updates from the FluxDown team.",
+  "announcement.active": "Active",
+  "announcement.ended": "Ended",
+  "announcement.viewDetail": "View Details",
+  "announcement.empty": "No announcements yet.",
+
+  // Vote
+  "vote.badge": "Community Vote",
+  "vote.title": "Choose our ",
+  "vote.titleHighlight": "community platform",
+  "vote.subtitle": "Help us decide which community platform to create. Your vote shapes the future of FluxDown's community!",
+  "vote.wechat": "WeChat Group",
+  "vote.wechatDesc": "Convenient for daily communication, voice messages, and real-time discussion with the community.",
+  "vote.qq": "QQ Group",
+  "vote.qqDesc": "Rich features with file sharing, screen sharing, and persistent chat history for the community.",
+  "vote.officialAccount": "Official Account",
+  "vote.officialAccountDesc": "Curated updates, feature announcements, tutorials, and polished articles from the team.",
+  "vote.votes": "{n} votes",
+  "vote.totalVotes": "{n} votes total",
+  "vote.submitVote": "Vote",
+  "vote.submitting": "Voting...",
+  "vote.success": "Thanks for voting!",
+  "vote.alreadyVoted": "You have already voted",
+  "vote.error": "Vote failed, please try again",
+  "vote.rateLimited": "Too many requests, please wait",
+  "vote.loading": "Loading results...",
+  "vote.loadError": "Failed to load results",
+
   // Nav
   "nav.features": "Features",
   "nav.extension": "Extension",
   "nav.download": "Download",
+  "nav.announcements": "Announcements",
   "nav.feedback": "Feedback",
   "nav.changelog": "Changelog",
 

@@ -26,6 +26,7 @@ export function FloatingNavbar({
     { name: t("nav.features"), link: "/#features" },
     { name: t("nav.extension"), link: "/#extension" },
     { name: t("nav.download"), link: "/#download" },
+    { name: t("nav.announcements"), link: "/announcements" },
     { name: t("nav.feedback"), link: "/feedback" },
     { name: t("nav.changelog"), link: "/changelog" },
   ];
