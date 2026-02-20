@@ -28,7 +28,14 @@ class DownloadCompleteWindow extends StatefulWidget {
 class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
     with SingleTickerProviderStateMixin {
   bool _isHovered = false;
+  bool _closed = false;
   late final AnimationController _progressController;
+
+  /// 关闭信号频道 — 关闭前通知主窗口释放单窗口守卫。
+  final _closeChannel = WindowMethodChannel(
+    'flux/notification_close',
+    mode: ChannelMode.unidirectional,
+  );
 
   String get fileName => widget.args['fileName'] as String? ?? '';
   String get fileSize => widget.args['fileSize'] as String? ?? '';
@@ -82,6 +89,15 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
   }
 
   Future<void> _close() async {
+    if (_closed) return;
+    _closed = true;
+    // 先向主窗口发送关闭信号，释放单窗口守卫，再执行 WM_CLOSE。
+    // 这使主窗口能立即弹出下一条通知，而非等待固定超时。
+    try {
+      await _closeChannel.invokeMethod<void>('closed');
+    } catch (_) {
+      // 主窗口可能已退出，忽略错误，直接关闭窗口
+    }
     SubWindowUtils.close();
   }
 

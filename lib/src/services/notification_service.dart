@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/download_task.dart';
 import '../theme/theme_provider.dart';
@@ -53,6 +54,22 @@ class NotificationService {
   /// 正在创建中的通知窗口计数（用于 waitForPending）
   int _pendingCount = 0;
   Completer<void>? _allDoneCompleter;
+
+  // ---------------------------------------------------------------------------
+  // 跨窗口关闭信号
+  // ---------------------------------------------------------------------------
+
+  /// 命名频道：通知子窗口 → 主窗口发送关闭信号（unidirectional 模式下所有引擎均可调用）
+  final _closeChannel = WindowMethodChannel(
+    'flux/notification_close',
+    mode: ChannelMode.unidirectional,
+  );
+
+  /// 频道处理器是否已向平台注册
+  bool _channelInitialized = false;
+
+  /// 等待子窗口关闭信号的 Completer（非 null 表示当前正在等待某窗口关闭）
+  Completer<void>? _windowCloseCompleter;
 
   /// 标记是否正在退出 — 退出过程中不再创建新的通知窗口
   bool _shuttingDown = false;
@@ -136,34 +153,76 @@ class NotificationService {
     logInfo(_tag, 'flushing ${batch.length} notifications');
 
     try {
-      await _createNotifyWindow(batch.last, taskCount: batch.length);
-    } catch (e, stack) {
-      logError(_tag, 'notify window error', e, stack);
-    }
+      // 提前初始化频道并设置 Completer，确保即使窗口关闭极快也能捕获信号。
+      await _ensureChannelInitialized();
+      _windowCloseCompleter = Completer<void>();
 
-    // 守卫等待：通知窗口 8 秒自动关闭 + 1 秒 isolate 销毁缓冲。
-    // 不依赖子窗口回调（desktop_multi_window 无可靠的关闭回调），
-    // 而是保守地等待窗口生命周期结束后再允许下一个窗口创建。
-    await Future.delayed(const Duration(milliseconds: 9500));
+      try {
+        await _createNotifyWindow(batch.last, taskCount: batch.length);
+      } catch (e, stack) {
+        logError(_tag, 'notify window error', e, stack);
+      }
 
-    _windowActive = false;
-    _pendingCount--;
-    logInfo(
-      _tag,
-      'window guard expired, pendingCount=$_pendingCount, queueSize=${_queue.length}',
-    );
+      // 等待子窗口主动发送关闭信号（在 SubWindowUtils.close() 之前发出）。
+      // 最多等待 60 秒兜底，防止用户无限悬停或信号丢失导致服务永久阻塞。
+      await _windowCloseCompleter!.future.timeout(
+        const Duration(seconds: 60),
+        onTimeout: () {
+          logInfo(_tag, 'window close signal timed out after 60s');
+        },
+      );
+      _windowCloseCompleter = null;
 
-    if (_pendingCount == 0 &&
-        _queue.isEmpty &&
-        _allDoneCompleter != null &&
-        !_allDoneCompleter!.isCompleted) {
-      _allDoneCompleter!.complete();
-      _allDoneCompleter = null;
+      // 等待子窗口 WM_CLOSE 处理完毕、Flutter engine isolate 完全销毁，
+      // 避免立即创建下一个窗口时触发并发 isolate 初始化崩溃。
+      await Future.delayed(const Duration(milliseconds: 800));
+    } finally {
+      // try-finally 确保即使出现异常，守卫状态也能被正确重置，
+      // 防止 _windowActive 永久卡在 true 导致后续通知全部被丢弃。
+      _windowCloseCompleter = null; // 清理 completer，防止异常路径下泄漏
+      _windowActive = false;
+      _pendingCount--;
+      logInfo(
+        _tag,
+        'window guard expired, pendingCount=$_pendingCount, queueSize=${_queue.length}',
+      );
+
+      if (_pendingCount == 0 &&
+          _queue.isEmpty &&
+          _allDoneCompleter != null &&
+          !_allDoneCompleter!.isCompleted) {
+        _allDoneCompleter!.complete();
+        _allDoneCompleter = null;
+      }
     }
 
     // 处理守卫期间新入队的任务
     if (_queue.isNotEmpty && !_shuttingDown) {
       await _flushQueue();
+    }
+  }
+
+  /// 惰性注册频道处理器 — 首次调用时向平台注册，后续调用立即返回。
+  Future<void> _ensureChannelInitialized() async {
+    if (_channelInitialized) return;
+    _channelInitialized = true;
+    try {
+      await _closeChannel.setMethodCallHandler(_onWindowCloseSignal);
+      logInfo(_tag, 'notification close channel registered');
+    } catch (e, stack) {
+      logError(_tag, 'failed to register notification close channel', e, stack);
+      _channelInitialized = false; // 允许重试
+    }
+  }
+
+  /// 接收来自通知子窗口的关闭信号 — 释放单窗口守卫。
+  Future<dynamic> _onWindowCloseSignal(MethodCall call) async {
+    if (call.method == 'closed') {
+      logInfo(_tag, 'notification window close signal received');
+      final c = _windowCloseCompleter;
+      if (c != null && !c.isCompleted) {
+        c.complete();
+      }
     }
   }
 
