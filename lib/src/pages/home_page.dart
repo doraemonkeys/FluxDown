@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import '../i18n/locale_provider.dart';
 import '../models/download_controller.dart';
+import '../models/download_task.dart';
 import '../models/settings_provider.dart';
 import '../services/analytics_service.dart';
 import '../services/log_service.dart';
@@ -31,6 +33,8 @@ class _HomePageState extends State<HomePage> {
   final _controller = DownloadController();
   final _settingsProvider = SettingsProvider();
   final _headerBarKey = GlobalKey<HeaderBarState>();
+  int _pendingCompletionNotifies = 0;
+  Timer? _completionSummaryTimer;
 
   // 页面切换
   bool _showSettings = false;
@@ -57,8 +61,7 @@ class _HomePageState extends State<HomePage> {
     // 请求 Rust 端加载下载配置
     _settingsProvider.requestConfig();
     // 监听下载完成事件 → 发送系统通知
-    _controller.onTaskCompleted =
-        NotificationService.instance.showDownloadComplete;
+    _controller.onTaskCompleted = _handleTaskCompleted;
     // 监听 controller 变化 — 选中任务被删除时自动关闭详情面板
     _controller.addListener(_onControllerChanged);
     // 全局键盘快捷键
@@ -78,6 +81,7 @@ class _HomePageState extends State<HomePage> {
     _settingsProvider.removeListener(_onSettingsLoadedForAssocPrompt);
     _controller.removeListener(_onControllerChanged);
     _controller.onTaskCompleted = null;
+    _completionSummaryTimer?.cancel();
     _controller.dispose();
     _settingsProvider.dispose();
     super.dispose();
@@ -143,6 +147,22 @@ class _HomePageState extends State<HomePage> {
     if (_isDetailOpen && _controller.selectedTask == null) {
       setState(() => _isDetailOpen = false);
     }
+  }
+
+  void _handleTaskCompleted(DownloadTask task) {
+    NotificationService.instance.showDownloadComplete(task);
+
+    _pendingCompletionNotifies += 1;
+    _completionSummaryTimer?.cancel();
+    _completionSummaryTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      if (_pendingCompletionNotifies >= 2) {
+        NotificationService.instance.showAllCompletedSummary(
+          _pendingCompletionNotifies,
+        );
+      }
+      _pendingCompletionNotifies = 0;
+    });
   }
 
   /// 全局快捷键处理 — 不依赖焦点树

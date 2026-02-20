@@ -25,7 +25,11 @@ const TYPE_CONFIG: { type: FeedbackType; icon: typeof Lightbulb; colorClass: str
   { type: "other", icon: MessageCircle, colorClass: "text-brand-cyan border-brand-cyan/30 bg-brand-cyan/10" },
 ];
 
-export default function FeedbackSection() {
+interface FeedbackSectionProps {
+  onSuccess?: () => void;
+}
+
+export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
   const { t } = useLocale();
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
@@ -64,6 +68,7 @@ export default function FeedbackSection() {
 
       setStatus("success");
       setForm(INITIAL_FORM);
+      onSuccess?.();
 
       // 5 秒后重置状态
       setTimeout(() => setStatus("idle"), 5000);
@@ -71,7 +76,7 @@ export default function FeedbackSection() {
       setStatus("error");
       setErrorMsg(t("fb.submitError"));
     }
-  }, [form, t]);
+  }, [form, t, onSuccess]);
 
   const canSubmit = form.title.trim().length > 0 && form.description.trim().length > 0 && status !== "submitting";
 

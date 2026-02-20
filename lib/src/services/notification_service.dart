@@ -1,41 +1,46 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shadcn_ui/shadcn_ui.dart';
 
+import '../i18n/locale_provider.dart';
 import '../models/download_task.dart';
-import '../theme/theme_provider.dart';
+import '../theme/app_colors.dart';
+import 'open_folder.dart';
 import 'log_service.dart';
+import 'windows_toast_helper.dart';
 
 const _tag = 'NotifySvc';
 
-/// 下载完成通知服务 — 通过 desktop_multi_window 创建独立的桌面通知窗口。
+/// 下载完成通知服务 — 通过 OverlayEntry 在主窗口右下角弹出通知卡片。
 ///
-/// ## 防并发崩溃机制（迅雷模式）
+/// ## 设计决策
 ///
-/// `WindowController.create()` 内部创建 Dart isolate，
-/// Dart VM 不允许同一线程上并发 `CreateIsolate`，
-/// 否则触发 "CreateIsolate expects there to be no current isolate" 崩溃。
+/// 使用主窗口内 OverlayEntry 替代 desktop_multi_window 子窗口方案，
+/// 彻底消除子窗口 Isolate 生命周期竞态导致的 0xc0000005 崩溃。
 ///
-/// 迅雷的做法：多个下载同时完成时，合并为一条通知（"N 个任务下载完成"），
-/// 而非为每个任务弹出独立窗口。
+/// ## 队列 + 防抖 + 单通知守卫
 ///
-/// 本服务采用 **队列 + 防抖 + 单窗口守卫** 策略：
 /// 1. 完成通知入队，启动 800ms 防抖定时器
 /// 2. 防抖窗口内的多个完成事件合并为一批
-/// 3. 同一时刻最多只有一个通知窗口在创建/显示中
-/// 4. 当前窗口关闭后才处理队列中的下一批
+/// 3. 同一时刻最多只有一个通知卡片在显示
+/// 4. 当前卡片关闭后才处理队列中的下一批
 class NotificationService {
   NotificationService._();
   static final instance = NotificationService._();
 
-  ThemeProvider? _themeProvider;
+  static const _appUserModelId = 'Com.FluxDown.App';
+  static const _appGuid = '4b648ba5-0b80-4bdb-b2a0-7f3b68c8e2b1';
+
+  GlobalKey<NavigatorState>? _navigatorKey;
+  final FlutterLocalNotificationsPlugin _systemNotifications =
+      FlutterLocalNotificationsPlugin();
+  bool _systemReady = false;
 
   // ---------------------------------------------------------------------------
-  // 队列 + 防抖 + 单窗口守卫
+  // 队列 + 防抖 + 单通知守卫
   // ---------------------------------------------------------------------------
 
   /// 等待通知的任务队列
@@ -44,75 +49,61 @@ class NotificationService {
   /// 防抖定时器 — 收集短时间内密集完成的任务
   Timer? _batchTimer;
 
-  /// 单窗口守卫 — true 表示有通知窗口正在创建或显示中
-  bool _windowActive = false;
+  /// 当前正在显示的 OverlayEntry
+  OverlayEntry? _currentEntry;
+
+  /// 标记是否正在退出
+  bool _shuttingDown = false;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
-  /// 正在创建中的通知窗口计数（用于 waitForPending）
-  int _pendingCount = 0;
-  Completer<void>? _allDoneCompleter;
+  /// 初始化通知服务 — 传入导航 Key 以获取 Overlay。
+  void init({required GlobalKey<NavigatorState> navigatorKey}) {
+    _navigatorKey = navigatorKey;
+    logInfo(_tag, 'initialized with navigatorKey');
+    _initSystemNotifications();
+  }
 
-  // ---------------------------------------------------------------------------
-  // 跨窗口关闭信号
-  // ---------------------------------------------------------------------------
+  /// 设置主题提供者（保留 API 兼容性，OverlayEntry 实现中主题通过 context 获取）
+  // ignore: avoid_unused_constructor_parameters
+  void setThemeProvider(dynamic provider) {
+    // OverlayEntry 运行在主窗口 widget tree 内，
+    // 主题直接通过 AppColors.of(context) 获取，无需单独传递。
+  }
 
-  /// 命名频道：通知子窗口 → 主窗口发送关闭信号（unidirectional 模式下所有引擎均可调用）
-  final _closeChannel = WindowMethodChannel(
-    'flux/notification_close',
-    mode: ChannelMode.unidirectional,
-  );
+  /// 是否有待处理的通知
+  bool get hasPending => _queue.isNotEmpty || _currentEntry != null;
 
-  /// 频道处理器是否已向平台注册
-  bool _channelInitialized = false;
+  /// 等待当前通知完成（用于退出前）。
+  /// OverlayEntry 不涉及 Isolate，退出时直接移除即可。
+  Future<void> waitForPending() async {
+    logInfo(_tag, 'waitForPending: hasPending=$hasPending');
+    if (!hasPending) return;
+    // 给当前通知动画一点时间完成，然后强制清理
+    await Future.delayed(const Duration(milliseconds: 500));
+    _dismissCurrent();
+  }
 
-  /// 等待子窗口关闭信号的 Completer（非 null 表示当前正在等待某窗口关闭）
-  Completer<void>? _windowCloseCompleter;
-
-  /// 标记是否正在退出 — 退出过程中不再创建新的通知窗口
-  bool _shuttingDown = false;
-
-  /// 标记应用正在退出，停止接受新的通知请求
+  /// 标记正在退出，停止接受新通知
   void shutdown() {
     logInfo(_tag, 'shutdown called');
     _shuttingDown = true;
     _batchTimer?.cancel();
-  }
-
-  /// 设置主题提供者（在 FluxDownApp 初始化后调用）
-  void setThemeProvider(ThemeProvider provider) {
-    _themeProvider = provider;
-  }
-
-  /// 是否有正在创建中的通知窗口或队列中有待处理任务
-  bool get hasPending => _pendingCount > 0 || _queue.isNotEmpty;
-
-  /// 等待所有待处理的通知窗口创建完成（最多等 3 秒）。
-  /// 在应用退出前调用，确保通知不会因进程销毁而丢失。
-  /// 超时后直接返回，避免阻塞退出流程导致窗口卡死。
-  Future<void> waitForPending() {
-    logInfo(_tag, 'waitForPending: _pendingCount=$_pendingCount');
-    if (_pendingCount == 0 && _queue.isEmpty) return Future.value();
-    _allDoneCompleter ??= Completer<void>();
-    return _allDoneCompleter!.future.timeout(
-      const Duration(seconds: 3),
-      onTimeout: () {
-        logInfo(_tag, 'waitForPending timed out, proceeding with exit');
-      },
-    );
+    _dismissCurrent();
   }
 
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
 
-  /// 显示下载完成的桌面通知窗口。
+  /// 显示下载完成的通知。
   ///
-  /// 不会立即创建窗口，而是入队后等待 800ms 防抖窗口，
+  /// 不会立即显示，而是入队后等待 800ms 防抖窗口，
   /// 以便合并短时间内密集完成的多个任务。
   void showDownloadComplete(DownloadTask task) {
+    _showSystemDownloadComplete(task);
     logInfo(
       _tag,
       'showDownloadComplete: file=${task.fileName}, shuttingDown=$_shuttingDown',
@@ -125,9 +116,9 @@ class NotificationService {
     _queue.add(task);
     logInfo(_tag, 'queued, queueSize=${_queue.length}');
 
-    // 如果已有窗口在显示，仅入队，等窗口关闭后再处理
-    if (_windowActive) {
-      logInfo(_tag, 'window active, queued for later');
+    // 如果已有通知在显示，仅入队，等关闭后再处理
+    if (_currentEntry != null) {
+      logInfo(_tag, 'notification active, queued for later');
       return;
     }
 
@@ -136,137 +127,648 @@ class NotificationService {
     _batchTimer = Timer(const Duration(milliseconds: 800), _flushQueue);
   }
 
+  /// 多个任务全部完成后的系统通知（汇总）
+  void showAllCompletedSummary(int count) {
+    if (count < 2) return;
+    _showSystemAllCompleted(count);
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
-  /// 冲刷队列 — 取出所有待处理任务，创建一个通知窗口。
-  Future<void> _flushQueue() async {
-    if (_windowActive || _queue.isEmpty || _shuttingDown) return;
+  /// 冲刷队列 — 取出所有待处理任务，显示一个通知卡片。
+  void _flushQueue() {
+    if (_currentEntry != null || _queue.isEmpty || _shuttingDown) return;
 
-    // 取出当前队列所有任务
     final batch = List<DownloadTask>.of(_queue);
     _queue.clear();
 
-    _windowActive = true;
-    _pendingCount++;
     logInfo(_tag, 'flushing ${batch.length} notifications');
+    _showOverlay(batch);
+  }
 
-    try {
-      // 提前初始化频道并设置 Completer，确保即使窗口关闭极快也能捕获信号。
-      await _ensureChannelInitialized();
-      _windowCloseCompleter = Completer<void>();
-
-      try {
-        await _createNotifyWindow(batch.last, taskCount: batch.length);
-      } catch (e, stack) {
-        logError(_tag, 'notify window error', e, stack);
-      }
-
-      // 等待子窗口主动发送关闭信号（在 SubWindowUtils.close() 之前发出）。
-      // 最多等待 60 秒兜底，防止用户无限悬停或信号丢失导致服务永久阻塞。
-      await _windowCloseCompleter!.future.timeout(
-        const Duration(seconds: 60),
-        onTimeout: () {
-          logInfo(_tag, 'window close signal timed out after 60s');
-        },
-      );
-      _windowCloseCompleter = null;
-
-      // 等待子窗口 WM_CLOSE 处理完毕、Flutter engine isolate 完全销毁，
-      // 避免立即创建下一个窗口时触发并发 isolate 初始化崩溃。
-      await Future.delayed(const Duration(milliseconds: 800));
-    } finally {
-      // try-finally 确保即使出现异常，守卫状态也能被正确重置，
-      // 防止 _windowActive 永久卡在 true 导致后续通知全部被丢弃。
-      _windowCloseCompleter = null; // 清理 completer，防止异常路径下泄漏
-      _windowActive = false;
-      _pendingCount--;
-      logInfo(
-        _tag,
-        'window guard expired, pendingCount=$_pendingCount, queueSize=${_queue.length}',
-      );
-
-      if (_pendingCount == 0 &&
-          _queue.isEmpty &&
-          _allDoneCompleter != null &&
-          !_allDoneCompleter!.isCompleted) {
-        _allDoneCompleter!.complete();
-        _allDoneCompleter = null;
-      }
+  void _showOverlay(List<DownloadTask> batch) {
+    final overlay = _navigatorKey?.currentState?.overlay;
+    if (overlay == null) {
+      logInfo(_tag, 'no overlay available, skipping notification');
+      return;
     }
+
+    _currentEntry = OverlayEntry(
+      builder: (context) => _NotificationCard(
+        task: batch.last,
+        taskCount: batch.length,
+        onDismiss: _onNotificationDismissed,
+      ),
+    );
+    overlay.insert(_currentEntry!);
+    logInfo(_tag, 'overlay notification shown');
+  }
+
+  void _onNotificationDismissed() {
+    _dismissCurrent();
 
     // 处理守卫期间新入队的任务
     if (_queue.isNotEmpty && !_shuttingDown) {
-      await _flushQueue();
+      // 短暂延迟，避免视觉上的连续闪烁
+      Future.delayed(const Duration(milliseconds: 300), _flushQueue);
     }
   }
 
-  /// 惰性注册频道处理器 — 首次调用时向平台注册，后续调用立即返回。
-  Future<void> _ensureChannelInitialized() async {
-    if (_channelInitialized) return;
-    _channelInitialized = true;
+  void _dismissCurrent() {
+    _currentEntry?.remove();
+    _currentEntry = null;
+  }
+
+  Future<void> _initSystemNotifications() async {
+    if (_systemReady) {
+      logInfo(_tag, 'initSystem: already ready, skipping');
+      return;
+    }
+    logInfo(_tag, 'initSystem: starting initialization...');
+
+    // Windows 10: ensure Start Menu shortcut with AUMID exists.
+    // Without this, Toast API returns success but nothing is displayed.
+    await ensureWindowsToastShortcut(
+      appName: 'FluxDown',
+      aumid: _appUserModelId,
+      clsid: _appGuid,
+    );
+
     try {
-      await _closeChannel.setMethodCallHandler(_onWindowCloseSignal);
-      logInfo(_tag, 'notification close channel registered');
-    } catch (e, stack) {
-      logError(_tag, 'failed to register notification close channel', e, stack);
-      _channelInitialized = false; // 允许重试
-    }
-  }
-
-  /// 接收来自通知子窗口的关闭信号 — 释放单窗口守卫。
-  Future<dynamic> _onWindowCloseSignal(MethodCall call) async {
-    if (call.method == 'closed') {
-      logInfo(_tag, 'notification window close signal received');
-      final c = _windowCloseCompleter;
-      if (c != null && !c.isCompleted) {
-        c.complete();
-      }
-    }
-  }
-
-  Future<void> _createNotifyWindow(
-    DownloadTask task, {
-    int taskCount = 1,
-  }) async {
-    try {
-      final filePath =
-          '${task.saveDir}${Platform.pathSeparator}${task.fileName}';
-
-      final isDark = _resolveIsDark();
-      final schemeName = _themeProvider?.colorScheme.name ?? 'blue';
+      const windows = WindowsInitializationSettings(
+        appName: 'FluxDown',
+        appUserModelId: _appUserModelId,
+        guid: _appGuid,
+      );
+      const linux = LinuxInitializationSettings(defaultActionName: 'open');
+      const darwin = DarwinInitializationSettings();
+      const settings = InitializationSettings(
+        windows: windows,
+        linux: linux,
+        macOS: darwin,
+      );
 
       logInfo(
         _tag,
-        'creating notify window: file=${task.fileName}, taskCount=$taskCount, isDark=$isDark',
+        'initSystem: calling initialize(aumid=$_appUserModelId, '
+        'guid=$_appGuid)',
       );
-      await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({
-            'windowType': 'download_complete',
-            'fileName': task.fileName,
-            'fileSize': task.sizeText,
-            'fileExt': task.fileExtension,
-            'filePath': filePath,
-            'taskCount': taskCount,
-            'colorScheme': schemeName,
-            'isDark': isDark,
-          }),
-        ),
+      final result = await _systemNotifications.initialize(
+        settings: settings,
+        onDidReceiveNotificationResponse: _onSystemNotificationResponse,
       );
-      logInfo(_tag, 'notify window created');
+      _systemReady = true;
+      logInfo(_tag, 'initSystem: success (result=$result)');
     } catch (e, stack) {
-      logError(_tag, 'failed to create notify window', e, stack);
+      logError(_tag, 'initSystem: FAILED', e, stack);
     }
   }
 
-  bool _resolveIsDark() {
-    final provider = _themeProvider;
-    if (provider == null) return true;
-    return provider.themeMode == ThemeMode.dark ||
-        (provider.themeMode == ThemeMode.system &&
-            WidgetsBinding.instance.platformDispatcher.platformBrightness ==
-                Brightness.dark);
+  Future<void> _showSystemDownloadComplete(DownloadTask task) async {
+    logInfo(
+      _tag,
+      'systemNotify: start, file=${task.fileName}, '
+      'shuttingDown=$_shuttingDown, systemReady=$_systemReady',
+    );
+    if (_shuttingDown) return;
+    await _initSystemNotifications();
+    if (!_systemReady) {
+      logInfo(_tag, 'systemNotify: skipped — system not ready');
+      return;
+    }
+
+    try {
+      final s = currentS;
+      final payload = _buildPayload(
+        action: 'open_file',
+        filePath: _resolveFilePath(task),
+      );
+
+      final details = NotificationDetails(
+        windows: WindowsNotificationDetails(
+          actions: const [
+            WindowsAction(content: 'Open File', arguments: 'open_file'),
+            WindowsAction(content: 'Open Folder', arguments: 'open_folder'),
+          ],
+        ),
+        linux: const LinuxNotificationDetails(defaultActionName: 'open'),
+        macOS: const DarwinNotificationDetails(),
+      );
+
+      final notifId = task.id.hashCode;
+      logInfo(
+        _tag,
+        'systemNotify: calling show(id=$notifId, '
+        'title="${s.downloadCompleted}", body="${task.fileName}")',
+      );
+
+      await _systemNotifications.show(
+        id: notifId,
+        title: s.downloadCompleted,
+        body: task.fileName,
+        notificationDetails: details,
+        payload: payload,
+      );
+      logInfo(_tag, 'systemNotify: show() completed successfully');
+    } catch (e, stack) {
+      logError(_tag, 'systemNotify: show() failed', e, stack);
+    }
+  }
+
+  Future<void> _showSystemAllCompleted(int count) async {
+    logInfo(
+      _tag,
+      'systemBatchNotify: start, count=$count, '
+      'shuttingDown=$_shuttingDown, systemReady=$_systemReady',
+    );
+    if (_shuttingDown) return;
+    await _initSystemNotifications();
+    if (!_systemReady) {
+      logInfo(_tag, 'systemBatchNotify: skipped — system not ready');
+      return;
+    }
+
+    try {
+      final s = currentS;
+      final title = s.batchDownloadCompleted(count);
+      final details = NotificationDetails(
+        windows: const WindowsNotificationDetails(),
+        linux: const LinuxNotificationDetails(defaultActionName: 'open'),
+        macOS: const DarwinNotificationDetails(),
+      );
+
+      final notifId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      logInfo(
+        _tag,
+        'systemBatchNotify: calling show(id=$notifId, '
+        'title="$title")',
+      );
+
+      await _systemNotifications.show(
+        id: notifId,
+        title: title,
+        body: s.downloadCompleted,
+        notificationDetails: details,
+        payload: _buildPayload(
+          action: 'open_folder',
+          filePath: _resolveDefaultDir(),
+        ),
+      );
+      logInfo(_tag, 'systemBatchNotify: show() completed successfully');
+    } catch (e, stack) {
+      logError(_tag, 'systemBatchNotify: show() failed', e, stack);
+    }
+  }
+
+  String _buildPayload({required String action, required String filePath}) {
+    return '$action|$filePath';
+  }
+
+  String _resolveFilePath(DownloadTask task) {
+    return '${task.saveDir}${Platform.pathSeparator}${task.fileName}';
+  }
+
+  void _onSystemNotificationResponse(NotificationResponse response) {
+    final payload = response.payload ?? '';
+    final actionId = response.actionId ?? '';
+    final parts = payload.split('|');
+    final action = actionId.isNotEmpty
+        ? actionId
+        : (parts.isNotEmpty ? parts[0] : '');
+    final filePath = parts.length > 1 ? parts[1] : '';
+    if (action == 'open_folder') {
+      _openFolder(filePath);
+      return;
+    }
+    if (action == 'open_file') {
+      _openFile(filePath);
+      return;
+    }
+
+    // Default: open folder for safety
+    _openFolder(filePath);
+  }
+
+  Future<void> _openFile(String filePath) async {
+    if (filePath.isEmpty) return;
+    await openFile(filePath);
+  }
+
+  Future<void> _openFolder(String filePath) async {
+    final resolved = filePath.isEmpty ? _resolveDefaultDir() : filePath;
+    if (resolved.isEmpty) return;
+    await openFolder(resolved);
+  }
+
+  String _resolveDefaultDir() {
+    final home =
+        Platform.environment['USERPROFILE'] ??
+        Platform.environment['HOME'] ??
+        '.';
+    return '$home${Platform.pathSeparator}Downloads';
+  }
+}
+
+// =============================================================================
+// 通知卡片组件 — 在主窗口右下角显示
+// =============================================================================
+
+class _NotificationCard extends StatefulWidget {
+  final DownloadTask task;
+  final int taskCount;
+  final VoidCallback onDismiss;
+
+  const _NotificationCard({
+    required this.task,
+    required this.taskCount,
+    required this.onDismiss,
+  });
+
+  @override
+  State<_NotificationCard> createState() => _NotificationCardState();
+}
+
+class _NotificationCardState extends State<_NotificationCard>
+    with SingleTickerProviderStateMixin {
+  bool _isHovered = false;
+  bool _closed = false;
+  late final AnimationController _progressController;
+
+  // 入场/退场动画值
+  double _slideOffset = 1.0; // 1.0 = 完全在屏幕外, 0.0 = 可见
+  double _opacity = 0.0;
+
+  String get fileName => widget.task.fileName;
+  String get fileSize => widget.task.sizeText;
+  String get fileExt => widget.task.fileExtension;
+  String get filePath =>
+      '${widget.task.saveDir}${Platform.pathSeparator}${widget.task.fileName}';
+  int get taskCount => widget.taskCount;
+  bool get isBatch => taskCount > 1;
+
+  static const _cardWidth = 340.0;
+  static const _cardHeight = 158.0;
+  static const _autoCloseDuration = Duration(seconds: 8);
+  static const _slideInDuration = Duration(milliseconds: 300);
+  static const _slideOutDuration = Duration(milliseconds: 200);
+
+  @override
+  void initState() {
+    super.initState();
+    _progressController = AnimationController(
+      vsync: this,
+      duration: _autoCloseDuration,
+    )..addStatusListener(_onAnimationStatus);
+
+    // 入场动画
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _animateIn();
+    });
+  }
+
+  @override
+  void dispose() {
+    _progressController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _animateIn() async {
+    final start = DateTime.now();
+    while (true) {
+      final elapsed = DateTime.now().difference(start);
+      final t = (elapsed.inMilliseconds / _slideInDuration.inMilliseconds)
+          .clamp(0.0, 1.0);
+      // ease-out cubic
+      final curved = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+      if (mounted) {
+        setState(() {
+          _slideOffset = 1.0 - curved;
+          _opacity = curved;
+        });
+      }
+      if (t >= 1.0) break;
+      await Future.delayed(const Duration(milliseconds: 16));
+    }
+    // 入场动画完成后开始自动关闭倒计时
+    _progressController.forward();
+  }
+
+  Future<void> _animateOut() async {
+    final start = DateTime.now();
+    while (true) {
+      final elapsed = DateTime.now().difference(start);
+      final t = (elapsed.inMilliseconds / _slideOutDuration.inMilliseconds)
+          .clamp(0.0, 1.0);
+      if (mounted) {
+        setState(() {
+          _slideOffset = t;
+          _opacity = 1.0 - t;
+        });
+      }
+      if (t >= 1.0) break;
+      await Future.delayed(const Duration(milliseconds: 16));
+    }
+    widget.onDismiss();
+  }
+
+  void _onAnimationStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && !_isHovered) {
+      _close();
+    }
+  }
+
+  void _close() {
+    if (_closed) return;
+    _closed = true;
+    _progressController.stop();
+    _animateOut();
+  }
+
+  Future<void> _openFile() async {
+    await openFile(filePath);
+    _close();
+  }
+
+  Future<void> _openFolder() async {
+    await openFolder(filePath);
+    _close();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+
+    return Positioned(
+      right: 16,
+      bottom: 16,
+      child: Transform.translate(
+        offset: Offset(_slideOffset * (_cardWidth + 32), 0),
+        child: Opacity(
+          opacity: _opacity,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: _cardWidth,
+              height: _cardHeight,
+              decoration: BoxDecoration(
+                color: c.dialogBg,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: c.border),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.15),
+                    blurRadius: 20,
+                    offset: const Offset(0, 8),
+                  ),
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: MouseRegion(
+                onEnter: (_) {
+                  _isHovered = true;
+                  _progressController.stop();
+                },
+                onExit: (_) {
+                  _isHovered = false;
+                  if (_progressController.isCompleted) {
+                    _close();
+                  } else {
+                    _progressController.forward();
+                  }
+                },
+                child: Column(
+                  children: [
+                    // === 顶部自动关闭进度条（2px）===
+                    ClipRRect(
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(12),
+                      ),
+                      child: AnimatedBuilder(
+                        animation: _progressController,
+                        builder: (context, _) {
+                          return LinearProgressIndicator(
+                            value: 1.0 - _progressController.value,
+                            minHeight: 2,
+                            backgroundColor: Colors.transparent,
+                            valueColor: AlwaysStoppedAnimation(
+                              c.accent.withValues(alpha: 0.4),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    // === Header ===
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 8, 6, 0),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 18,
+                            height: 18,
+                            decoration: BoxDecoration(
+                              color: AppColors.green.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: const Icon(
+                              LucideIcons.check,
+                              size: 11,
+                              color: AppColors.green,
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Text(
+                            isBatch
+                                ? s.batchDownloadCompleted(taskCount)
+                                : s.downloadCompleted,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: c.textPrimary,
+                            ),
+                          ),
+                          const Spacer(),
+                          _CloseButton(onTap: _close, colors: c),
+                        ],
+                      ),
+                    ),
+                    // === File info ===
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                color: c.surface2,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: c.border.withValues(alpha: 0.5),
+                                ),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  fileExt.toLowerCase(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: c.accent,
+                                    letterSpacing: 0.3,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    fileName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w500,
+                                      color: c.textPrimary,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    isBatch
+                                        ? s.andMoreFiles(taskCount - 1)
+                                        : fileSize,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: c.textMuted,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    // === Divider ===
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      child: Divider(height: 1, color: c.border),
+                    ),
+                    // === Actions ===
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: ShadButton.outline(
+                              size: ShadButtonSize.sm,
+                              onPressed: _openFolder,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    LucideIcons.folderOpen,
+                                    size: 13,
+                                    color: c.textSecondary,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    s.openFileFolder,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: c.textPrimary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ShadButton(
+                              size: ShadButtonSize.sm,
+                              onPressed: _openFile,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    LucideIcons.externalLink,
+                                    size: 13,
+                                    color: Colors.white,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    s.openFile,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 精致的关闭按钮
+class _CloseButton extends StatefulWidget {
+  final VoidCallback onTap;
+  final AppColors colors;
+
+  const _CloseButton({required this.onTap, required this.colors});
+
+  @override
+  State<_CloseButton> createState() => _CloseButtonState();
+}
+
+class _CloseButtonState extends State<_CloseButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            color: _isHovered ? c.surface3 : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Icon(
+            LucideIcons.x,
+            size: 13,
+            color: _isHovered ? c.textPrimary : c.textMuted,
+          ),
+        ),
+      ),
+    );
   }
 }

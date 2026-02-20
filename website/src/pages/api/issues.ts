@@ -25,15 +25,6 @@ export const prerender = false;
 const GITHUB_REPO = import.meta.env.GITHUB_REPO || "user/x_down";
 const GITHUB_TOKEN = import.meta.env.GITHUB_TOKEN || "";
 
-// ── 缓存 ──
-interface CacheEntry {
-  data: FilteredIssue[];
-  timestamp: number;
-}
-
-const cache = new Map<string, CacheEntry>();
-const CACHE_TTL = 120_000; // 2 分钟
-
 // ── 类型 ──
 
 interface GitHubLabel {
@@ -182,18 +173,11 @@ function truncateBody(body: string | null, maxLen: number = 200): string {
   return desc.slice(0, maxLen) + "...";
 }
 
-/** 获取经过过滤的 issue 列表（带缓存） */
-async function getCachedIssues(state: string): Promise<FilteredIssue[]> {
-  const cacheKey = `issues_${state}`;
-  const cached = cache.get(cacheKey);
-
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
-
+/** 获取经过过滤的 issue 列表（实时，无缓存） */
+async function fetchFilteredIssues(state: string): Promise<FilteredIssue[]> {
   const raw = await fetchAllFeedbackIssues(state);
 
-  const filtered: FilteredIssue[] = raw
+  return raw
     // 排除 PR（GitHub Issues API 也会返回 PR）
     .filter((issue) => !issue.pull_request)
     // 排除带 subscription 标签的
@@ -218,9 +202,6 @@ async function getCachedIssues(state: string): Promise<FilteredIssue[]> {
       },
       body_preview: truncateBody(issue.body),
     }));
-
-  cache.set(cacheKey, { data: filtered, timestamp: Date.now() });
-  return filtered;
 }
 
 export const GET: APIRoute = async ({ url }) => {
@@ -248,7 +229,7 @@ export const GET: APIRoute = async ({ url }) => {
   }
 
   try {
-    let issues = await getCachedIssues(stateParam);
+    let issues = await fetchFilteredIssues(stateParam);
 
     // 额外标签筛选
     if (labelParam) {
@@ -272,7 +253,7 @@ export const GET: APIRoute = async ({ url }) => {
         status: 200,
         headers: {
           "Content-Type": "application/json",
-          "Cache-Control": "public, s-maxage=120, stale-while-revalidate=300",
+          "Cache-Control": "no-store",
         },
       },
     );

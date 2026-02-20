@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -109,8 +110,14 @@ pub fn build_client(proxy_config: &crate::proxy_config::ProxyConfig) -> Result<C
              AppleWebKit/537.36 (KHTML, like Gecko) \
              Chrome/131.0.0.0 Safari/537.36",
         )
-        // TLS — reqwest with rustls-tls feature handles HTTPS automatically
-        .use_rustls_tls()
+        // TLS — native-tls uses Windows Schannel (system cert store + AIA chain building)
+        // HTTP version — force HTTP/1.1 for download manager use cases:
+        //  1. Range requests are reliable and well-tested on HTTP/1.1.
+        //  2. Multi-segment downloads use separate TCP connections; HTTP/2
+        //     multiplexing would force all segments onto one connection.
+        //  3. Some servers advertise h2 via ALPN but have buggy HTTP/2
+        //     implementations that close connections mid-response.
+        .http1_only()
         // Redirects — follow up to 30 hops like Chrome
         .redirect(reqwest::redirect::Policy::limited(30))
         // Timeouts
@@ -271,6 +278,18 @@ pub async fn resolve_file_info(client: &Client, url: &str, cookies: &str) -> Res
     }))
 }
 
+/// Walk the std::error::Error source chain and return a " → cause1 → cause2" suffix string.
+/// Returns an empty string when there is no source, so it can be appended directly to a message.
+fn format_error_chain(mut src: Option<&dyn StdError>) -> String {
+    let mut s = String::new();
+    while let Some(cause) = src {
+        s.push_str(" → ");
+        s.push_str(&cause.to_string());
+        src = cause.source();
+    }
+    s
+}
+
 async fn resolve_file_info_once(client: &Client, url: &str, cookies: &str) -> Result<FileInfo, DownloadError> {
     // --- Concurrent HEAD + GET probe ----------------------------------------
     // Fire both HEAD and GET Range:0-0 in parallel.  HEAD is faster when it
@@ -314,8 +333,10 @@ async fn resolve_file_info_once(client: &Client, url: &str, cookies: &str) -> Re
         }
         Err(e) => {
             rinf::debug_print!(
-                "[resolve] HEAD network error: {}, cookies_len={}",
-                e, cookies.len()
+                "[resolve] HEAD network error: {}{}, cookies_len={}",
+                e,
+                format_error_chain(e.source()),
+                cookies.len()
             );
             None
         }
@@ -339,8 +360,10 @@ async fn resolve_file_info_once(client: &Client, url: &str, cookies: &str) -> Re
         }
         Err(e) => {
             rinf::debug_print!(
-                "[resolve] GET network error: {}, cookies_len={}",
-                e, cookies.len()
+                "[resolve] GET network error: {}{}, cookies_len={}",
+                e,
+                format_error_chain(e.source()),
+                cookies.len()
             );
             None
         }

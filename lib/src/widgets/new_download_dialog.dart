@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart'
     show
+        AdaptiveTextSelectionToolbar,
         Colors,
         DefaultMaterialLocalizations,
         InputDecoration,
@@ -440,6 +441,18 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
                         textAlignVertical: TextAlignVertical.top,
                         cursorColor: c.accent,
                         style: TextStyle(fontSize: 13, color: c.textPrimary),
+                        contextMenuBuilder: (context, editableTextState) {
+                          return Localizations(
+                            locale: const Locale('en'),
+                            delegates: const [
+                              DefaultWidgetsLocalizations.delegate,
+                              DefaultMaterialLocalizations.delegate,
+                            ],
+                            child: AdaptiveTextSelectionToolbar.editableText(
+                              editableTextState: editableTextState,
+                            ),
+                          );
+                        },
                         decoration: InputDecoration(
                           hintText: s.batchUrlPlaceholder,
                           hintStyle: TextStyle(

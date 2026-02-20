@@ -5,19 +5,9 @@
 #include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
-#include <desktop_multi_window/desktop_multi_window_plugin.h>
 
 // Must match kCopyDataId in main.cpp.
 static const ULONG_PTR kCopyDataId = 0x464C5558; // "FLUX"
-
-// Sub-window plugin registration - only register desktop_multi_window.
-// Skip window_manager (its C++ layer has a global channel variable;
-// registering from multiple engines overwrites the main window's channel,
-// causing crash after sub-window is destroyed).
-static void RegisterPluginsForSubWindow(flutter::PluginRegistry* registry) {
-  DesktopMultiWindowPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("DesktopMultiWindowPlugin"));
-}
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -47,16 +37,6 @@ bool FlutterWindow::OnCreate() {
           flutter_controller_->engine()->messenger(),
           "com.fluxdown/single_instance",
           &flutter::StandardMethodCodec::GetInstance());
-
-  // Register plugin callback for sub-windows created by desktop_multi_window.
-  // Sub-windows only register necessary plugins to avoid window_manager
-  // global channel being overwritten.
-  DesktopMultiWindowSetWindowCreatedCallback(
-      [](void* controller) {
-        auto* flutter_view_controller =
-            reinterpret_cast<flutter::FlutterViewController*>(controller);
-        RegisterPluginsForSubWindow(flutter_view_controller->engine());
-      });
 
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 

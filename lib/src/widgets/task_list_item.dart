@@ -7,6 +7,7 @@ import '../i18n/locale_provider.dart';
 import '../models/download_task.dart';
 import '../theme/app_colors.dart';
 import 'context_menu.dart';
+import '../services/open_folder.dart';
 
 class TaskListItem extends StatefulWidget {
   final DownloadTask task;
@@ -463,40 +464,9 @@ void showTaskContextMenu(
 // 文件/文件夹操作
 // =============================================================================
 
-void _openFile(String filePath) {
-  if (Platform.isWindows) {
-    Process.run('cmd', ['/c', 'start', '', filePath]);
-  } else if (Platform.isMacOS) {
-    Process.run('open', [filePath]);
-  } else if (Platform.isLinux) {
-    Process.run('xdg-open', [filePath]);
-  }
-}
+Future<void> _openFile(String filePath) => openFile(filePath);
 
-void _openFolder(String filePath) {
-  final file = File(filePath);
-  final dir = file.parent.path;
-
-  if (file.existsSync()) {
-    // 文件存在 — 打开目录并选中文件
-    if (Platform.isWindows) {
-      Process.run('explorer', ['/select,', filePath]);
-    } else if (Platform.isMacOS) {
-      Process.run('open', ['-R', filePath]);
-    } else if (Platform.isLinux) {
-      Process.run('xdg-open', [dir]);
-    }
-  } else {
-    // 文件不存在（下载中/未完成）— 直接打开所在目录
-    if (Platform.isWindows) {
-      Process.run('explorer', [dir]);
-    } else if (Platform.isMacOS) {
-      Process.run('open', [dir]);
-    } else if (Platform.isLinux) {
-      Process.run('xdg-open', [dir]);
-    }
-  }
-}
+Future<void> _openFolder(String filePath) => openFolder(filePath);
 
 // =============================================================================
 // 删除确认对话框

@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 
-import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
@@ -25,7 +23,6 @@ import 'src/services/update_service.dart';
 import 'src/theme/app_theme.dart';
 import 'src/theme/theme_provider.dart';
 import 'src/widgets/update_changelog_dialog.dart';
-import 'src/windows/download_complete_window.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,38 +31,9 @@ Future<void> main(List<String> args) async {
   localeNotifier = LocaleNotifier();
   await localeNotifier.init();
 
-  // desktop_multi_window 子窗口入口：
-  // 当子窗口被创建时，同一个 main() 会再次调用，args 包含 ['multi_window', windowId, argument]
-  if (args.firstOrNull == 'multi_window') {
-    final windowId = args[1];
-    final argument = args.length > 2 ? args[2] : '{}';
-
-    final windowController = WindowController.fromWindowId(windowId);
-
-    Map<String, dynamic> windowArgs;
-    try {
-      windowArgs = jsonDecode(argument) as Map<String, dynamic>;
-    } catch (_) {
-      windowArgs = {};
-    }
-
-    final windowType = windowArgs['windowType'] as String? ?? '';
-
-    // 注意：子窗口不能调用 windowManager.ensureInitialized()，
-    // 因为 windowManager 是全局单例，会干扰主窗口的 native handle，
-    // 导致主窗口隐藏到托盘后恢复时崩溃。
-    // 子窗口应通过 WindowController 管理自身。
-
-    if (windowType == 'download_complete') {
-      runApp(
-        DownloadCompleteApp(
-          windowController: windowController,
-          args: windowArgs,
-        ),
-      );
-    }
-    return;
-  }
+  // 注：已移除 desktop_multi_window 子窗口入口。
+  // 下载完成通知现在通过主窗口内 OverlayEntry 实现，
+  // 不再创建独立子窗口/Isolate，彻底消除并发 Isolate 崩溃。
 
   // ===== 主窗口正常启动流程 =====
 
@@ -222,7 +190,8 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     // 阻止默认关闭行为，由 onWindowClose 接管
     windowManager.setPreventClose(true);
 
-    // 初始化通知服务 — 传递主题信息给通知窗口
+    // 初始化通知服务 — 传递导航 Key 和主题信息
+    NotificationService.instance.init(navigatorKey: _navigatorKey);
     NotificationService.instance.setThemeProvider(themeProvider);
 
     // 设置托盘退出回调 — 统一走优雅退出流程

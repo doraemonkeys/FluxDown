@@ -12,6 +12,7 @@ export default function FeedbackPage() {
   const { t } = useLocale();
   const [activeTab, setActiveTab] = useState<TabKey>("list");
   const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
+  const [listRefreshKey, setListRefreshKey] = useState(0);
 
   const handleIssueClick = useCallback((issueNumber: number) => {
     setSelectedIssue(issueNumber);
@@ -19,6 +20,11 @@ export default function FeedbackPage() {
 
   const handleCloseDetail = useCallback(() => {
     setSelectedIssue(null);
+  }, []);
+
+  const handleFeedbackSuccess = useCallback(() => {
+    setListRefreshKey((k) => k + 1);
+    setActiveTab("list");
   }, []);
 
   const tabs: { key: TabKey; icon: typeof List; labelKey: string }[] = [
@@ -61,9 +67,9 @@ export default function FeedbackPage() {
 
       {/* Tab Content */}
       {activeTab === "list" ? (
-        <FeedbackListSection onIssueClick={handleIssueClick} />
+        <FeedbackListSection key={listRefreshKey} onIssueClick={handleIssueClick} />
       ) : (
-        <FeedbackSection />
+        <FeedbackSection onSuccess={handleFeedbackSuccess} />
       )}
 
       {/* Issue Detail Modal */}
