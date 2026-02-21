@@ -112,6 +112,83 @@ def generate_release_notes(version: str, commits: str, prev_tag: str | None) -> 
     return result.stdout.strip()
 
 
+def refine_release_notes(current_notes: str, user_request: str) -> str:
+    """根据用户反馈调用 Claude CLI 修改 Release Notes"""
+    prompt = textwrap.dedent(f"""\
+        你是 FluxDown 项目的发布助手。以下是当前的 Release Notes 草稿：
+
+        ---
+        {current_notes}
+        ---
+
+        用户希望对上述 Release Notes 做以下修改：
+        {user_request}
+
+        请按照用户要求修改后，输出完整的 Release Notes。
+        只输出 Release Notes 正文，不要加多余解释，不要加版本号标题，不要使用水平分隔线（---）。
+    """)
+
+    print("正在调用 Claude CLI 修改 Release Notes...")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--max-turns", "1"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        print(f"Claude CLI 调用失败: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    return result.stdout.strip()
+
+
+def interactive_review(release_notes: str) -> str | None:
+    """
+    交互式审阅 Release Notes，支持多轮修改。
+    返回最终确认的内容，或 None 表示取消。
+    """
+    current_notes = release_notes
+    round_num = 1
+
+    while True:
+        print(f"\n===== Release Notes（第 {round_num} 版）=====\n")
+        print(current_notes)
+        print("\n" + "=" * 40)
+        print("\n操作选项:")
+        print("  [y] 确认，使用此内容创建 tag")
+        print("  [m] 修改，告诉 AI 需要哪些调整")
+        print("  [n] 取消，退出脚本")
+        print()
+
+        choice = input("请选择 [y/m/n]: ").strip().lower()
+
+        if choice == "y":
+            return current_notes
+        elif choice == "n":
+            print("已取消")
+            return None
+        elif choice == "m":
+            print("\n请描述你希望如何修改（可以详细说明，按回车两次提交）:")
+            lines = []
+            while True:
+                line = input()
+                if line == "" and lines and lines[-1] == "":
+                    break
+                lines.append(line)
+            user_request = "\n".join(lines).strip()
+            if not user_request:
+                print("未输入修改要求，请重试")
+                continue
+            current_notes = refine_release_notes(current_notes, user_request)
+            round_num += 1
+        else:
+            print("无效输入，请输入 y、m 或 n")
+
+
 def create_tag(version: str, message: str) -> None:
     """创建 annotated tag（使用 --cleanup=verbatim 保留 # 开头的 Markdown 标题）"""
     run(["git", "tag", "-a", version, "-m", message, "--cleanup=verbatim"])
@@ -157,21 +234,19 @@ def main() -> None:
     # 生成 Release Notes
     release_notes = generate_release_notes(version, commits, prev_tag)
 
-    print("\n===== 生成的 Release Notes =====\n")
-    print(release_notes)
-    print("\n================================\n")
-
     if args.dry_run:
+        print("\n===== 生成的 Release Notes =====\n")
+        print(release_notes)
+        print("\n================================\n")
         print("(dry-run 模式，未创建 tag)")
         return
 
-    # 确认
-    answer = input("确认创建 tag？[y/N] ").strip().lower()
-    if answer != "y":
-        print("已取消")
+    # 交互式审阅，支持多轮修改
+    final_notes = interactive_review(release_notes)
+    if final_notes is None:
         return
 
-    create_tag(version, release_notes)
+    create_tag(version, final_notes)
 
     if args.push:
         push_tag(version)
