@@ -21,9 +21,9 @@ interface Release {
 
 const PER_PAGE = 10;
 
-/** 简易 Markdown → HTML（仅处理 release notes 常用语法） */
-function renderMarkdown(md: string): string {
-  return md
+/** 对非代码块的 Markdown 段落做 HTML 转义 + 简单 Markdown 处理 */
+function renderInlineMarkdown(segment: string): string {
+  return segment
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -53,6 +53,62 @@ function renderMarkdown(md: string): string {
       '<p class="text-sm text-dark-text-secondary leading-relaxed">$1</p>',
     )
     .replace(/\n{3,}/g, "\n\n");
+}
+
+/** 简易 Markdown → HTML（仅处理 release notes 常用语法） */
+function renderMarkdown(md: string): string {
+  // ── Step 1: 提取围栏代码块，生成 <pre> HTML ──
+  // 支持行首可选前导空格（GitHub release 中常见缩进写法）
+  // 将结果存为 {type: 'code'|'text', content: string}[] 分段处理，
+  // 确保代码块内部不会被后续 Markdown 正则二次处理。
+  const FENCE_RE = /^([ \t]*)```([^\n]*)\n([\s\S]*?)^\1```[ \t]*$/gm;
+
+  const parts: Array<{ type: "code" | "text"; content: string }> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = FENCE_RE.exec(md)) !== null) {
+    // 代码块之前的文本段
+    if (match.index > lastIndex) {
+      parts.push({ type: "text", content: md.slice(lastIndex, match.index) });
+    }
+
+    const _indent = match[1];
+    const lang = match[2];
+    const code = match[3];
+
+    // 去除与围栏等宽的公共前缀缩进
+    const indentLen = _indent.length;
+    const dedented = indentLen
+      ? code
+          .split("\n")
+          .map((line) => (line.startsWith(_indent) ? line.slice(indentLen) : line))
+          .join("\n")
+      : code;
+    const escaped = dedented
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    const langAttr = lang.trim()
+      ? ` data-lang="${lang.trim().replace(/"/g, "&quot;")}"`
+      : "";
+    const html = `<pre class="changelog-pre my-3 rounded-lg bg-dark-surface3 border border-dark-border overflow-x-auto p-4"${langAttr}><code class="text-xs font-mono text-dark-text-secondary leading-relaxed whitespace-pre">${escaped.replace(/\n$/, "")}</code></pre>`;
+    parts.push({ type: "code", content: html });
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // 最后一段文本
+  if (lastIndex < md.length) {
+    parts.push({ type: "text", content: md.slice(lastIndex) });
+  }
+
+  // ── Step 2: 分段处理，代码块直接输出，文本段走 Markdown 转换 ──
+  return parts
+    .map((part) =>
+      part.type === "code" ? part.content : renderInlineMarkdown(part.content),
+    )
+    .join("");
 }
 
 function formatDate(dateStr: string, locale: string): string {

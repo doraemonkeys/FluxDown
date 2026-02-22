@@ -92,6 +92,24 @@ body {
   display: none;
 }
 
+/* ===== Changelog code block ===== */
+.changelog-pre {
+  position: relative;
+}
+
+.changelog-pre[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  font-size: 0.65rem;
+  font-family: monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-dark-text-muted);
+  pointer-events: none;
+}
+
 /* ===== Theme transition ===== */
 html.theme-transitioning *,
 html.theme-transitioning *::before,

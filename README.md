@@ -63,12 +63,12 @@ please refer to Rinf's [documentation](https://rinf.cunarist.org).
 前置要求：本地已安装 [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli)。
 
 ```shell
-# 预览 Release Notes（不创建 tag）
-python scripts/release_tag.py v0.0.5 --dry-run
+# 日常发布（推荐）
+python scripts/release_tag.py v0.1.7 --push --github-release --update-changelog
 
-# 生成 Release Notes 并创建 tag（会提示确认）
-python scripts/release_tag.py v0.0.5
+# 高质量双语发布
+python scripts/release_tag.py v0.1.7 --model opus --lang both --push --github-release
 
-# 生成 + 创建 + 自动推送到远程（触发 CI）
-python scripts/release_tag.py v0.0.5 --push
+# 仅预览效果
+python scripts/release_tag.py v0.1.7 --dry-run
 ```
