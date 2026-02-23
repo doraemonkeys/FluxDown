@@ -198,41 +198,95 @@ jobs:
       - name: Install web-ext
         run: npm install -g web-ext
 
-      # ── unlisted: 即时签名，产出可直接安装的离线 XPI ──
-      - name: Sign Firefox extension (unlisted — offline XPI)
+      # ── listed 单步签名 + 上架：--approval-timeout=0 在自动签名完成后立即返回已签名 XPI，
+      #    同时将版本提交到 AMO 公开市场审核队列，无需等待人工审核。
+      #    这避免了 unlisted 先占版本号导致 listed 提交冲突的问题。
+      #    兜底逻辑：
+      #      - "already exists"：CI 重跑同版本时，从 AMO API 下载已签名 XPI
+      #      - "was uploaded before and deleted"：版本已被永久删除，输出明确错误信息
+      - name: Sign & submit Firefox extension to AMO marketplace
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
-          mkdir -p build/extension/firefox-signed
-          web-ext sign \
-            --source-dir fluxDown/.output/firefox-mv2 \
-            --channel=unlisted \
-            --api-key=${{ secrets.AMO_JWT_ISSUER }} \
-            --api-secret=${{ secrets.AMO_JWT_SECRET }} \
-            --artifacts-dir build/extension/firefox-signed/
-          # 将 AMO 生成的文件名（如 fluxdown@fluxdown.app-1.0.0.xpi）重命名为统一格式
-          XPI_FILE=$(ls build/extension/firefox-signed/*.xpi 2>/dev/null | head -1)
-          if [ -n "$XPI_FILE" ]; then
-            mv "$XPI_FILE" "build/extension/FluxDown-${VERSION}-firefox.xpi"
-            echo "Signed XPI: build/extension/FluxDown-${VERSION}-firefox.xpi"
-          else
-            echo "ERROR: No signed XPI found in build/extension/firefox-signed/"
-            ls -la build/extension/firefox-signed/ || true
-            exit 1
-          fi
+          mkdir -p build/extension
 
-      # ── listed: 向 AMO 公开市场提交新版本，进入人工审核队列 ──
-      # --approval-timeout=0 表示提交后立即返回，不等待审核完成（避免 CI 长时间阻塞）
-      # continue-on-error: AMO 提交失败不影响 Release 发布和离线 XPI 上传
-      - name: Submit Firefox extension to AMO marketplace (listed)
-        continue-on-error: true
-        run: |
-          web-ext sign \
+          if ! web-ext sign \
             --source-dir fluxDown/.output/firefox-mv2 \
             --channel=listed \
             --api-key=${{ secrets.AMO_JWT_ISSUER }} \
             --api-secret=${{ secrets.AMO_JWT_SECRET }} \
             --approval-timeout=0 \
-            --artifacts-dir build/extension/firefox-amo/
+            --artifacts-dir build/extension/ 2>&1 | tee /tmp/amo_sign.log; then
+
+            if grep -q "already exists" /tmp/amo_sign.log; then
+              echo "::warning::Version $VERSION already on AMO (CI re-run). Downloading existing signed XPI..."
+              node - <<'JSEOF'
+const crypto = require('crypto');
+const https = require('https');
+const fs = require('fs');
+const ADDON_ID = 'fluxdown@fluxdown.app';
+const ISSUER = process.env.AMO_ISSUER;
+const SECRET = process.env.AMO_SECRET;
+const VERSION = process.env.VERSION;
+
+function jwt() {
+  const iat = Math.floor(Date.now() / 1000);
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(JSON.stringify({ iss: ISSUER, jti: `${iat}`, iat, exp: iat + 300 })).toString('base64url');
+  const s = crypto.createHmac('sha256', SECRET).update(`${h}.${p}`).digest('base64url');
+  return `${h}.${p}.${s}`;
+}
+
+function get(url) {
+  return new Promise((res, rej) => {
+    const u = new URL(url);
+    https.get({ hostname: u.hostname, path: u.pathname + u.search, headers: { Authorization: `JWT ${jwt()}` } }, r => {
+      if (r.statusCode >= 300 && r.statusCode < 400) return res(get(r.headers.location));
+      const chunks = [];
+      r.on('data', d => chunks.push(d));
+      r.on('end', () => res({ status: r.statusCode, body: Buffer.concat(chunks) }));
+    }).on('error', rej);
+  });
+}
+
+(async () => {
+  const r = await get(`https://addons.mozilla.org/api/v5/addons/addon/${encodeURIComponent(ADDON_ID)}/versions/?filter=all_with_unlisted`);
+  const data = JSON.parse(r.body.toString());
+  const ver = data.results?.find(v => v.version === VERSION);
+  if (!ver?.file?.url) {
+    console.error('Cannot find signed XPI for', VERSION);
+    console.error(JSON.stringify(data, null, 2));
+    process.exit(1);
+  }
+  const dl = await get(ver.file.url);
+  const dest = `build/extension/${VERSION}.xpi`;
+  fs.writeFileSync(dest, dl.body);
+  console.log(`Downloaded ${dl.body.length} bytes → ${dest}`);
+})().catch(e => { console.error(e); process.exit(1); });
+JSEOF
+
+            elif grep -q "was uploaded before and deleted" /tmp/amo_sign.log; then
+              echo "::error::Version $VERSION was previously deleted from AMO and cannot be resubmitted."
+              echo "::error::Please use a different version number."
+              exit 1
+
+            else
+              cat /tmp/amo_sign.log
+              exit 1
+            fi
+          fi
+
+          XPI_FILE=$(ls build/extension/*.xpi 2>/dev/null | head -1)
+          if [ -n "$XPI_FILE" ]; then
+            mv "$XPI_FILE" "build/extension/FluxDown-${VERSION}-firefox.xpi"
+            echo "Firefox XPI ready: build/extension/FluxDown-${VERSION}-firefox.xpi"
+          else
+            echo "::error::No signed XPI found after signing/download."
+            exit 1
+          fi
+        env:
+          AMO_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
 
       # ── Upload artifacts（供 release job 使用）──
       - name: Upload Chrome extension artifact
