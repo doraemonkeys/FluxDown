@@ -185,10 +185,11 @@ mod inner {
     /// Returns `true` if NMH registration is missing or stale and needs to be (re)written.
     ///
     /// Checks that:
-    ///   1. All browser registry keys exist under HKCU.
-    ///   2. Each manifest file exists at the registered path.
-    ///   3. Each manifest's exe path matches the currently located NMH executable.
-    ///   4. Chrome/Edge point to the Chromium manifest; Firefox points to its own manifest.
+    ///   1. Chrome/Edge registry keys exist and point to the Chromium manifest.
+    ///   2. Each registered manifest file exists and references the current NMH exe.
+    ///   3. The registered NMH's parent directory matches the current exe's directory
+    ///      (detects version switches: dev → portable / installed).
+    ///   4. Firefox is treated as optional — its absence does not trigger re-registration.
     ///
     /// If the NMH exe cannot be found, returns `true` so that `register()` can
     /// report the proper "exe not found" error.
@@ -199,7 +200,49 @@ mod inner {
         let expected_exe = strip_unc_prefix(&nmh_exe.to_string_lossy());
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
-        // Check Chrome and Edge point to the Chromium manifest
+        // --- 版本切换检测 ---
+        // 读取已注册 Chrome 清单中的 NMH path，与当前 exe 目录对比。
+        // 目录不同说明用户切换了版本（dev → portable / installed），强制重新注册。
+        let current_exe_dir = std::env::current_exe()
+            .ok()
+            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+        if let Some(exe_dir) = &current_exe_dir {
+            let chrome_reg = format!(
+                "{}\\{}",
+                r"Software\Google\Chrome\NativeMessagingHosts",
+                NMH_NAME
+            );
+            if let Ok(key) = hkcu.open_subkey_with_flags(&chrome_reg, KEY_READ) {
+                if let Ok(manifest_str) = key.get_value::<String, _>("") {
+                    if let Ok(content) = std::fs::read_to_string(&manifest_str) {
+                        if let Ok(json) =
+                            serde_json::from_str::<serde_json::Value>(&content)
+                        {
+                            if let Some(registered_str) = json["path"].as_str() {
+                                let registered_dir =
+                                    Path::new(registered_str).parent();
+                                if registered_dir
+                                    .map(|d| d != exe_dir.as_path())
+                                    .unwrap_or(true)
+                                {
+                                    rinf::debug_print!(
+                                        "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
+                                        registered_dir,
+                                        exe_dir
+                                    );
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // ---------------------
+
+        // Check Chrome and Edge point to the Chromium manifest with the correct path.
         let chromium_reg_paths = &[
             r"Software\Google\Chrome\NativeMessagingHosts",
             r"Software\Microsoft\Edge\NativeMessagingHosts",
@@ -226,29 +269,28 @@ mod inner {
             }
         }
 
-        // Check Firefox points to the Firefox-only manifest
+        // Firefox 是可选浏览器：注册表项不存在时跳过，不触发重新注册。
         let firefox_reg = format!(
             "{}\\{}",
             r"Software\Mozilla\NativeMessagingHosts",
             NMH_NAME
         );
-        let Ok(key) = hkcu.open_subkey_with_flags(&firefox_reg, KEY_READ) else {
-            return true;
-        };
-        let Ok(manifest_str): Result<String, _> = key.get_value("") else {
-            return true;
-        };
-        if !manifest_str.ends_with(MANIFEST_FILENAME_FIREFOX) {
-            return true; // still pointing to old shared manifest
-        }
-        if !Path::new(&manifest_str).exists() {
-            return true;
-        }
-        let Ok(content) = std::fs::read_to_string(&manifest_str) else {
-            return true;
-        };
-        if !content.contains(&expected_exe) {
-            return true;
+        if let Ok(key) = hkcu.open_subkey_with_flags(&firefox_reg, KEY_READ) {
+            let Ok(manifest_str): Result<String, _> = key.get_value("") else {
+                return true;
+            };
+            if !manifest_str.ends_with(MANIFEST_FILENAME_FIREFOX) {
+                return true; // still pointing to old shared manifest
+            }
+            if !Path::new(&manifest_str).exists() {
+                return true;
+            }
+            let Ok(content) = std::fs::read_to_string(&manifest_str) else {
+                return true;
+            };
+            if !content.contains(&expected_exe) {
+                return true;
+            }
         }
 
         false
@@ -452,6 +494,42 @@ mod inner {
         };
         let expected = nmh_exe.to_string_lossy().into_owned();
 
+        // --- 版本切换检测 ---
+        // 获取当前运行 exe 的目录，与已注册清单里记录的 NMH 所在目录对比。
+        // 若不一致，说明用户切换了版本（dev → portable、dev → installed 等），
+        // 必须强制重新注册，否则 find_nmh_exe() fallback 到 Cargo target 后
+        // needs_update() 会误判为"已是最新"。
+        let current_exe_dir = std::env::current_exe()
+            .ok()
+            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+        if let Some(exe_dir) = &current_exe_dir {
+            // 从第一个能读到的 Chromium 清单中解析已注册的 NMH path
+            for dir in chromium_nmh_dirs() {
+                let manifest_path = dir.join(MANIFEST_FILENAME_CHROMIUM);
+                let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+                    continue;
+                };
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+                    continue;
+                };
+                if let Some(registered_str) = json["path"].as_str() {
+                    let registered_dir = Path::new(registered_str).parent();
+                    if registered_dir.map(|d| d != exe_dir.as_path()).unwrap_or(true) {
+                        rinf::debug_print!(
+                            "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
+                            registered_dir,
+                            exe_dir
+                        );
+                        return true;
+                    }
+                }
+                break; // 找到一个有效清单即可，无需检查其余目录
+            }
+        }
+        // ---------------------
+
         // At least one Chromium dir must have a valid manifest.
         let chromium_ok = chromium_nmh_dirs().iter().any(|dir| {
             let path = dir.join(MANIFEST_FILENAME_CHROMIUM);
@@ -460,15 +538,18 @@ mod inner {
                 .unwrap_or(false)
         });
 
-        // Firefox manifest must exist and reference the current exe.
+        // Firefox 是可选浏览器：清单存在时才验证路径；未安装 / 未注册则忽略。
         let firefox_ok = firefox_nmh_dir()
             .map(|dir| {
                 let path = dir.join(MANIFEST_FILENAME_FIREFOX);
+                if !path.exists() {
+                    return true; // Firefox 未安装或尚未注册，跳过
+                }
                 std::fs::read_to_string(path)
                     .map(|c| c.contains(&expected))
                     .unwrap_or(false)
             })
-            .unwrap_or(false);
+            .unwrap_or(true); // 获取不到目录时同样视为 OK
 
         !(chromium_ok && firefox_ok)
     }

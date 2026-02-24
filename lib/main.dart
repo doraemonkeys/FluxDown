@@ -506,6 +506,10 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
       try {
         await windowManager.destroy();
       } catch (_) {}
+    } finally {
+      // Linux 上 windowManager.destroy() 只销毁 GTK 窗口，进程不会自动退出
+      // 需要显式终止 Dart 进程（含 Rust 线程）
+      exit(0);
     }
   }
 

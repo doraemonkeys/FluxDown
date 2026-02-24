@@ -300,6 +300,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       # ── 系统依赖 ──
+      # 注：已切换到 rustls，无需 libssl-dev（运行时亦无 libssl 依赖）
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
@@ -317,16 +318,12 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # 智能 Rust 缓存：自动管理 ~/.cargo 和 workspace target/
+      # Workspace Cargo.toml 在根目录，target/ 为 hub + nmh 共享目录
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: rust-${{ runner.os }}-x64-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-x64-
+          cache-on-failure: true
 
       - name: Cache Rinf CLI
         id: cache-rinf
@@ -361,6 +358,18 @@ jobs:
       # ── Build ──
       - name: Build Flutter Linux app
         run: flutter build linux --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
+
+      # ── 构建 NMH relay 二进制（浏览器扩展通信必需）──
+      # fluxdown_nmh 是浏览器通过 Native Messaging 协议启动的中继程序，
+      # 负责将扩展消息转发到主进程的 Unix socket。
+      # 必须与 flux_down 主程序一起打包，否则浏览器扩展无法工作。
+      - name: Build NMH relay binary
+        run: cargo build --release -p fluxdown_nmh
+
+      - name: Copy NMH binary to Flutter bundle
+        run: |
+          cp target/release/fluxdown_nmh build/linux/x64/release/bundle/
+          chmod +x build/linux/x64/release/bundle/fluxdown_nmh
 
       # ── Package tar.gz（命名目录后压缩，解压得 FluxDown-x.y.z-linux-x64/）──
       - name: Create portable tar.gz

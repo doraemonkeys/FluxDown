@@ -67,7 +67,7 @@ please refer to Rinf's [documentation](https://rinf.cunarist.org).
 python scripts/release_tag.py v0.1.7 --push --github-release --update-changelog
 
 # 高质量双语发布
-python scripts/release_tag.py v0.1.7 --model opus --lang both --push --github-release
+python scripts/release_tag.py v0.1.7 --model sonnet --lang both --push --github-release
 
 # 仅预览效果
 python scripts/release_tag.py v0.1.7 --dry-run

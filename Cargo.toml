@@ -6,3 +6,9 @@
 [workspace]
 resolver = "3"
 members = ["native/*"]
+
+[profile.release]
+# 移除调试符号，减少发布包体积（~30-50%）
+strip = "debuginfo"
+# Thin LTO：比 full LTO 编译快，二进制更小
+lto = "thin"
