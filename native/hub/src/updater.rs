@@ -1,10 +1,18 @@
 //! Auto-update module: version check via website API proxy, download update
-//! package, and launch installation (Inno Setup for installer builds, or
-//! bat-script extraction for portable builds).
+//! package, and launch installation.
 //!
-//! All requests go through the website API (`/api/release`, `/api/download/:fn`)
+//! Platform strategies:
+//!   Windows setup  (.exe)         → Inno Setup silent install
+//!   Windows portable (.zip)       → bat script: wait, extract, copy, restart
+//!   Linux AppImage (.AppImage)    → sh script: wait, mv replace, chmod, restart
+//!   Linux deb (.deb)              → pkexec dpkg -i  (GUI password dialog)
+//!   Linux arch (.pkg.tar.zst)     → pkexec pacman -U (GUI password dialog)
+//!   Linux portable (.tar.gz)      → sh script: wait, tar extract, copy, restart
+//!
+//! All HTTP requests go through the website API (`/api/release`, `/api/download/:fn`)
 //! so that GITHUB_TOKEN stays server-side — the client never touches GitHub directly.
 
+#[cfg(target_os = "windows")]
 use std::path::Path;
 use std::time::Duration;
 
@@ -23,6 +31,7 @@ use crate::signals::{UpdateCheckResult, UpdateDownloadProgress};
 
 const UPDATE_API_BASE: &str = "https://fluxdown.zerx.dev";
 
+#[cfg(target_os = "windows")]
 const PORTABLE_MARKER: &str = "portable";
 
 // ---------------------------------------------------------------------------
@@ -56,10 +65,24 @@ struct ReleaseInfo {
 
 #[derive(Deserialize)]
 struct ReleaseAssets {
+    // Windows (unused on Linux but must be present for serde deserialization)
+    #[allow(dead_code)]
     setup: Option<AssetInfo>,
+    #[allow(dead_code)]
     portable: Option<AssetInfo>,
+    #[allow(dead_code)]
     setup_arm64: Option<AssetInfo>,
+    #[allow(dead_code)]
     portable_arm64: Option<AssetInfo>,
+    // Linux (unused on Windows but must be present for serde deserialization)
+    #[allow(dead_code)]
+    linux_appimage: Option<AssetInfo>,
+    #[allow(dead_code)]
+    linux_deb: Option<AssetInfo>,
+    #[allow(dead_code)]
+    linux_arch: Option<AssetInfo>,
+    #[allow(dead_code)]
+    linux_tarball: Option<AssetInfo>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +97,7 @@ struct AssetInfo {
 // Environment detection
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 fn is_portable() -> bool {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
@@ -83,16 +107,95 @@ fn is_portable() -> bool {
     false
 }
 
+#[cfg(target_os = "windows")]
 fn is_arm64() -> bool {
     std::env::consts::ARCH == "aarch64"
 }
 
+/// Linux installation type detected at runtime.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+enum LinuxInstallType {
+    /// Running as an AppImage ($APPIMAGE env is set by the AppImage runtime).
+    AppImage,
+    /// Installed via .deb package to /opt/fluxdown/ (dpkg can locate the exe).
+    Deb,
+    /// Installed via .pkg.tar.zst to /opt/fluxdown/ (pacman can locate the exe).
+    Arch,
+    /// Extracted tar.gz in any user-writable directory.
+    Portable,
+}
+
+/// Detect how FluxDown was installed on this Linux system.
+#[cfg(target_os = "linux")]
+fn detect_linux_install_type() -> LinuxInstallType {
+    // 1. AppImage: the AppImage runtime always sets $APPIMAGE to the path of
+    //    the squashfs image being executed.
+    if std::env::var("APPIMAGE").is_ok() {
+        return LinuxInstallType::AppImage;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return LinuxInstallType::Portable,
+    };
+    let exe_str = exe.to_str().unwrap_or("");
+
+    // 2. System package: both deb and arch install to /opt/fluxdown/.
+    if exe_str.starts_with("/opt/fluxdown") {
+        // Try dpkg first (Debian/Ubuntu).
+        let dpkg_found = std::process::Command::new("dpkg")
+            .args(["-S", exe_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if dpkg_found {
+            return LinuxInstallType::Deb;
+        }
+
+        // Try pacman (Arch Linux).
+        let pacman_found = std::process::Command::new("pacman")
+            .args(["-Qo", exe_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if pacman_found {
+            return LinuxInstallType::Arch;
+        }
+    }
+
+    // 3. Fallback: portable tar.gz extracted to a user directory.
+    LinuxInstallType::Portable
+}
+
 fn select_asset(assets: &ReleaseAssets) -> Option<&AssetInfo> {
-    match (is_portable(), is_arm64()) {
-        (true, true) => assets.portable_arm64.as_ref(),
-        (true, false) => assets.portable.as_ref(),
-        (false, true) => assets.setup_arm64.as_ref(),
-        (false, false) => assets.setup.as_ref(),
+    #[cfg(target_os = "windows")]
+    {
+        match (is_portable(), is_arm64()) {
+            (true, true) => assets.portable_arm64.as_ref(),
+            (true, false) => assets.portable.as_ref(),
+            (false, true) => assets.setup_arm64.as_ref(),
+            (false, false) => assets.setup.as_ref(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match detect_linux_install_type() {
+            LinuxInstallType::AppImage => assets.linux_appimage.as_ref(),
+            LinuxInstallType::Deb => assets.linux_deb.as_ref(),
+            LinuxInstallType::Arch => assets.linux_arch.as_ref(),
+            LinuxInstallType::Portable => assets.linux_tarball.as_ref(),
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        None
     }
 }
 
@@ -298,6 +401,10 @@ async fn download_inner(url: &str, version: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
+/// Install a downloaded update package and restart the application.
+///
+/// On success the function does not return — it exits the process.
+/// On failure it returns an error so the caller can report it to the UI.
 pub fn install(installer_path: &str) -> Result<(), UpdateError> {
     #[cfg(target_os = "windows")]
     {
@@ -313,14 +420,33 @@ pub fn install(installer_path: &str) -> Result<(), UpdateError> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        // Dispatch based on file extension / suffix.
+        if installer_path.ends_with(".AppImage") {
+            install_appimage(installer_path)
+        } else if installer_path.ends_with(".deb") {
+            install_deb(installer_path)
+        } else if installer_path.ends_with(".pkg.tar.zst") {
+            install_arch(installer_path)
+        } else {
+            // .tar.gz portable fallback
+            install_portable_tarball(installer_path)
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = installer_path;
         Err(UpdateError::Other(
-            "Auto-update install is only supported on Windows".to_string(),
+            "Auto-update install is not supported on this platform".to_string(),
         ))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Windows installers
+// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 fn install_setup(installer_path: &str) -> Result<(), UpdateError> {
@@ -388,5 +514,220 @@ start "" "%DIR%\%EXE%"
         .map_err(UpdateError::Io)?;
 
     std::thread::sleep(Duration::from_millis(500));
+    std::process::exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Linux installers
+// ---------------------------------------------------------------------------
+
+/// AppImage self-update: write a shell script that waits for this process to
+/// exit, then atomically replaces the old AppImage with the new one and
+/// relaunches it.  No root privileges required.
+#[cfg(target_os = "linux")]
+fn install_appimage(new_appimage_path: &str) -> Result<(), UpdateError> {
+    // $APPIMAGE is set by the AppImage runtime to the absolute path of the
+    // currently-running squashfs image.
+    let current_appimage = std::env::var("APPIMAGE").map_err(|_| {
+        UpdateError::Other(
+            "$APPIMAGE not set; cannot determine the current AppImage path".to_string(),
+        )
+    })?;
+
+    let pid = std::process::id();
+
+    let script = format!(
+        r#"#!/bin/sh
+NEW="{new}"
+OLD="{old}"
+PID={pid}
+# Wait for the app process to exit.
+while kill -0 "$PID" 2>/dev/null; do
+    sleep 1
+done
+# Replace the AppImage atomically.
+chmod +x "$NEW"
+mv -f "$NEW" "$OLD"
+# Relaunch the updated AppImage detached from this shell.
+nohup "$OLD" >/dev/null 2>&1 &
+# Self-delete this script.
+rm -- "$0"
+"#,
+        new = new_appimage_path,
+        old = current_appimage,
+        pid = pid,
+    );
+
+    write_and_run_sh_script(&script, "fluxdown_update_appimage.sh")?;
+
+    std::thread::sleep(Duration::from_millis(500));
+    std::process::exit(0);
+}
+
+/// Deb package update via pkexec: triggers a native GUI password dialog on
+/// GNOME/KDE/XFCE through the Polkit authentication agent.
+#[cfg(target_os = "linux")]
+fn install_deb(deb_path: &str) -> Result<(), UpdateError> {
+    check_pkexec_available()?;
+
+    let status = std::process::Command::new("pkexec")
+        .args(["dpkg", "-i", deb_path])
+        .status()
+        .map_err(UpdateError::Io)?;
+
+    if !status.success() {
+        // User cancelled pkexec or dpkg failed.
+        return Err(UpdateError::Other(format!(
+            "dpkg install failed (exit code {}). \
+             If you cancelled the password prompt, click Install & Restart to try again.",
+            status.code().unwrap_or(-1)
+        )));
+    }
+
+    // dpkg replaced the binary in-place; restart the new version.
+    restart_app()
+}
+
+/// Arch package update via pkexec + pacman: triggers a native GUI password
+/// dialog through the Polkit authentication agent.
+#[cfg(target_os = "linux")]
+fn install_arch(pkg_path: &str) -> Result<(), UpdateError> {
+    check_pkexec_available()?;
+
+    let status = std::process::Command::new("pkexec")
+        .args(["pacman", "-U", "--noconfirm", pkg_path])
+        .status()
+        .map_err(UpdateError::Io)?;
+
+    if !status.success() {
+        return Err(UpdateError::Other(format!(
+            "pacman install failed (exit code {}). \
+             If you cancelled the password prompt, click Install & Restart to try again.",
+            status.code().unwrap_or(-1)
+        )));
+    }
+
+    restart_app()
+}
+
+/// Portable tar.gz self-update: write a shell script that waits for this
+/// process to exit, extracts the new archive over the app directory, then
+/// relaunches the app.  No root privileges required.
+#[cfg(target_os = "linux")]
+fn install_portable_tarball(tarball_path: &str) -> Result<(), UpdateError> {
+    let exe = std::env::current_exe().map_err(UpdateError::Io)?;
+    let app_dir = exe
+        .parent()
+        .ok_or_else(|| UpdateError::Other("cannot determine app directory".to_string()))?;
+    let exe_name = exe
+        .file_name()
+        .ok_or_else(|| UpdateError::Other("cannot determine exe name".to_string()))?
+        .to_string_lossy()
+        .into_owned();
+
+    let pid = std::process::id();
+
+    let script = format!(
+        r#"#!/bin/sh
+TAR="{tar}"
+DIR="{dir}"
+EXE="{exe}"
+PID={pid}
+# Wait for the app process to exit.
+while kill -0 "$PID" 2>/dev/null; do
+    sleep 1
+done
+# Extract the tarball into a temp directory.
+TMP=$(mktemp -d)
+tar xzf "$TAR" -C "$TMP"
+# Handle single top-level directory (e.g. FluxDown-x.y.z-linux-x64/).
+COUNT=$(ls "$TMP" | wc -l)
+FIRST=$(ls "$TMP" | head -n 1)
+if [ "$COUNT" -eq 1 ] && [ -d "$TMP/$FIRST" ]; then
+    SRC="$TMP/$FIRST"
+else
+    SRC="$TMP"
+fi
+# Overwrite the app directory.
+cp -a "$SRC/." "$DIR/"
+# Cleanup.
+rm -rf "$TMP"
+rm -f "$TAR"
+# Relaunch the updated binary detached from this shell.
+nohup "$DIR/$EXE" >/dev/null 2>&1 &
+# Self-delete this script.
+rm -- "$0"
+"#,
+        tar = tarball_path,
+        dir = app_dir.to_string_lossy(),
+        exe = exe_name,
+        pid = pid,
+    );
+
+    write_and_run_sh_script(&script, "fluxdown_update_portable.sh")?;
+
+    std::thread::sleep(Duration::from_millis(500));
+    std::process::exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Linux helpers
+// ---------------------------------------------------------------------------
+
+/// Write `content` to a temp shell script, make it executable, and spawn it
+/// detached.  Returns before the script does anything (the script waits for
+/// our PID to exit).
+#[cfg(target_os = "linux")]
+fn write_and_run_sh_script(content: &str, name: &str) -> Result<(), UpdateError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script_path = std::env::temp_dir().join(name);
+    std::fs::write(&script_path, content).map_err(UpdateError::Io)?;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+        .map_err(UpdateError::Io)?;
+
+    std::process::Command::new("sh")
+        .arg(&script_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(UpdateError::Io)?;
+
+    Ok(())
+}
+
+/// Verify that `pkexec` is available on PATH before attempting a privileged
+/// install.  Returns a clear error if it is not found.
+#[cfg(target_os = "linux")]
+fn check_pkexec_available() -> Result<(), UpdateError> {
+    let found = std::process::Command::new("pkexec")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if found {
+        Ok(())
+    } else {
+        Err(UpdateError::Other(
+            "pkexec not found. Please install the update manually using your package manager."
+                .to_string(),
+        ))
+    }
+}
+
+/// Spawn the current executable path and exit, effectively restarting the app.
+#[cfg(target_os = "linux")]
+fn restart_app() -> Result<(), UpdateError> {
+    let exe = std::env::current_exe().map_err(UpdateError::Io)?;
+    std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(UpdateError::Io)?;
     std::process::exit(0);
 }

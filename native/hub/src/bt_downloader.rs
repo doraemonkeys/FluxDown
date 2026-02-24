@@ -881,6 +881,29 @@ fn build_piece_scatter_segments(
     segs
 }
 
+/// Compute user-facing BT progress bytes.
+///
+/// We combine checked bytes (hash-verified) and fetched bytes (network-received)
+/// so early BT activity is visible before any piece is fully verified.
+///
+/// Important: when the torrent is not `finished`, never return `total_bytes`,
+/// otherwise UI would show 100% while librqbit is still verifying/finalizing.
+fn compute_bt_display_progress(
+    checked_progress: i64,
+    fetched_progress: i64,
+    total_bytes: i64,
+    finished: bool,
+) -> i64 {
+    let mut progress = checked_progress.max(fetched_progress).max(0);
+    if total_bytes > 0 {
+        progress = progress.min(total_bytes);
+        if !finished && progress >= total_bytes {
+            progress = total_bytes.saturating_sub(1);
+        }
+    }
+    progress
+}
+
 async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let BtInnerParams {
         task_id,
@@ -1104,17 +1127,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         };
 
         // Use fetched_bytes (actual bytes received from network, including
-        // partial pieces) when checked progress is 0.  This lets the user
-        // see that BT is actively downloading even before any piece has been
-        // fully received and hash-verified.  Once pieces start completing,
-        // checked_progress is always >= fetched partial data, so we take
-        // the max to ensure monotonic progress.
+        // partial pieces) to expose early BT activity before pieces are fully
+        // hash-verified. Keep display progress below 100% until stats.finished.
         let fetched = stats
             .live
             .as_ref()
             .map(|l| l.snapshot.fetched_bytes as i64)
             .unwrap_or(0);
-        let progress = checked_progress.max(fetched).min(total);
+        let progress = compute_bt_display_progress(checked_progress, fetched, total, stats.finished);
 
         // Check for error — keep the handle cached so user can retry.
         if let Some(ref err) = stats.error {
@@ -1260,5 +1280,28 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // to avoid wasted cycles.  Cancel detection latency of 500ms is
         // acceptable since the manager layer handles session.pause() directly.
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_bt_display_progress;
+
+    #[test]
+    fn display_progress_does_not_reach_total_before_finished() {
+        let progress = compute_bt_display_progress(900, 1000, 1000, false);
+        assert_eq!(progress, 999);
+    }
+
+    #[test]
+    fn display_progress_can_reach_total_when_finished() {
+        let progress = compute_bt_display_progress(900, 1000, 1000, true);
+        assert_eq!(progress, 1000);
+    }
+
+    #[test]
+    fn display_progress_handles_unknown_total() {
+        let progress = compute_bt_display_progress(0, 12345, 0, false);
+        assert_eq!(progress, 12345);
     }
 }

@@ -441,6 +441,18 @@ pub async fn run(db_dir: PathBuf) {
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = updater::install(&path) {
                         rinf::debug_print!("[updater] install error: {}", e);
+                        // Report the error back to the UI so the user can retry
+                        // (e.g. they cancelled the pkexec password dialog).
+                        crate::signals::UpdateDownloadProgress {
+                            version: String::new(),
+                            downloaded_bytes: 0,
+                            total_bytes: 0,
+                            speed: 0,
+                            status: 2, // error
+                            installer_path: path,
+                            error_message: e.to_string(),
+                        }
+                        .send_signal_to_dart();
                     }
                 });
             }

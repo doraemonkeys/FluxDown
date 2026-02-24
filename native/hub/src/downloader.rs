@@ -1056,12 +1056,26 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
 
     let _ = p.db.update_task_status(&p.task_id, 1, "").await;
 
-    // Immediately notify Dart: status=1 with resolved file name & total size
+    // Immediately notify Dart: status=1 with resolved file name & total size.
+    // For resume tasks, send persisted downloaded bytes as baseline so speed
+    // smoothing doesn't treat resumed bytes as a fresh in-interval delta.
+    let initial_downloaded = if p.is_resume {
+        p.db
+            .load_task_by_id(&p.task_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.downloaded_bytes.max(0))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     let _ = p
         .progress_tx
         .send(ProgressUpdate {
             task_id: p.task_id.clone(),
-            downloaded_bytes: 0,
+            downloaded_bytes: initial_downloaded,
             total_bytes: info.total_bytes,
             status: 1,
             error_message: String::new(),

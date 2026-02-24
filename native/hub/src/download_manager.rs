@@ -107,6 +107,12 @@ struct TaskSpeedState {
     /// Last status sent to Dart.  Used to detect status transitions so that
     /// they are always forwarded immediately (not rate-limited).
     last_sent_status: i32,
+    /// Last raw status observed from downloader updates.
+    last_raw_status: i32,
+    /// Number of downloading updates to skip speed calculation for.
+    /// Used as warmup after prepare/resume to avoid artificial speed spikes
+    /// caused by baseline jumps (e.g. resume from non-zero downloaded bytes).
+    speed_warmup_remaining: u8,
 }
 
 /// Information needed to start a queued task later.
@@ -1866,6 +1872,8 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 file_name: String::new(),
                 cached_segments: None,
                 last_sent_status: -1, // never sent yet
+                last_raw_status: update.status,
+                speed_warmup_remaining: if update.status == 1 { 1 } else { 0 },
             }
         });
 
@@ -1878,16 +1886,41 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
             state.cached_segments = update.segment_details.clone();
         }
 
-        // Compute EMA speed from downloaded delta (works correctly with
-        // multi-segment: each segment adds to total_downloaded atomically).
+        // Compute EMA speed from downloaded delta.
+        //
+        // Resume / status-transition handling:
+        // - Entering downloading (5/2 -> 1) may carry baseline jumps.
+        // - Some sources send an initial status=1 with downloaded=0, then
+        //   quickly jump to resumed bytes on the next update.
+        // We therefore apply a short warmup window and skip speed calc until
+        // baseline is stable, preventing large transient spikes.
+        let entered_downloading = update.status == 1 && state.last_raw_status != 1;
+        if entered_downloading {
+            state.ema_speed = 0.0;
+            state.speed_warmup_remaining = if update.downloaded_bytes > 0 { 1 } else { 2 };
+        }
+
         let dt = now.duration_since(state.last_time).as_secs_f64();
-        if dt > 0.01 && update.status == 1 {
-            let delta = (update.downloaded_bytes - state.last_downloaded).max(0) as f64;
-            let instant_speed = delta / dt;
-            state.ema_speed = EMA_ALPHA * instant_speed + (1.0 - EMA_ALPHA) * state.ema_speed;
+        if update.status == 1 {
+            let delta_i64 = update.downloaded_bytes - state.last_downloaded;
+            if delta_i64 < 0 {
+                // Non-monotonic fallback: reset baseline and hold one sample.
+                state.ema_speed = 0.0;
+                state.speed_warmup_remaining = 1;
+            } else if state.speed_warmup_remaining > 0 {
+                state.speed_warmup_remaining -= 1;
+            } else if dt > 0.01 {
+                let instant_speed = delta_i64 as f64 / dt;
+                state.ema_speed =
+                    EMA_ALPHA * instant_speed + (1.0 - EMA_ALPHA) * state.ema_speed;
+            }
+        } else {
+            state.ema_speed = 0.0;
+            state.speed_warmup_remaining = 0;
         }
         state.last_downloaded = update.downloaded_bytes;
         state.last_time = now;
+        state.last_raw_status = update.status;
 
         let smoothed_speed = state.ema_speed as i64;
         let resolved_name = state.file_name.clone();

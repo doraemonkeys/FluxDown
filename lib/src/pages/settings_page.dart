@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
@@ -3011,12 +3011,9 @@ class _AboutContent extends StatelessWidget {
             MouseRegion(
               cursor: SystemMouseCursors.click,
               child: GestureDetector(
-                onTap: () => Process.run('cmd', [
-                  '/c',
-                  'start',
-                  '',
-                  'https://fluxdown.zerx.dev',
-                ]),
+                onTap: () => launchUrl(
+                  Uri.parse('https://fluxdown.zerx.dev'),
+                ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
