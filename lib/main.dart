@@ -109,17 +109,36 @@ Future<void> main(List<String> args) async {
   });
 
   // 初始化开机启动支持（注册时附带 --silentStart 参数，开机自启免打扰）
+  // Windows 下路径加引号，防止含空格的安装路径（如 C:\Program Files\...）被 CreateProcess 截断解析失败。
   launchAtStartup.setup(
     appName: 'FluxDown',
-    appPath: Platform.resolvedExecutable,
+    appPath: Platform.isWindows
+        ? '"${Platform.resolvedExecutable}"'
+        : Platform.resolvedExecutable,
     args: ['--silentStart'],
   );
-  // 若已启用开机启动，重新写入注册表确保 --silentStart 参数始终最新。
-  // 处理旧版本注册表条目缺少该参数的迁移场景。
+  // 确保注册表条目包含 --silentStart 参数，处理两种迁移场景：
+  // 1. 旧版本自行写入的条目（路径未加引号或缺少 --silentStart）
+  // 2. Windows 安装程序写入的条目（无 --silentStart，与 launchAtStartup 期望值不匹配）
   try {
-    if (await launchAtStartup.isEnabled()) {
+    bool needsReEnable = await launchAtStartup.isEnabled();
+    if (!needsReEnable && Platform.isWindows) {
+      // launchAtStartup.isEnabled() 做精确值匹配，检测不到安装程序写入的旧条目。
+      // 用 reg query 直接检查注册表中是否存在任意值（含安装程序创建的条目）。
+      final regResult = await Process.run('reg', [
+        'query',
+        r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run',
+        '/v',
+        'FluxDown',
+      ]);
+      if (regResult.exitCode == 0) {
+        needsReEnable = true;
+        logInfo('main', 'found legacy/installer autostart entry, migrating to --silentStart');
+      }
+    }
+    if (needsReEnable) {
       await launchAtStartup.enable();
-      logInfo('main', 'launchAtStartup re-enabled to refresh --silentStart arg');
+      logInfo('main', 'launchAtStartup re-enabled with --silentStart arg');
     }
   } catch (e) {
     logInfo('main', 'launchAtStartup refresh skipped: $e');

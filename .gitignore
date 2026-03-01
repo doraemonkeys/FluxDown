@@ -77,3 +77,6 @@ website/.vercel/
 # Memory debug output
 .mem_debug/
 /videos
+
+# Arch package build output
+/arch_pkg/

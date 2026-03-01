@@ -59,6 +59,13 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
+# Override tray_manager with a local SNI-based implementation for Linux.
+# The local fork replaces the AppIndicator C++ backend with a native
+# StatusNotifierItem + dbusmenu D-Bus implementation, which properly
+# supports left-click events on KDE Plasma (Wayland & X11).
+dependency_overrides:
+  tray_manager:
+    path: packages/tray_manager_local
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

@@ -367,7 +367,6 @@ jobs:
           sudo apt-get install -y \
             cmake ninja-build clang pkg-config \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
             libnotify-dev \
             libsecret-1-dev \
             patchelf \
@@ -525,7 +524,7 @@ jobs:
             echo "Section: net"
             echo "Priority: optional"
             echo "Installed-Size: ${INSTALLED_SIZE_KB}"
-            echo "Depends: libgtk-3-0, libayatana-appindicator3-1, libnotify4"
+            echo "Depends: libgtk-3-0, libnotify4"
             echo "Description: Free IDM-alternative download manager"
             echo " FluxDown is a Rust-powered, open-source download manager."
             echo " Supports HTTP/HTTPS/FTP, BitTorrent magnetic links, and HLS/DASH streaming"
@@ -594,7 +593,6 @@ jobs:
             echo "arch = x86_64"
             echo "license = custom"
             echo "depend = gtk3"
-            echo "depend = libayatana-appindicator"
             echo "depend = libnotify"
           } > "$PKG_DIR/.PKGINFO"
 
