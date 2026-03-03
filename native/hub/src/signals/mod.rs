@@ -71,6 +71,14 @@ pub struct ControlTask {
     pub action: i32, // 0=pause, 1=resume, 2=cancel, 3=delete(+files), 4=delete(record only)
 }
 
+/// Batch control multiple tasks at once (pause/resume/delete).
+/// Replaces N individual ControlTask IPC calls with a single signal.
+#[derive(Deserialize, DartSignal)]
+pub struct BatchControlTask {
+    pub task_ids: Vec<String>,
+    pub action: i32, // 0=pause, 1=resume, 3=delete(+files), 4=delete(record only)
+}
+
 /// Request all persisted tasks (sent on app startup)
 #[derive(Deserialize, DartSignal)]
 pub struct RequestAllTasks {}
@@ -190,7 +198,7 @@ pub struct ConfigEntry {
 }
 
 /// Nested task info piece
-#[derive(Serialize, Deserialize, SignalPiece)]
+#[derive(Clone, Serialize, Deserialize, SignalPiece)]
 pub struct TaskInfo {
     pub task_id: String,
     pub url: String,

@@ -72,7 +72,8 @@ impl Db {
                 max_concurrent INTEGER NOT NULL DEFAULT 0,
                 default_save_dir TEXT NOT NULL DEFAULT '',
                 position INTEGER NOT NULL DEFAULT 0
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_segments_task_id ON task_segments(task_id);",
         )?;
 
         // --- Schema migrations (safe to re-run) ---
@@ -299,6 +300,56 @@ impl Db {
         .await?
     }
 
+    /// Batch-load multiple tasks by ID in a single `spawn_blocking` call.
+    /// Uses chunked IN clauses (same pattern as `delete_tasks_batch`).
+    pub async fn load_tasks_by_ids(&self, ids: &[String]) -> Result<Vec<TaskInfo>, DbError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.clone();
+        let ids = ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            let mut results = Vec::with_capacity(ids.len());
+            const CHUNK: usize = 500;
+            for chunk in ids.chunks(CHUNK) {
+                let placeholders: String = (1..=chunk.len())
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let sql = format!(
+                    "SELECT id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id, checksum
+                     FROM tasks WHERE id IN ({})",
+                    placeholders
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(TaskInfo {
+                        task_id: row.get(0)?,
+                        url: row.get(1)?,
+                        file_name: row.get(2)?,
+                        save_dir: row.get(3)?,
+                        status: row.get(4)?,
+                        downloaded_bytes: row.get(5)?,
+                        total_bytes: row.get(6)?,
+                        error_message: row.get(7)?,
+                        created_at: row.get(8)?,
+                        proxy_url: row.get::<_, String>(9).unwrap_or_default(),
+                        queue_id: row.get::<_, String>(10).unwrap_or_default(),
+                        checksum: row.get::<_, String>(11).unwrap_or_default(),
+                    })
+                })?;
+                for row in rows {
+                    results.push(row?);
+                }
+            }
+            Ok(results)
+        })
+        .await?
+    }
+
     pub async fn delete_task(&self, id: &str) -> Result<(), DbError> {
         let conn = self.conn.clone();
         let id = id.to_owned();
@@ -307,6 +358,51 @@ impl Db {
             conn.execute("DELETE FROM task_segments WHERE task_id = ?1", params![id])?;
             conn.execute("DELETE FROM torrent_files WHERE task_id = ?1", params![id])?;
             conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Batch-delete multiple tasks in a single transaction.
+    /// Uses chunked IN clauses to respect SQLite's 999 variable limit.
+    pub async fn delete_tasks_batch(&self, ids: &[String]) -> Result<(), DbError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        let ids = ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            // SQLite has a max variable limit of 999; chunk to stay safe.
+            const CHUNK: usize = 500;
+            for chunk in ids.chunks(CHUNK) {
+                let placeholders: String = (1..=chunk.len())
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+                let sql = format!(
+                    "DELETE FROM task_segments WHERE task_id IN ({})",
+                    placeholders
+                );
+                conn.execute(&sql, params.as_slice())?;
+
+                let sql = format!(
+                    "DELETE FROM torrent_files WHERE task_id IN ({})",
+                    placeholders
+                );
+                conn.execute(&sql, params.as_slice())?;
+
+                let sql = format!(
+                    "DELETE FROM tasks WHERE id IN ({})",
+                    placeholders
+                );
+                conn.execute(&sql, params.as_slice())?;
+            }
+            conn.execute_batch("COMMIT")?;
             Ok(())
         })
         .await?
@@ -913,4 +1009,223 @@ fn chrono_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", since_epoch.as_secs())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Open a fresh Db in a unique temporary directory.
+    /// Returns (Db, dir_path) — caller should remove the dir when done.
+    fn open_test_db() -> (Db, std::path::PathBuf) {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("fluxdown_test_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db = Db::open(&dir).expect("open test db");
+        (db, dir)
+    }
+
+    async fn insert_task(db: &Db, id: &str) {
+        db.insert_task(id, "http://example.com/file.bin", "file.bin", "/tmp", 1, 0, "", "", "")
+            .await
+            .expect("insert task");
+    }
+
+    // -----------------------------------------------------------------------
+    // Correctness: delete_task removes all three tables
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_task_removes_from_tasks_table() {
+        let (db, dir) = open_test_db();
+        insert_task(&db, "t1").await;
+
+        db.delete_task("t1").await.expect("delete task");
+
+        let result = db.load_task_by_id("t1").await.expect("load after delete");
+        assert!(result.is_none(), "task must be absent after delete");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_task_not_present_in_load_all() {
+        let (db, dir) = open_test_db();
+        insert_task(&db, "keep").await;
+        insert_task(&db, "delete-me").await;
+
+        db.delete_task("delete-me").await.expect("delete task");
+
+        let all = db.load_all_tasks().await.expect("load all");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].task_id, "keep");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_task_succeeds() {
+        let (db, dir) = open_test_db();
+        // Deleting an ID that was never inserted must not return an error.
+        let result = db.delete_task("phantom-id").await;
+        assert!(result.is_ok(), "delete of missing task must succeed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_same_task_twice_is_idempotent() {
+        let (db, dir) = open_test_db();
+        insert_task(&db, "t1").await;
+
+        db.delete_task("t1").await.expect("first delete");
+        let result = db.delete_task("t1").await;
+        assert!(result.is_ok(), "second delete of already-deleted task must succeed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_task_does_not_affect_other_tasks() {
+        let (db, dir) = open_test_db();
+        for i in 0..5 {
+            insert_task(&db, &format!("task-{i}")).await;
+        }
+
+        db.delete_task("task-2").await.expect("delete task-2");
+
+        let all = db.load_all_tasks().await.expect("load all");
+        assert_eq!(all.len(), 4, "four tasks must remain after one delete");
+        assert!(
+            all.iter().all(|t| t.task_id != "task-2"),
+            "deleted task must not appear in load_all"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Correctness: foreign-key cascade (task_segments / torrent_files)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_task_cascades_to_segments() {
+        let (db, dir) = open_test_db();
+        insert_task(&db, "seg-task").await;
+
+        // Insert a segment row directly via the connection.
+        {
+            let conn = db.conn.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = conn.lock().expect("lock");
+                conn.execute(
+                    "INSERT INTO task_segments (task_id, segment_index, start_byte, end_byte)
+                     VALUES (?1, 0, 0, 1024)",
+                    rusqlite::params!["seg-task"],
+                )
+                .expect("insert segment");
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+
+        db.delete_task("seg-task").await.expect("delete");
+
+        // Verify no orphan segment rows.
+        let conn = db.conn.clone();
+        let count: i64 = tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("lock");
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_segments WHERE task_id = 'seg-task'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query count")
+        })
+        .await
+        .expect("spawn_blocking");
+
+        assert_eq!(count, 0, "task_segments must be empty after task delete");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Performance benchmark: expose the N×WAL-checkpoint bottleneck
+    //
+    // Run with:  cargo test -p hub -- --nocapture delete_benchmark
+    // -----------------------------------------------------------------------
+
+    /// Insert N completed tasks (no active handles) and delete them one by one.
+    /// Prints elapsed time so the sequential-WAL-checkpoint cost is visible.
+    ///
+    /// This test documents the known bottleneck: `delete_task` calls
+    /// `db.delete_task()` which spawns a blocking thread per call.
+    /// For N = 500 the elapsed time exposes the per-task overhead; at
+    /// N = 5 000 the wall time becomes user-visible (several seconds).
+    #[tokio::test]
+    async fn delete_benchmark_sequential_500_tasks() {
+        const N: usize = 500;
+        let (db, dir) = open_test_db();
+
+        for i in 0..N {
+            insert_task(&db, &format!("bench-{i}")).await;
+        }
+
+        let start = std::time::Instant::now();
+        for i in 0..N {
+            db.delete_task(&format!("bench-{i}"))
+                .await
+                .expect("delete");
+        }
+        let elapsed = start.elapsed();
+
+        // Verify all deleted.
+        let remaining = db.load_all_tasks().await.expect("load all");
+        assert!(remaining.is_empty(), "all tasks must be gone");
+
+        eprintln!(
+            "\n[benchmark] sequential delete of {N} tasks: {elapsed:?} \
+             ({:.1} ms/task)",
+            elapsed.as_secs_f64() * 1000.0 / N as f64
+        );
+
+        // Soft performance assertion: each delete should take < 50 ms on average.
+        // This detects catastrophic regression (e.g. 5 s per task) but is
+        // intentionally generous to avoid CI flakiness on slow machines.
+        let ms_per_task = elapsed.as_secs_f64() * 1000.0 / N as f64;
+        assert!(
+            ms_per_task < 50.0,
+            "average delete latency {ms_per_task:.1} ms exceeds 50 ms — \
+             check for WAL-checkpoint or spawn_blocking overhead"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // WAL checkpoint
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn wal_checkpoint_succeeds_on_empty_db() {
+        let (db, dir) = open_test_db();
+        let result = db.wal_checkpoint().await;
+        assert!(result.is_ok(), "wal_checkpoint must succeed on empty DB");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn wal_checkpoint_succeeds_after_writes() {
+        let (db, dir) = open_test_db();
+        for i in 0..10 {
+            insert_task(&db, &format!("cp-{i}")).await;
+        }
+        let result = db.wal_checkpoint().await;
+        assert!(result.is_ok(), "wal_checkpoint must succeed after writes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -9,6 +9,7 @@ import '../services/analytics_service.dart';
 import '../services/log_service.dart';
 import 'download_queue.dart';
 import 'download_task.dart';
+import 'settings_provider.dart';
 
 const _tag = 'DownloadCtrl';
 
@@ -394,31 +395,39 @@ class DownloadController extends ChangeNotifier {
     return filtered.every((t) => _checkedTaskIds.contains(t.id));
   }
 
-  /// 批量删除选中的任务
+  /// 批量删除选中的任务（性能优化版）
+  ///
+  /// O(n) Set 查找替代旧版 O(n²) 逐个 removeWhere；
+  /// 单次 BatchControlTask IPC 替代 N 次 ControlTask。
   void deleteCheckedTasks({required bool deleteFiles}) {
     final ids = _checkedTaskIds.toList();
     logInfo(
       _tag,
       'deleteCheckedTasks: ${ids.length} tasks, deleteFiles=$deleteFiles',
     );
-    // 超过阈值时启用进度追踪，等待 Rust 逐个发回删除确认信号。
-    // 若已有批量删除进行中（_pendingDeleteIds 非空），无论新批次大小都并入追踪，
-    // 避免第二批次使 _batchDeleteTotal 仅反映新批次数量而漏计已挂起的任务。
-    const _progressThreshold = 20;
-    if (ids.length >= _progressThreshold || _pendingDeleteIds.isNotEmpty) {
+    if (ids.isEmpty) return;
+
+    // 进度追踪：超过阈值时启用，等待 Rust 逐个发回删除确认信号。
+    const progressThreshold = 20;
+    if (ids.length >= progressThreshold || _pendingDeleteIds.isNotEmpty) {
       _pendingDeleteIds.addAll(ids);
-      // 不重置 _batchDeleteDone：total = 已确认 + 当前所有挂起，保证进度不超过 1.0。
       _batchDeleteTotal = _batchDeleteDone + _pendingDeleteIds.length;
     }
-    for (final id in ids) {
-      _optimisticPausedIds.remove(id);
-      _boostAutoPausedIds.remove(id);
-      final action = deleteFiles ? 3 : 4;
-      ControlTask(taskId: id, action: action).sendSignalToRust();
-      _deletedTaskIds.add(id);
-      _tasks.removeWhere((t) => t.id == id);
-      if (_selectedTaskId == id) _selectedTaskId = null;
+
+    // O(n) 批量清理：构建 Set 一次遍历 _tasks
+    final idSet = ids.toSet();
+    _optimisticPausedIds.removeAll(idSet);
+    _boostAutoPausedIds.removeAll(idSet);
+    _deletedTaskIds.addAll(idSet);
+    _tasks.removeWhere((t) => idSet.contains(t.id));
+    if (_selectedTaskId != null && idSet.contains(_selectedTaskId)) {
+      _selectedTaskId = null;
     }
+
+    // 单次 IPC 替代 N 次
+    final action = deleteFiles ? 3 : 4;
+    BatchControlTask(taskIds: ids, action: action).sendSignalToRust();
+
     _checkedTaskIds.clear();
     _isManageMode = false;
     _safeNotifyListeners();
@@ -773,31 +782,71 @@ class DownloadController extends ChangeNotifier {
     setPriorityTask('');
   }
 
+  /// 批量暂停所有活跃任务（单次 IPC）
   void pauseAll() {
     logInfo(_tag, 'pauseAll');
-    for (final t in _tasks) {
+    final toPause = <String>[];
+    for (int i = 0; i < _tasks.length; i++) {
+      final t = _tasks[i];
       if (t.status == TaskStatus.downloading ||
           t.status == TaskStatus.resuming ||
           t.status == TaskStatus.pending ||
           t.status == TaskStatus.preparing ||
           // 修复：boost 结束后，部分任务在 Rust 侧已入 pending_queue，
           // 但 Dart 侧仍显示 paused（未收到 status=0 信号）。
-          // queuePosition > 0 说明任务确实在 Rust 的队列里等待启动，
-          // 此时若不发送 pause 信号，pause_task 内的 drain_queue 会将它们提升为活跃，
-          // 导致点击"全部暂停"后任务继续下载。
+          // queuePosition > 0 说明任务确实在 Rust 的队列里等待启动。
           (t.status == TaskStatus.paused && t.queuePosition > 0)) {
-        pauseTask(t.id);
+        toPause.add(t.id);
+        _optimisticPausedIds.add(t.id);
+        // 乐观 UI 更新
+        if (t.status != TaskStatus.paused) {
+          _tasks[i] = t.copyWith(status: TaskStatus.paused, speed: 0);
+        }
       }
     }
+    if (toPause.isEmpty) return;
+    BatchControlTask(taskIds: toPause, action: 0).sendSignalToRust();
+    _safeNotifyListeners();
   }
 
+  /// 批量恢复所有暂停/错误任务（单次 IPC + 限制乐观状态数）
   void resumeAll() {
     logInfo(_tag, 'resumeAll');
+    final toResume = <String>[];
     for (final t in _tasks) {
       if (t.status == TaskStatus.paused || t.status == TaskStatus.error) {
-        resumeTask(t.id);
+        toResume.add(t.id);
       }
     }
+    if (toResume.isEmpty) return;
+
+    // 单次 IPC
+    BatchControlTask(taskIds: toResume, action: 1).sendSignalToRust();
+
+    // 仅将前 N 个标记为 resuming（N = 设置页面的并发限制 - 当前已活跃数），其余保持原状。
+    // 这样避免用户看到"全部启动"的假象。Rust 回传的真实状态会修正这些值。
+    final maxConcurrent =
+        SettingsProvider.globalInstance?.maxConcurrentTasks ?? 5;
+    // 减去当前已活跃的任务数（downloading + preparing + resuming），
+    // 避免乐观 UI 标记超出实际可用并发槽位的任务
+    final currentActive = _tasks.where((t) =>
+        t.status == TaskStatus.downloading ||
+        t.status == TaskStatus.preparing ||
+        t.status == TaskStatus.resuming).length;
+    final maxOptimistic = (maxConcurrent - currentActive).clamp(0, maxConcurrent);
+    int optimisticCount = 0;
+    for (int i = 0; i < _tasks.length; i++) {
+      final t = _tasks[i];
+      if (t.status == TaskStatus.paused || t.status == TaskStatus.error) {
+        _optimisticPausedIds.remove(t.id);
+        _boostAutoPausedIds.remove(t.id);
+        if (optimisticCount < maxOptimistic) {
+          _tasks[i] = t.copyWith(status: TaskStatus.resuming);
+          optimisticCount++;
+        }
+      }
+    }
+    _safeNotifyListeners();
   }
 
   /// 默认下载目录

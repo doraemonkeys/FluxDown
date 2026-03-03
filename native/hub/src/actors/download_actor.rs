@@ -11,13 +11,13 @@ use crate::file_association;
 use crate::protocol_registry;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
-    BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol, ConfigEntry,
-    ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask, DeleteQueue,
-    DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus,
-    InstallUpdate, MoveTaskToQueue, ProxyTestResult, RequestAllQueues, RequestAllTasks,
-    RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation, SetPriorityTask,
-    SetUrlProtocol, SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateQueue,
-    UrlProtocolStatus,
+    BatchControlTask, BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol,
+    ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask,
+    DeleteQueue, DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest,
+    FileAssociationStatus, InstallUpdate, MoveTaskToQueue, ProxyTestResult, RequestAllQueues,
+    RequestAllTasks, RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation,
+    SetPriorityTask, SetUrlProtocol, SystemProxyInfo, TestProxyConnection, UpdateCheckResult,
+    UpdateQueue, UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -170,6 +170,7 @@ pub async fn run(db_dir: PathBuf) {
     let create_recv = CreateTask::get_dart_signal_receiver();
     let batch_create_recv = BatchCreateTask::get_dart_signal_receiver();
     let control_recv = ControlTask::get_dart_signal_receiver();
+    let batch_control_recv = BatchControlTask::get_dart_signal_receiver();
     let all_recv = RequestAllTasks::get_dart_signal_receiver();
     let create_queue_recv = CreateQueue::get_dart_signal_receiver();
     let update_queue_recv = UpdateQueue::get_dart_signal_receiver();
@@ -251,6 +252,20 @@ pub async fn run(db_dir: PathBuf) {
                     2 => manager.cancel_task(&msg.task_id).await,
                     3 => manager.delete_task(&msg.task_id, true).await,   // delete record + files
                     4 => manager.delete_task(&msg.task_id, false).await,  // delete record only
+                    _ => {}
+                }
+            }
+            Some(signal) = batch_control_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!(
+                    "[actor] batch control: {} tasks, action={}",
+                    msg.task_ids.len(), msg.action,
+                );
+                match msg.action {
+                    0 => manager.batch_pause(&msg.task_ids).await,
+                    1 => manager.batch_resume(&msg.task_ids).await,
+                    3 => manager.delete_tasks_batch(&msg.task_ids, true).await,
+                    4 => manager.delete_tasks_batch(&msg.task_ids, false).await,
                     _ => {}
                 }
             }

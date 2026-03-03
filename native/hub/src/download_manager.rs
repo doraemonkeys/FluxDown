@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use reqwest::Client;
 use rinf::RustSignal;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -19,7 +19,7 @@ use crate::hls_downloader;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
     AllQueues, AllTasks, PriorityTaskChanged, QueueInfo, QueuePosition, QueuePositionsUpdate,
-    SegmentDetail, SegmentProgress, TaskMetaProbed, TaskProgress,
+    SegmentDetail, SegmentProgress, TaskInfo, TaskMetaProbed, TaskProgress,
 };
 use crate::speed_limiter::SpeedLimiter;
 
@@ -255,7 +255,7 @@ impl DownloadManager {
             user_agent,
         } = config;
         let client = downloader::build_client(&proxy_config, &user_agent)?;
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(8192);
         let (done_tx, done_rx) = mpsc::channel(64);
         let limiter = SpeedLimiter::new(speed_limit_bps);
         limiter.spawn_refill_task();
@@ -1641,6 +1641,273 @@ impl DownloadManager {
         self.drain_queue().await;
         self.maybe_wal_checkpoint().await;
         self.maybe_release_bt_session().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch operations — single IPC for N tasks
+    // -----------------------------------------------------------------------
+
+    /// Batch-delete multiple tasks.  Cancels active downloads, cleans files,
+    /// then removes all DB records in a single transaction.
+    pub async fn delete_tasks_batch(&mut self, task_ids: &[String], delete_files: bool) {
+        if task_ids.is_empty() {
+            return;
+        }
+        let id_set: HashSet<&str> = task_ids.iter().map(|s| s.as_str()).collect();
+        rinf::debug_print!(
+            "[manager] delete_tasks_batch: {} tasks, delete_files={}",
+            task_ids.len(),
+            delete_files
+        );
+
+        // 1. Remove from pending queue in one pass.
+        self.pending_queue.retain(|q| !id_set.contains(q.task_id.as_str()));
+
+        // 2. Cancel all active downloads + collect JoinHandles.
+        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+        for tid in task_ids {
+            if let Some((token, _gen)) = self.active_tokens.remove(tid.as_str()) {
+                token.cancel();
+                self.bt_task_ids.remove(tid.as_str());
+                self.hls_quality_senders.remove(tid.as_str());
+                self.active_task_queue.remove(tid.as_str());
+            }
+            if let Some(h) = self.active_handles.remove(tid.as_str()) {
+                handles.push(h);
+            }
+        }
+
+        // 3. Wait for all handles concurrently (with timeout).
+        if !handles.is_empty() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                futures_util::future::join_all(handles),
+            )
+            .await;
+        }
+
+        // 4. File cleanup — batch-load all task info from DB in one query,
+        //    then spawn concurrent file cleanup tasks.
+        let task_infos = self.db.load_tasks_by_ids(task_ids).await.unwrap_or_default();
+        let mut file_futs: Vec<JoinHandle<()>> = Vec::new();
+        let mut bt_futs: Vec<JoinHandle<()>> = Vec::new();
+        let file_sem = Arc::new(Semaphore::new(64));
+        for t in &task_infos {
+            let path = PathBuf::from(&t.save_dir).join(&t.file_name);
+
+            if is_bt_url(&t.url) {
+                if let Some(ref bt) = self.bt_session {
+                    let bt_clone = bt.clone();
+                    let tid = t.task_id.clone();
+                    bt_futs.push(tokio::spawn(async move {
+                        let found = bt_clone.delete_task(&tid, delete_files).await;
+                        if !found {
+                            bt_clone.register_pending_delete(&tid, delete_files).await;
+                        }
+                    }));
+                }
+                if delete_files && is_safe_file_name(&t.file_name) {
+                    let sem = file_sem.clone();
+                    file_futs.push(tokio::spawn(async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        if path.is_dir() {
+                            let _ = tokio::fs::remove_dir_all(&path).await;
+                        } else {
+                            let _ = tokio::fs::remove_file(&path).await;
+                        }
+                    }));
+                }
+            } else {
+                let url = t.url.clone();
+                let file_name = t.file_name.clone();
+                let sem = file_sem.clone();
+                file_futs.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    // Remove temp file
+                    let temp_path = PathBuf::from(format!(
+                        "{}{}",
+                        path.display(),
+                        crate::downloader::TEMP_EXT
+                    ));
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+
+                    // DASH audio sidecar cleanup
+                    if dash_downloader::is_dash_url(&url) {
+                        let audio_path = dash_downloader::build_audio_path(&path);
+                        let audio_temp = PathBuf::from(format!(
+                            "{}{}",
+                            audio_path.display(),
+                            crate::downloader::TEMP_EXT
+                        ));
+                        let _ = tokio::fs::remove_file(&audio_temp).await;
+                        if delete_files {
+                            let _ = tokio::fs::remove_file(&audio_path).await;
+                        }
+                    }
+
+                    if delete_files && is_safe_file_name(&file_name) {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                }));
+            }
+        }
+
+        // Wait for BT delete futures concurrently.
+        if !bt_futs.is_empty() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                futures_util::future::join_all(bt_futs),
+            )
+            .await;
+        }
+
+        // Wait for all file cleanup tasks.
+        if !file_futs.is_empty() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                futures_util::future::join_all(file_futs),
+            )
+            .await;
+        }
+
+        // 5. Batch notify progress_reporter for cleanup.
+        for tid in task_ids {
+            let _ = self
+                .progress_tx
+                .send(ProgressUpdate {
+                    task_id: tid.clone(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    status: 4,
+                    error_message: "deleted".to_string(),
+                    file_name: String::new(),
+                    segment_details: None,
+                })
+                .await;
+        }
+
+        // 6. Single-transaction batch DB delete.
+        if let Err(e) = self.db.delete_tasks_batch(task_ids).await {
+            rinf::debug_print!("[manager] delete_tasks_batch DB error: {}", e);
+        }
+
+        // 7. Cleanup boost state.
+        for tid in task_ids {
+            self.auto_paused_ids.remove(tid.as_str());
+            if self.priority_task_id.as_deref() == Some(tid.as_str()) {
+                self.clear_priority().await;
+            }
+        }
+
+        // 8. drain_queue + wal_checkpoint only once at the end.
+        self.drain_queue().await;
+        self.maybe_wal_checkpoint().await;
+        self.maybe_release_bt_session().await;
+    }
+
+    /// Batch resume multiple tasks.  Pre-loads all task info in one DB query
+    /// to avoid N+1 queries, then processes each with the cached data.
+    pub async fn batch_resume(&mut self, task_ids: &[String]) {
+        if task_ids.is_empty() {
+            return;
+        }
+
+        // Batch-load all task info to avoid N separate DB queries.
+        let task_map: HashMap<String, TaskInfo> =
+            match self.db.load_tasks_by_ids(task_ids).await {
+                Ok(tasks) => tasks.into_iter().map(|t| (t.task_id.clone(), t)).collect(),
+                Err(e) => {
+                    rinf::debug_print!(
+                        "[manager] batch_resume: load_tasks_by_ids error: {}",
+                        e
+                    );
+                    // Fallback to per-task queries.
+                    for tid in task_ids {
+                        self.resume_task(tid).await;
+                    }
+                    return;
+                }
+            };
+
+        for tid in task_ids {
+            if let Some(task_row) = task_map.get(tid.as_str()) {
+                self.resume_task_with_row(tid, task_row.clone()).await;
+            }
+        }
+    }
+
+    /// Resume a task using a pre-loaded TaskInfo row (avoids redundant DB query).
+    async fn resume_task_with_row(&mut self, task_id: &str, task_row: TaskInfo) {
+        if self.active_tokens.contains_key(task_id) {
+            let is_terminal = task_row.status == 3 || task_row.status == 4;
+            if !is_terminal {
+                return; // truly still active — do not interrupt
+            }
+            rinf::debug_print!(
+                "[manager] resume_task {}: stale active_tokens entry (terminal in DB) — force-removing",
+                task_id
+            );
+            self.active_tokens.remove(task_id);
+            self.active_handles.remove(task_id);
+            self.bt_task_ids.remove(task_id);
+            self.hls_quality_senders.remove(task_id);
+            self.active_task_queue.remove(task_id);
+        }
+
+        if self.pending_queue.iter().any(|q| q.task_id == task_id) {
+            return;
+        }
+
+        let is_bt = is_bt_url(&task_row.url);
+        let queue_id = task_row.queue_id.clone();
+
+        if is_bt || (self.has_capacity() && self.has_queue_capacity(&queue_id)) {
+            self.do_resume_task(task_id).await;
+            self.drain_queue().await;
+        } else {
+            rinf::debug_print!(
+                "[manager] queuing resume for task {} (active={}, max={}, queue={})",
+                task_id,
+                self.active_tokens.len(),
+                self.max_concurrent,
+                queue_id
+            );
+            TaskProgress {
+                task_id: task_id.to_string(),
+                status: 0,
+                downloaded_bytes: task_row.downloaded_bytes,
+                total_bytes: task_row.total_bytes,
+                speed: 0,
+                file_name: task_row.file_name.clone(),
+                save_dir: task_row.save_dir.clone(),
+                url: task_row.url.clone(),
+                error_message: String::new(),
+            }
+            .send_signal_to_dart();
+            self.pending_queue.push_back(QueuedTask {
+                task_id: task_id.to_string(),
+                url: task_row.url,
+                save_dir: task_row.save_dir,
+                file_name: task_row.file_name,
+                segments: 0,
+                is_resume: true,
+                cookies: String::new(),
+                referrer: String::new(),
+                hint_file_size: 0,
+                torrent_file_bytes: Vec::new(),
+                proxy_url: task_row.proxy_url,
+                user_agent: String::new(),
+                queue_id: task_row.queue_id,
+                checksum: task_row.checksum,
+            });
+        }
+    }
+
+    /// Batch pause multiple tasks.
+    pub async fn batch_pause(&mut self, task_ids: &[String]) {
+        for tid in task_ids {
+            self.pause_task(tid).await;
+        }
     }
 }
 
