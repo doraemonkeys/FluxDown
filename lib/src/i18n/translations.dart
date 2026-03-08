@@ -382,11 +382,31 @@ class S {
   String get themeMode => _t('主题模式', 'Theme Mode');
   String get themeModeDesc =>
       _t('选择亮色、暗色或跟随系统', 'Choose light, dark, or follow system');
+  String get themeSelection => _t('主题', 'Theme');
+  String get themeSelectionDesc =>
+      _t('选择界面主题风格', 'Choose the interface theme style');
   String get themeColor => _t('主题色', 'Theme Color');
   String get themeColorDesc => _t('选择应用的主色调', 'Choose the app accent color');
   String get themeModeSystem => _t('跟随系统', 'System');
   String get themeModeLight => _t('亮色', 'Light');
   String get themeModeDark => _t('暗色', 'Dark');
+
+  // ─────────────────────────────────────────────
+  // 内置主题名称
+  // ─────────────────────────────────────────────
+
+  String get themeDefaultDark => _t('默认深色', 'Default Dark');
+  String get themeDefaultLight => _t('默认亮色', 'Default Light');
+  String get themeMidnightBlue => _t('午夜蓝', 'Midnight Blue');
+  String get themeNord => _t('Nord', 'Nord');
+  String get themeWarmLight => _t('暖光', 'Warm Light');
+  String get themeDarkTheme => _t('深色主题', 'Dark Theme');
+  String get themeLightTheme => _t('亮色主题', 'Light Theme');
+  String get themeImport => _t('导入', 'Import');
+  String get themeExport => _t('导出', 'Export');
+  String get themeImportSuccess => _t('主题导入成功', 'Theme imported successfully');
+  String get themeExportSuccess => _t('主题导出成功', 'Theme exported successfully');
+  String get themeImportError => _t('主题导入失败', 'Failed to import theme');
 
   // ─────────────────────────────────────────────
   // 主题色名称

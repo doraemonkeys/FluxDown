@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -13,6 +14,7 @@ import '../models/download_queue.dart';
 import '../models/settings_provider.dart';
 import '../services/update_service.dart';
 import '../theme/app_colors.dart';
+import '../theme/flux_theme_tokens.dart';
 import '../theme/theme_provider.dart';
 import '../widgets/dir_picker_field.dart';
 import '../widgets/title_drag_area.dart';
@@ -684,26 +686,34 @@ class _AppearanceContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _SettingCard(
-          label: LocaleScope.of(context).language,
-          description: LocaleScope.of(context).languageDesc,
+          label: s.language,
+          description: s.languageDesc,
           vertical: true,
           child: const _LanguageSelector(),
         ),
         const SizedBox(height: 10),
         _SettingCard(
-          label: LocaleScope.of(context).themeMode,
-          description: LocaleScope.of(context).themeModeDesc,
+          label: s.themeMode,
+          description: s.themeModeDesc,
           vertical: true,
           child: const _ThemeModeSelector(),
         ),
         const SizedBox(height: 10),
         _SettingCard(
-          label: LocaleScope.of(context).themeColor,
-          description: LocaleScope.of(context).themeColorDesc,
+          label: s.themeSelection,
+          description: s.themeSelectionDesc,
+          vertical: true,
+          child: const _ThemeSelector(),
+        ),
+        const SizedBox(height: 10),
+        _SettingCard(
+          label: s.themeColor,
+          description: s.themeColorDesc,
           vertical: true,
           child: const _ColorSchemeSelector(),
         ),
@@ -1082,16 +1092,20 @@ class _SpeedLimitInputState extends State<_SpeedLimitInput> {
 /// 版本基准：Chrome 145 / Edge 145 / Firefox 147 / Safari 18.3（2025-2026 主流版本）
 const _kUaPresets = {
   // Chrome 145（UA Reduction：Win11 与 Win10 发送同一 UA，次版本号全为 0）
-  'chrome': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  'chrome':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
   // Firefox 147（Gecko/20100101 为固定占位，仅主版本号暴露）
-  'firefox': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) '
+  'firefox':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) '
       'Gecko/20100101 Firefox/147.0',
   // Edge 145（基于 Chromium，追加 Edg/ 标记；注意是 Edg 而非 Edge）
-  'edge': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  'edge':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.3800.70',
   // Safari 18.3（macOS Sonoma；WebKit 版本号 605.1.15 长期固定）
-  'safari': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+  'safari':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
       'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Safari/605.1.15',
   // 百度网盘直链专用标识
   'netdisk': 'netdisk',
@@ -1176,10 +1190,16 @@ class _UserAgentEditorState extends State<_UserAgentEditor> {
             initialValue: _selectedPreset,
             options: [
               ShadOption(value: 'chrome', child: Text(s.userAgentPresetChrome)),
-              ShadOption(value: 'firefox', child: Text(s.userAgentPresetFirefox)),
+              ShadOption(
+                value: 'firefox',
+                child: Text(s.userAgentPresetFirefox),
+              ),
               ShadOption(value: 'edge', child: Text(s.userAgentPresetEdge)),
               ShadOption(value: 'safari', child: Text(s.userAgentPresetSafari)),
-              ShadOption(value: 'netdisk', child: Text(s.userAgentPresetNetdisk)),
+              ShadOption(
+                value: 'netdisk',
+                child: Text(s.userAgentPresetNetdisk),
+              ),
               ShadOption(value: 'custom', child: Text(s.userAgentPresetCustom)),
             ],
             selectedOptionBuilder: (context, value) {
@@ -2144,6 +2164,713 @@ class _LanguageSelector extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
+// 主题选择器（内置主题卡片 + 导入导出）
+// ─────────────────────────────────────────────
+
+class _ThemeSelector extends StatelessWidget {
+  const _ThemeSelector();
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = FluxDownApp.of(context);
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+    final dark = provider.isDark(context);
+
+    final darkThemes = builtinThemes
+        .where((e) => e.appearance == Brightness.dark)
+        .toList();
+    final lightThemes = builtinThemes
+        .where((e) => e.appearance == Brightness.light)
+        .toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 仅显示当前生效模式（亮/暗）对应的主题列表
+        _ThemeGroupLabel(
+          label: dark ? s.themeDarkTheme : s.themeLightTheme,
+          colors: c,
+        ),
+        const SizedBox(height: 6),
+        _ThemeCardRow(
+          themes: dark ? darkThemes : lightThemes,
+          selectedId: dark
+              ? provider.selectedDarkTheme
+              : provider.selectedLightTheme,
+          colors: c,
+          onSelect: (id) =>
+              dark ? provider.setDarkTheme(id) : provider.setLightTheme(id),
+          customTokens: dark
+              ? provider.customDarkTokens
+              : provider.customLightTokens,
+          isCustomActive: dark
+              ? provider.customDarkTokens != null
+              : provider.customLightTokens != null,
+          onClearCustom: () => provider.clearCustomTheme(dark: dark),
+          onSelectCustom: () => provider.activateCustomTheme(dark: dark),
+        ),
+        const SizedBox(height: 14),
+        // ── 导入 / 导出按钮 ──
+        _ThemeActions(colors: c),
+      ],
+    );
+  }
+}
+
+/// 导入 / 导出操作行
+class _ThemeActions extends StatelessWidget {
+  final AppColors colors;
+
+  const _ThemeActions({required this.colors});
+
+  Future<void> _importTheme(BuildContext context) async {
+    final provider = FluxDownApp.of(context);
+    final s = LocaleScope.of(context);
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+      dialogTitle: s.themeImport,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.single.path;
+    if (path == null) return;
+
+    try {
+      final file = File(path);
+      final content = await file.readAsString();
+      final tokens = provider.importThemeJson(content);
+
+      // 根据主题的 appearance 放入对应位置
+      if (tokens.appearance == Brightness.dark) {
+        provider.setCustomTheme(dark: tokens);
+      } else {
+        provider.setCustomTheme(light: tokens);
+      }
+
+      if (!context.mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast(
+          title: Text(s.themeImportSuccess),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast.destructive(
+          title: Text(s.themeImportError),
+          description: Text(e.toString()),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _exportTheme(BuildContext context) async {
+    final provider = FluxDownApp.of(context);
+    final s = LocaleScope.of(context);
+    final dark = provider.isDark(context);
+    final tokens = provider.getExportableTokens(dark);
+    final json = provider.exportThemeJson(tokens);
+
+    final safeName = tokens.name
+        .replaceAll(RegExp(r'[^\w\-]'), '_')
+        .toLowerCase();
+    final result = await FilePicker.platform.saveFile(
+      dialogTitle: s.themeExport,
+      fileName: '$safeName.json',
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+    );
+    if (result == null) return;
+
+    try {
+      await File(result).writeAsString(json);
+      if (!context.mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast(
+          title: Text(s.themeExportSuccess),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast.destructive(
+          title: Text(s.themeImportError),
+          description: Text(e.toString()),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = colors;
+    return Row(
+      children: [
+        _SmallActionButton(
+          icon: LucideIcons.fileUp,
+          label: s.themeImport,
+          colors: c,
+          onTap: () => _importTheme(context),
+        ),
+        const SizedBox(width: 8),
+        _SmallActionButton(
+          icon: LucideIcons.fileDown,
+          label: s.themeExport,
+          colors: c,
+          onTap: () => _exportTheme(context),
+        ),
+      ],
+    );
+  }
+}
+
+class _SmallActionButton extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final AppColors colors;
+  final VoidCallback onTap;
+
+  const _SmallActionButton({
+    required this.icon,
+    required this.label,
+    required this.colors,
+    required this.onTap,
+  });
+
+  @override
+  State<_SmallActionButton> createState() => _SmallActionButtonState();
+}
+
+class _SmallActionButtonState extends State<_SmallActionButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: _isHovered ? c.hoverBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: c.border, width: 1),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon, size: 12, color: c.textSecondary),
+              const SizedBox(width: 5),
+              Text(
+                widget.label,
+                style: TextStyle(fontSize: 11, color: c.textSecondary),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ThemeGroupLabel extends StatelessWidget {
+  final String label;
+  final AppColors colors;
+
+  const _ThemeGroupLabel({required this.label, required this.colors});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w500,
+        color: colors.textMuted,
+      ),
+    );
+  }
+}
+
+class _ThemeCardRow extends StatelessWidget {
+  final List<BuiltinThemeEntry> themes;
+  final BuiltinThemeId selectedId;
+  final AppColors colors;
+  final ValueChanged<BuiltinThemeId> onSelect;
+  final FluxThemeTokens? customTokens;
+  final bool isCustomActive;
+  final VoidCallback? onClearCustom;
+  final VoidCallback? onSelectCustom;
+
+  const _ThemeCardRow({
+    required this.themes,
+    required this.selectedId,
+    required this.colors,
+    required this.onSelect,
+    this.customTokens,
+    this.isCustomActive = false,
+    this.onClearCustom,
+    this.onSelectCustom,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final entry in themes)
+          _ThemePreviewCard(
+            entry: entry,
+            selected: selectedId == entry.id && !isCustomActive,
+            colors: colors,
+            onTap: () => onSelect(entry.id),
+          ),
+        // 自定义主题卡片（仅在有导入的自定义主题时显示）
+        if (customTokens != null)
+          _CustomThemeCard(
+            tokens: customTokens!,
+            selected: isCustomActive,
+            colors: colors,
+            onTap: onSelectCustom ?? () {},
+            onClear: onClearCustom,
+          ),
+      ],
+    );
+  }
+}
+
+/// 自定义主题卡片（导入的自定义主题）
+class _CustomThemeCard extends StatefulWidget {
+  final FluxThemeTokens tokens;
+  final bool selected;
+  final AppColors colors;
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  const _CustomThemeCard({
+    required this.tokens,
+    required this.selected,
+    required this.colors,
+    required this.onTap,
+    this.onClear,
+  });
+
+  @override
+  State<_CustomThemeCard> createState() => _CustomThemeCardState();
+}
+
+class _CustomThemeCardState extends State<_CustomThemeCard> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ShadTheme.of(context);
+    final c = widget.colors;
+    final tokens = widget.tokens;
+    final selected = widget.selected;
+    final borderColor = selected ? theme.colorScheme.primary : c.border;
+
+    return ShadTooltip(
+      builder: (_) => Text(tokens.name),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 120,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _isHovered && !selected ? c.hoverBg : c.bg,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: theme.colorScheme.primary.withValues(
+                          alpha: 0.15,
+                        ),
+                        blurRadius: 8,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ── 迷你预览（与内置主题卡片相同逻辑）──
+                Container(
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: tokens.background,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: tokens.border.withValues(alpha: 0.5),
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 28,
+                        decoration: BoxDecoration(
+                          color: tokens.surface1,
+                          borderRadius: const BorderRadius.only(
+                            topLeft: Radius.circular(5.5),
+                            bottomLeft: Radius.circular(5.5),
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 16,
+                              height: 3,
+                              margin: const EdgeInsets.only(bottom: 3),
+                              decoration: BoxDecoration(
+                                color: tokens.accent,
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                            Container(
+                              width: 16,
+                              height: 3,
+                              margin: const EdgeInsets.only(bottom: 3),
+                              decoration: BoxDecoration(
+                                color: tokens.textMuted.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                            Container(
+                              width: 16,
+                              height: 3,
+                              decoration: BoxDecoration(
+                                color: tokens.textMuted.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                height: 3,
+                                margin: const EdgeInsets.only(bottom: 3),
+                                decoration: BoxDecoration(
+                                  color: tokens.textPrimary.withValues(
+                                    alpha: 0.4,
+                                  ),
+                                  borderRadius: BorderRadius.circular(1.5),
+                                ),
+                              ),
+                              Container(
+                                height: 3,
+                                margin: const EdgeInsets.only(bottom: 3),
+                                decoration: BoxDecoration(
+                                  color: tokens.textMuted.withValues(
+                                    alpha: 0.2,
+                                  ),
+                                  borderRadius: BorderRadius.circular(1.5),
+                                ),
+                              ),
+                              Container(
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: tokens.surface3,
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: FractionallySizedBox(
+                                    widthFactor: 0.6,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: tokens.accent,
+                                        borderRadius: BorderRadius.circular(2),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                // ── 名称 + 删除/勾选 ──
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        tokens.name,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: selected
+                              ? theme.colorScheme.primary
+                              : c.textSecondary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (selected)
+                      Icon(
+                        LucideIcons.check,
+                        size: 12,
+                        color: theme.colorScheme.primary,
+                      )
+                    else if (_isHovered && widget.onClear != null)
+                      GestureDetector(
+                        onTap: widget.onClear,
+                        child: Icon(
+                          LucideIcons.x,
+                          size: 12,
+                          color: c.textMuted,
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ThemePreviewCard extends StatefulWidget {
+  final BuiltinThemeEntry entry;
+  final bool selected;
+  final AppColors colors;
+  final VoidCallback onTap;
+
+  const _ThemePreviewCard({
+    required this.entry,
+    required this.selected,
+    required this.colors,
+    required this.onTap,
+  });
+
+  @override
+  State<_ThemePreviewCard> createState() => _ThemePreviewCardState();
+}
+
+class _ThemePreviewCardState extends State<_ThemePreviewCard> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ShadTheme.of(context);
+    final c = widget.colors;
+    final entry = widget.entry;
+    final selected = widget.selected;
+
+    // 预览主题的色值
+    final tokens = entry.build();
+    final borderColor = selected ? theme.colorScheme.primary : c.border;
+
+    return ShadTooltip(
+      builder: (_) => Text(entry.id.label),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 120,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _isHovered && !selected ? c.hoverBg : c.bg,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: theme.colorScheme.primary.withValues(
+                          alpha: 0.15,
+                        ),
+                        blurRadius: 8,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ── 迷你预览 ──
+                Container(
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: tokens.background,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: tokens.border.withValues(alpha: 0.5),
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      // 侧边栏预览
+                      Container(
+                        width: 28,
+                        decoration: BoxDecoration(
+                          color: tokens.surface1,
+                          borderRadius: const BorderRadius.only(
+                            topLeft: Radius.circular(5.5),
+                            bottomLeft: Radius.circular(5.5),
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 16,
+                              height: 3,
+                              margin: const EdgeInsets.only(bottom: 3),
+                              decoration: BoxDecoration(
+                                color: tokens.accent,
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                            Container(
+                              width: 16,
+                              height: 3,
+                              margin: const EdgeInsets.only(bottom: 3),
+                              decoration: BoxDecoration(
+                                color: tokens.textMuted.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                            Container(
+                              width: 16,
+                              height: 3,
+                              decoration: BoxDecoration(
+                                color: tokens.textMuted.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(1.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // 内容区预览
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                height: 3,
+                                margin: const EdgeInsets.only(bottom: 3),
+                                decoration: BoxDecoration(
+                                  color: tokens.textPrimary.withValues(
+                                    alpha: 0.4,
+                                  ),
+                                  borderRadius: BorderRadius.circular(1.5),
+                                ),
+                              ),
+                              Container(
+                                height: 3,
+                                margin: const EdgeInsets.only(bottom: 3),
+                                decoration: BoxDecoration(
+                                  color: tokens.textMuted.withValues(
+                                    alpha: 0.2,
+                                  ),
+                                  borderRadius: BorderRadius.circular(1.5),
+                                ),
+                              ),
+                              // 进度条预览
+                              Container(
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: tokens.surface3,
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: FractionallySizedBox(
+                                    widthFactor: 0.6,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: tokens.accent,
+                                        borderRadius: BorderRadius.circular(2),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                // ── 主题名 + 选中勾 ──
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        entry.id.label,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: selected
+                              ? theme.colorScheme.primary
+                              : c.textSecondary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (selected)
+                      Icon(
+                        LucideIcons.check,
+                        size: 12,
+                        color: theme.colorScheme.primary,
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
 // 主题模式选择器（亮色 / 暗色 / 跟随系统）
 // ─────────────────────────────────────────────
 
@@ -3011,9 +3738,7 @@ class _AboutContent extends StatelessWidget {
             MouseRegion(
               cursor: SystemMouseCursors.click,
               child: GestureDetector(
-                onTap: () => launchUrl(
-                  Uri.parse('https://fluxdown.zerx.dev'),
-                ),
+                onTap: () => launchUrl(Uri.parse('https://fluxdown.zerx.dev')),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [

@@ -1,93 +1,80 @@
-import 'package:flutter/material.dart';
-import 'package:shadcn_ui/shadcn_ui.dart';
+import 'package:flutter/widgets.dart';
+
+import 'flux_theme_tokens.dart';
 
 /// 主题感知色板 — 通过 AppColors.of(context) 获取
 ///
-/// accent 系列颜色从 ShadTheme 的 colorScheme.primary 派生，
-/// 跟随用户选择的主题色自动变化。
+/// 所有颜色从 [FluxThemeTokens] 读取，API 与旧版完全兼容。
+/// 当用户自定义主题时，每个颜色值都可独立覆盖。
 class AppColors {
-  final Brightness _brightness;
-  final ShadColorScheme _scheme;
+  final FluxThemeTokens _tokens;
 
-  const AppColors._(this._brightness, this._scheme);
+  const AppColors._(this._tokens);
 
   factory AppColors.of(BuildContext context) {
-    final theme = ShadTheme.of(context);
-    return AppColors._(theme.brightness, theme.colorScheme);
+    return AppColors._(FluxThemeScope.of(context));
   }
 
-  bool get _isDark => _brightness == Brightness.dark;
+  /// 直接从 token 构造（供不依赖 context 的场景使用）
+  factory AppColors.fromTokens(FluxThemeTokens tokens) = AppColors._;
 
-  // Backgrounds — Apple-style elevated dark surfaces
-  Color get bg => _isDark ? const Color(0xFF1C1C1E) : const Color(0xFFF8F9FA);
-  Color get surface1 =>
-      _isDark ? const Color(0xFF2C2C2E) : const Color(0xFFFFFFFF);
-  Color get surface2 =>
-      _isDark ? const Color(0xFF3A3A3C) : const Color(0xFFF1F3F5);
-  Color get surface3 =>
-      _isDark ? const Color(0xFF48484A) : const Color(0xFFE9ECEF);
+  /// 原始 tokens 访问（供高级场景使用）
+  FluxThemeTokens get tokens => _tokens;
 
-  // Hover (subtle, non-flickering)
-  Color get hoverBg =>
-      _isDark ? const Color(0xFF363638) : const Color(0xFFF5F5F5);
+  // ── Backgrounds ──
+  Color get bg => _tokens.background;
+  Color get surface1 => _tokens.surface1;
+  Color get surface2 => _tokens.surface2;
+  Color get surface3 => _tokens.surface3;
 
-  // Borders
-  Color get border =>
-      _isDark ? const Color(0xFF48484A) : const Color(0xFFE4E4E7);
+  // ── Hover ──
+  Color get hoverBg => _tokens.elementHover;
 
-  // Text
-  Color get textPrimary =>
-      _isDark ? const Color(0xFFF5F5F7) : const Color(0xFF09090B);
-  Color get textSecondary =>
-      _isDark ? const Color(0xFFA1A1A6) : const Color(0xFF71717A);
-  Color get textMuted =>
-      _isDark ? const Color(0xFF8E8E93) : const Color(0xFFA1A1AA);
+  // ── Borders ──
+  Color get border => _tokens.border;
 
-  // Accent — 跟随主题色
-  Color get accent => _scheme.primary;
-  Color get accentHover {
-    // 亮色模式下加亮，暗色模式下微调
-    final hsl = HSLColor.fromColor(_scheme.primary);
-    return _isDark
-        ? hsl.withLightness((hsl.lightness + 0.08).clamp(0.0, 1.0)).toColor()
-        : hsl.withLightness((hsl.lightness + 0.06).clamp(0.0, 1.0)).toColor();
-  }
+  // ── Text ──
+  Color get textPrimary => _tokens.textPrimary;
+  Color get textSecondary => _tokens.textSecondary;
+  Color get textMuted => _tokens.textMuted;
+  Color get textDisabled => _tokens.textDisabled;
 
-  Color get accentBg => _isDark
-      ? _scheme.primary.withValues(alpha: 0.18)
-      : _scheme.primary.withValues(alpha: 0.10);
+  // ── Accent ──
+  Color get accent => _tokens.accent;
+  Color get accentHover => _tokens.accentHover;
+  Color get accentBg => _tokens.accentBackground;
+  Color get accentForeground => _tokens.accentForeground;
 
-  // 选中行 — 中性灰高亮，不使用彩色透叠避免脏色
-  Color get selectedBg => _isDark
-      ? const Color(0xFF3A3A3C)
-      : _scheme.primary.withValues(alpha: 0.10);
+  // ── 选中行 ──
+  Color get selectedBg => _tokens.elementSelected;
 
-  // Input 聚焦背景（accent 微染色，在 surface1 头部栏上有明确区分）
-  Color get inputFocusBg => _isDark
-      ? _scheme.primary.withValues(alpha: 0.08)
-      : const Color(0xFFFFFFFF);
+  // ── Input ──
+  Color get inputFocusBg => _tokens.inputFocusBackground;
+  Color get inputBg => _tokens.inputBackground;
+  Color get inputBorder => _tokens.inputBorder;
+  Color get inputFocusBorder => _tokens.inputFocusBorder;
 
-  // Dialog
-  Color get dialogBarrier =>
-      _isDark ? const Color(0x40000000) : const Color(0x1A000000);
-  Color get dialogBg =>
-      _isDark ? const Color(0xFF2C2C2E) : const Color(0xFFFFFFFF);
+  // ── Dialog ──
+  Color get dialogBarrier => _tokens.dialogBarrier;
+  Color get dialogBg => _tokens.dialogBackground;
 
-  // Switch (Apple style)
-  Color get switchTrack =>
-      _isDark ? const Color(0xFF636366) : const Color(0xFFE5E5EA);
-  Color get switchThumb =>
-      _isDark ? const Color(0xFFFFFFFF) : const Color(0xFFFFFFFF);
+  // ── Switch ──
+  Color get switchTrack => _tokens.switchTrack;
+  Color get switchThumb => _tokens.switchThumb;
 
-  // Input / Textarea
-  Color get inputBg =>
-      _isDark ? const Color(0xFF1C1C1E) : const Color(0xFFFFFFFF);
-  Color get inputBorder =>
-      _isDark ? const Color(0xFF48484A) : const Color(0xFFE4E4E7);
-  Color get inputFocusBorder => accent;
+  // ── Shadow ──
+  Color get shadow => _tokens.shadow;
 
-  // Status (固定 — 语义色，不跟随主题)
+  // ── Status（实例方法 — 跟随主题 token，用于新代码）──
+  Color get statusSuccess => _tokens.statusSuccess;
+  Color get statusWarning => _tokens.statusWarning;
+  Color get statusError => _tokens.statusError;
+
+  // ── Status（静态常量 — 向后兼容旧代码的 AppColors.green 用法）──
   static const green = Color(0xFF22C55E);
   static const amber = Color(0xFFF59E0B);
   static const red = Color(0xFFEF4444);
+
+  // ── Segment Palette ──
+  List<Color> get segmentPalette => _tokens.segmentPalette;
 }

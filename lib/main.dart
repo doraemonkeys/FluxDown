@@ -21,6 +21,7 @@ import 'src/services/tray_service.dart';
 import 'src/i18n/locale_provider.dart';
 import 'src/services/update_service.dart';
 import 'src/theme/app_theme.dart';
+import 'src/theme/flux_theme_tokens.dart';
 import 'src/theme/theme_provider.dart';
 import 'src/widgets/update_changelog_dialog.dart';
 
@@ -587,18 +588,8 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     logInfo('FluxDownApp', 'onWindowMinimize');
   }
 
-  ShadThemeData _resolveTheme(BuildContext context) {
-    final mode = themeProvider.themeMode;
-    final scheme = themeProvider.colorScheme;
-    // 自定义颜色方案：在构建主题前同步颜色值
-    if (scheme == AppColorScheme.custom) {
-      setCustomColorForTheme(themeProvider.customColor);
-    }
-    final platformBrightness = MediaQuery.platformBrightnessOf(context);
-    final useDark =
-        mode == ThemeMode.dark ||
-        (mode == ThemeMode.system && platformBrightness == Brightness.dark);
-    return useDark ? buildDarkTheme(scheme) : buildLightTheme(scheme);
+  FluxThemeTokens _resolveTokens(BuildContext context) {
+    return themeProvider.activeTokens(context);
   }
 
   @override
@@ -607,32 +598,36 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     // - ShadAnimatedTheme（200ms 色彩 tween 插值）
     // - AnimatedTheme（200ms Material 主题动画）
     // - materialTheme() 每帧重建 ThemeData + applyGoogleFontToTextTheme
-    final theme = _resolveTheme(context);
+    final tokens = _resolveTokens(context);
+    final theme = buildThemeFromTokens(tokens);
     return LocaleScope(
       s: _localeNotifier.s,
-      child: ShadTheme(
-        data: theme,
-        child: Directionality(
-          textDirection: TextDirection.ltr,
-          child: DefaultTextStyle(
-            style: theme.textTheme.p.copyWith(
-              color: theme.colorScheme.foreground,
-            ),
-            child: ShadToaster(
-              child: ShadSonner(
-                child: ExcludeSemantics(
-                  child: WidgetsApp(
-                    navigatorKey: _navigatorKey,
-                    color: theme.colorScheme.primary,
-                    debugShowCheckedModeBanner: false,
-                    home: const HomePage(),
-                    pageRouteBuilder:
-                        <T>(RouteSettings settings, WidgetBuilder builder) {
-                          return MaterialPageRoute<T>(
-                            settings: settings,
-                            builder: builder,
-                          );
-                        },
+      child: FluxThemeScope(
+        tokens: tokens,
+        child: ShadTheme(
+          data: theme,
+          child: Directionality(
+            textDirection: TextDirection.ltr,
+            child: DefaultTextStyle(
+              style: theme.textTheme.p.copyWith(
+                color: theme.colorScheme.foreground,
+              ),
+              child: ShadToaster(
+                child: ShadSonner(
+                  child: ExcludeSemantics(
+                    child: WidgetsApp(
+                      navigatorKey: _navigatorKey,
+                      color: theme.colorScheme.primary,
+                      debugShowCheckedModeBanner: false,
+                      home: const HomePage(),
+                      pageRouteBuilder:
+                          <T>(RouteSettings settings, WidgetBuilder builder) {
+                            return MaterialPageRoute<T>(
+                              settings: settings,
+                              builder: builder,
+                            );
+                          },
+                    ),
                   ),
                 ),
               ),
