@@ -134,6 +134,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       icon: LucideIcons.palette,
     ),
     SettingsSearchItem(
+      category: SettingsCategory.appearance,
+      label: s.uiScale,
+      description: s.uiScaleDesc,
+      keywords: s.searchKeywordsUiScale,
+      icon: LucideIcons.maximize,
+    ),
+    SettingsSearchItem(
       category: SettingsCategory.download,
       label: s.defaultSaveDir,
       description: s.defaultSaveDirDesc,
@@ -718,7 +725,111 @@ class _AppearanceContent extends StatelessWidget {
           vertical: true,
           child: const _ColorSchemeSelector(),
         ),
+        const SizedBox(height: 10),
+        _SettingCard(
+          label: s.uiScale,
+          description: s.uiScaleDesc,
+          vertical: true,
+          child: const _UiScaleSelector(),
+        ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 界面缩放选择器
+// ─────────────────────────────────────────────
+
+class _UiScaleSelector extends StatelessWidget {
+  const _UiScaleSelector();
+
+  static const _options = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5];
+
+  static String _label(double v) => '${(v * 100).round()}%';
+
+  @override
+  Widget build(BuildContext context) {
+    final tp = FluxDownApp.of(context);
+    final c = AppColors.of(context);
+    final current = tp.uiScale;
+    return Row(
+      children: _options.map((v) {
+        final selected = (v - current).abs() < 0.01;
+        return Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: _UiScaleChip(
+            label: _label(v),
+            selected: selected,
+            isDefault: v == 1.0,
+            colors: c,
+            onTap: () => tp.setUiScale(v),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+class _UiScaleChip extends StatefulWidget {
+  final String label;
+  final bool selected;
+  final bool isDefault;
+  final AppColors colors;
+  final VoidCallback onTap;
+
+  const _UiScaleChip({
+    required this.label,
+    required this.selected,
+    required this.isDefault,
+    required this.colors,
+    required this.onTap,
+  });
+
+  @override
+  State<_UiScaleChip> createState() => _UiScaleChipState();
+}
+
+class _UiScaleChipState extends State<_UiScaleChip> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    final bg = widget.selected
+        ? c.accent.withValues(alpha: 0.15)
+        : _isHovered
+        ? c.surface2
+        : c.surface1;
+    final border = widget.selected
+        ? c.accent.withValues(alpha: 0.5)
+        : c.border.withValues(alpha: 0.5);
+    final textColor = widget.selected ? c.accent : c.textPrimary;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: border, width: 1),
+          ),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w400,
+              color: textColor,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

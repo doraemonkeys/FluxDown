@@ -11,13 +11,7 @@ import 'flux_theme_tokens.dart';
 // ═══════════════════════════════════════════════════════════
 
 /// 内置主题 ID — 每个 ID 对应一套完整的 FluxThemeTokens
-enum BuiltinThemeId {
-  defaultDark,
-  defaultLight,
-  midnightBlue,
-  nord,
-  warmLight,
-}
+enum BuiltinThemeId { defaultDark, defaultLight, midnightBlue, nord, warmLight }
 
 /// 内置主题注册表条目
 class BuiltinThemeEntry {
@@ -139,10 +133,7 @@ class ImportedThemeEntry {
 
   Brightness get appearance => tokens.appearance;
 
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'tokens': tokens.toJson(),
-      };
+  Map<String, dynamic> toJson() => {'id': id, 'tokens': tokens.toJson()};
 
   factory ImportedThemeEntry.fromJson(Map<String, dynamic> json) {
     return ImportedThemeEntry(
@@ -163,6 +154,7 @@ const _kCustomColor = 'custom_color';
 const _kImportedThemes = 'imported_themes_v2';
 const _kSelectedCustomDark = 'selected_custom_dark_id';
 const _kSelectedCustomLight = 'selected_custom_light_id';
+const _kUiScale = 'ui_scale';
 
 // 旧版 key（迁移用）
 const _kLegacyCustomThemeDark = 'custom_theme_dark_json';
@@ -194,6 +186,9 @@ class ThemeProvider extends ChangeNotifier {
   AppColorScheme _colorScheme = AppColorScheme.blue;
   Color _customColor = const Color(0xFF6366F1);
 
+  /// 界面缩放比例（0.8 ~ 1.5，默认 1.0）
+  double _uiScale = 1.0;
+
   /// 导入的自定义主题列表
   final List<ImportedThemeEntry> _importedThemes = [];
 
@@ -212,6 +207,7 @@ class ThemeProvider extends ChangeNotifier {
   BuiltinThemeId get selectedLightTheme => _selectedLightTheme;
   AppColorScheme get colorScheme => _colorScheme;
   Color get customColor => _customColor;
+  double get uiScale => _uiScale;
 
   List<ImportedThemeEntry> get importedThemes =>
       List.unmodifiable(_importedThemes);
@@ -222,21 +218,21 @@ class ThemeProvider extends ChangeNotifier {
   String? get selectedCustomDarkId => _selectedCustomDarkId;
   String? get selectedCustomLightId => _selectedCustomLightId;
 
-  bool get isCustomDarkActive => _selectedCustomDarkId != null &&
+  bool get isCustomDarkActive =>
+      _selectedCustomDarkId != null &&
       _importedThemes.any((e) => e.id == _selectedCustomDarkId);
-  bool get isCustomLightActive => _selectedCustomLightId != null &&
+  bool get isCustomLightActive =>
+      _selectedCustomLightId != null &&
       _importedThemes.any((e) => e.id == _selectedCustomLightId);
 
   ImportedThemeEntry? get activeCustomDark => _selectedCustomDarkId == null
       ? null
-      : _importedThemes
-          .where((e) => e.id == _selectedCustomDarkId)
-          .firstOrNull;
+      : _importedThemes.where((e) => e.id == _selectedCustomDarkId).firstOrNull;
   ImportedThemeEntry? get activeCustomLight => _selectedCustomLightId == null
       ? null
       : _importedThemes
-          .where((e) => e.id == _selectedCustomLightId)
-          .firstOrNull;
+            .where((e) => e.id == _selectedCustomLightId)
+            .firstOrNull;
 
   // 向后兼容旧 API
   FluxThemeTokens? get customDarkTokens => activeCustomDark?.tokens;
@@ -267,8 +263,7 @@ class ThemeProvider extends ChangeNotifier {
     // 优先级 1：选中的导入主题
     final customId = dark ? _selectedCustomDarkId : _selectedCustomLightId;
     if (customId != null) {
-      final entry =
-          _importedThemes.where((e) => e.id == customId).firstOrNull;
+      final entry = _importedThemes.where((e) => e.id == customId).firstOrNull;
       if (entry != null) return entry.tokens;
     }
 
@@ -332,6 +327,15 @@ class ThemeProvider extends ChangeNotifier {
     // 选中的自定义主题 ID
     _selectedCustomDarkId = prefs.getString(_kSelectedCustomDark);
     _selectedCustomLightId = prefs.getString(_kSelectedCustomLight);
+
+    // 界面缩放
+    final scaleStr = prefs.getString(_kUiScale);
+    if (scaleStr != null) {
+      final parsed = double.tryParse(scaleStr);
+      if (parsed != null && parsed >= 0.8 && parsed <= 1.5) {
+        _uiScale = parsed;
+      }
+    }
   }
 
   /// 迁移旧版存储（单个 custom_theme_dark_json / custom_theme_light_json）
@@ -424,6 +428,19 @@ class ThemeProvider extends ChangeNotifier {
     _persist(_kColorScheme, scheme.name);
   }
 
+  // ── 界面缩放 ──
+
+  void setUiScale(double scale) {
+    // 限制范围 0.8 ~ 1.5
+    final clamped = scale.clamp(0.8, 1.5);
+    // 四舍五入到 0.1
+    final rounded = (clamped * 10).roundToDouble() / 10;
+    if (_uiScale == rounded) return;
+    _uiScale = rounded;
+    notifyListeners();
+    _persist(_kUiScale, rounded.toString());
+  }
+
   void setCustomColor(Color color) {
     _customColor = color;
     if (_colorScheme != AppColorScheme.custom) {
@@ -432,10 +449,7 @@ class ThemeProvider extends ChangeNotifier {
     }
     _invalidateCache();
     notifyListeners();
-    _persist(
-      _kCustomColor,
-      color.toARGB32().toRadixString(16).padLeft(8, '0'),
-    );
+    _persist(_kCustomColor, color.toARGB32().toRadixString(16).padLeft(8, '0'));
   }
 
   // ── 便捷操作 ──
@@ -520,10 +534,7 @@ class ThemeProvider extends ChangeNotifier {
   // 向后兼容旧 API — setCustomTheme / clearCustomTheme / activateCustomTheme
 
   /// 设置自定义主题（向后兼容，内部转为 addImportedTheme）
-  void setCustomTheme({
-    FluxThemeTokens? dark,
-    FluxThemeTokens? light,
-  }) {
+  void setCustomTheme({FluxThemeTokens? dark, FluxThemeTokens? light}) {
     if (dark != null) addImportedTheme(dark);
     if (light != null) addImportedTheme(light);
   }
@@ -551,8 +562,10 @@ class ThemeProvider extends ChangeNotifier {
         final idx = _importedThemes.indexWhere((e) => e.id == customId);
         if (idx >= 0) {
           final updated = updater(_importedThemes[idx].tokens);
-          _importedThemes[idx] =
-              ImportedThemeEntry(id: customId, tokens: updated);
+          _importedThemes[idx] = ImportedThemeEntry(
+            id: customId,
+            tokens: updated,
+          );
           _persistImportedThemes();
           _invalidateCache();
           notifyListeners();
@@ -571,8 +584,10 @@ class ThemeProvider extends ChangeNotifier {
         final idx = _importedThemes.indexWhere((e) => e.id == customId);
         if (idx >= 0) {
           final updated = updater(_importedThemes[idx].tokens);
-          _importedThemes[idx] =
-              ImportedThemeEntry(id: customId, tokens: updated);
+          _importedThemes[idx] = ImportedThemeEntry(
+            id: customId,
+            tokens: updated,
+          );
           _persistImportedThemes();
           _invalidateCache();
           notifyListeners();
@@ -594,12 +609,14 @@ class ThemeProvider extends ChangeNotifier {
     _selectedDarkTheme = BuiltinThemeId.defaultDark;
     _selectedLightTheme = BuiltinThemeId.defaultLight;
     _colorScheme = AppColorScheme.blue;
+    _uiScale = 1.0;
     _invalidateCache();
     notifyListeners();
     _persist(_kColorScheme, AppColorScheme.blue.name);
     _persistRemove(_kImportedThemes);
     _persistRemove(_kSelectedCustomDark);
     _persistRemove(_kSelectedCustomLight);
+    _persistRemove(_kUiScale);
     _persistSelectedThemes();
   }
 

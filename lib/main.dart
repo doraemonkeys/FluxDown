@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:rinf/rinf.dart';
@@ -650,6 +651,15 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
                       color: theme.colorScheme.primary,
                       debugShowCheckedModeBanner: false,
                       home: const HomePage(),
+                      builder: (context, child) {
+                        final scale = themeProvider.uiScale;
+                        if (scale == 1.0) return child!;
+                        final mq = MediaQuery.of(context);
+                        return MediaQuery(
+                          data: mq.copyWith(size: mq.size / scale),
+                          child: _UiScaleWidget(scale: scale, child: child!),
+                        );
+                      },
                       pageRouteBuilder:
                           <T>(RouteSettings settings, WidgetBuilder builder) {
                             return MaterialPageRoute<T>(
@@ -666,5 +676,90 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
         ),
       ),
     );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 界面缩放 RenderObject
+// ─────────────────────────────────────────────
+
+/// 自定义缩放容器，统一处理布局约束、绘制变换和 hit testing。
+///
+/// 与 [FractionallySizedBox] + [Transform.scale] 组合不同，
+/// 此 RenderObject 的布局大小始终等于父级约束（全屏），
+/// 保证 hit test 覆盖整个屏幕；同时将子树约束缩小为
+/// `constraints / scale`，让子树在逻辑尺寸下布局，
+/// 绘制时再统一放大，视觉上正好填满屏幕。
+class _UiScaleWidget extends SingleChildRenderObjectWidget {
+  final double scale;
+
+  const _UiScaleWidget({required this.scale, required super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderUiScale(scale: scale);
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderUiScale renderObject) {
+    renderObject.scale = scale;
+  }
+}
+
+class _RenderUiScale extends RenderProxyBox {
+  double _scale;
+
+  _RenderUiScale({required double scale}) : _scale = scale;
+
+  set scale(double value) {
+    if (_scale == value) return;
+    _scale = value;
+    markNeedsLayout();
+  }
+
+  Matrix4 get _paintTransform => Matrix4.diagonal3Values(_scale, _scale, 1.0);
+
+  @override
+  void performLayout() {
+    if (child == null) {
+      size = constraints.smallest;
+      return;
+    }
+    // 子树在 逻辑尺寸(= 屏幕尺寸 / scale) 下布局
+    child!.layout(
+      BoxConstraints.tight(constraints.biggest / _scale),
+      parentUsesSize: true,
+    );
+    // 自身占满全屏，hit test 区域覆盖整个屏幕
+    size = constraints.biggest;
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (child == null) return;
+    // 绘制时应用 scale 变换，视觉上放大到全屏
+    context.pushTransform(
+      needsCompositing,
+      offset,
+      _paintTransform,
+      super.paint,
+    );
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    // 对点击坐标做逆变换（屏幕坐标 → 逻辑坐标），再转发给子树
+    return result.addWithPaintTransform(
+      transform: _paintTransform,
+      position: position,
+      hitTest: (BoxHitTestResult result, Offset position) {
+        return child?.hitTest(result, position: position) ?? false;
+      },
+    );
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    transform.multiply(_paintTransform);
   }
 }

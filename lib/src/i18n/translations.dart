@@ -391,6 +391,10 @@ class S {
   String get themeModeLight => _t('亮色', 'Light');
   String get themeModeDark => _t('暗色', 'Dark');
 
+  String get uiScale => _t('界面缩放', 'Interface Scale');
+  String get uiScaleDesc =>
+      _t('调整界面整体缩放比例', 'Adjust the overall interface scale');
+
   // ─────────────────────────────────────────────
   // 内置主题名称
   // ─────────────────────────────────────────────
@@ -665,6 +669,9 @@ class S {
   List<String> get searchKeywordsThemeColor =>
       _t('主题色,颜色,配色,色调', 'color,scheme,accent').split(',')
         ..addAll(['color', 'scheme', 'accent']);
+  List<String> get searchKeywordsUiScale =>
+      _t('缩放,界面,比例,放大,缩小,DPI', 'scale,zoom,interface,size,DPI').split(',')
+        ..addAll(['scale', 'zoom', 'size', 'dpi']);
   List<String> get searchKeywordsSaveDir =>
       _t('保存,目录,路径,文件夹', 'save,directory,path,folder').split(',')
         ..addAll(['save', 'directory', 'path', 'folder']);
