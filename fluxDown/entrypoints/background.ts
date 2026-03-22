@@ -772,27 +772,15 @@ export default defineBackground(() => {
     itemInfo: DownloadItemInfo,
     originalUrl?: string,
   ) {
-    // 标记为 fallback 已处理
+    // 标记为 fallback 已处理，阻止其他层重复拦截
     handledDownloads.set(downloadId, "fallback");
 
-    // cancel + erase 并发执行（替代 suggest({ cancel: true })）
-    // 必须 await erase，否则下载项残留浏览器下载列表，可能引发二次触发
-    await Promise.allSettled([
-      browser.downloads.cancel(downloadId).catch((e) => {
-        console.warn("[FluxDown] Fallback: failed to cancel download:", e);
-      }),
-      browser.downloads.erase({ id: downloadId }).catch((e) => {
-        console.warn("[FluxDown] Fallback: failed to erase download:", e);
-      }),
-    ]);
-
-    // 发送到 FluxDown
-    // R6-7 修复：sendToFluxDown 抛出时需捕获，否则 startFallbackInterception 成为
-    // unhandled rejection（onCreated 以 fire-and-forget 方式调用，无外层 catch）。
-    // handledDownloads 已标记为 'fallback'，即使发送失败也不会重复拦截。
+    // 先发送到 FluxDown，确认成功后再取消浏览器下载
+    // 如果发送失败，回退让浏览器继续下载，避免下载丢失
     const cleanFilename = extractCleanFilename(itemInfo.filename, url);
+    let sendOk = false;
     try {
-      await sendToFluxDown(
+      sendOk = await sendToFluxDown(
         url,
         referrer,
         cleanFilename,
@@ -802,8 +790,31 @@ export default defineBackground(() => {
       );
     } catch (e) {
       console.error(
-        "[FluxDown] executeFallbackIntercept: sendToFluxDown failed:",
+        "[FluxDown] executeFallbackIntercept: sendToFluxDown threw:",
         e,
+      );
+    }
+
+    if (sendOk) {
+      // 发送成功，取消浏览器下载
+      await Promise.allSettled([
+        browser.downloads.cancel(downloadId).catch((e) => {
+          console.warn("[FluxDown] Fallback: failed to cancel download:", e);
+        }),
+        browser.downloads.erase({ id: downloadId }).catch((e) => {
+          console.warn("[FluxDown] Fallback: failed to erase download:", e);
+        }),
+      ]);
+    } else {
+      // 发送失败，回退让浏览器继续下载
+      console.warn(
+        "[FluxDown] executeFallbackIntercept: send failed, falling back to browser download:",
+        url,
+      );
+      handledDownloads.delete(downloadId);
+      notify(
+        t("notify.fallbackBrowser"),
+        t("notify.fallbackBrowserDetail", { url }),
       );
     }
   }
@@ -959,7 +970,7 @@ export default defineBackground(() => {
                 const _syncClean =
                   _syncDisposition ||
                   extractCleanFilename(_syncFilename, downloadUrl);
-                await sendToFluxDown(
+                const sendOk = await sendToFluxDown(
                   downloadUrl,
                   _syncReferrer,
                   _syncClean,
@@ -968,8 +979,14 @@ export default defineBackground(() => {
                   // 重定向场景：传入原始 URL，让 sendToFluxDown 可回退查找 headers 缓存
                   downloadUrl !== url ? url : undefined,
                 );
+                if (!sendOk) {
+                  // 发送失败，下载已被取消，需要回退用浏览器重新下载
+                  await fallbackToBrowserDownload(downloadUrl, _syncClean);
+                }
               } catch (e) {
                 console.error("[FluxDown] sync-path: sendToFluxDown error:", e);
+                // 异常情况也回退到浏览器下载
+                await fallbackToBrowserDownload(downloadUrl).catch(() => {});
               } finally {
                 downloadItemCache.delete(downloadItem.id);
               }
@@ -1099,10 +1116,8 @@ export default defineBackground(() => {
               },
             );
 
-            // 取消浏览器下载：suggest() 释放管线 + cancel/erase 实际取消
-            await callSuggestCancel();
-
-            // 发送到 FluxDown（优先使用 responseDownloadCache 中的 Content-Disposition 文件名）
+            // 先发送到 FluxDown，确认成功后再取消浏览器下载
+            // 优先使用 responseDownloadCache 中的 Content-Disposition 文件名
             // 同时检查 downloadUrl 和 url（重定向场景下两者不同）
             const dispositionFilename =
               responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
@@ -1111,7 +1126,7 @@ export default defineBackground(() => {
             const cleanFilename =
               dispositionFilename ||
               extractCleanFilename(downloadItem.filename, downloadUrl);
-            await sendToFluxDown(
+            const sendOk = await sendToFluxDown(
               downloadUrl,
               referrer,
               cleanFilename,
@@ -1120,6 +1135,23 @@ export default defineBackground(() => {
               // 重定向场景：传入原始 URL，让 sendToFluxDown 可回退查找 headers 缓存
               downloadUrl !== url ? url : undefined,
             );
+
+            if (sendOk) {
+              // 发送成功，取消浏览器下载
+              await callSuggestCancel();
+            } else {
+              // 发送失败，回退让浏览器继续下载
+              handledDownloads.delete(downloadItem.id);
+              callSuggest(
+                downloadItem.filename
+                  ? { filename: downloadItem.filename }
+                  : undefined,
+              );
+              notify(
+                t("notify.fallbackBrowser"),
+                t("notify.fallbackBrowserDetail", { url: downloadUrl }),
+              );
+            }
           } catch (e) {
             console.error(
               "[FluxDown] Error in onDeterminingFilename handler:",
@@ -1289,7 +1321,7 @@ export default defineBackground(() => {
     fileSize?: number,
     mimeType?: string,
     originalUrl?: string,
-  ) {
+  ): Promise<boolean> {
     // === 提取认证信息（Cookie / Authorization 等） ===
     // 策略 1：从 webRequest 缓存获取（最可靠 — 浏览器真正发出的请求头）
     // 重定向修复：onSendHeaders 以浏览器原始请求 URL 为 key 缓存 headers，
@@ -1388,15 +1420,42 @@ export default defineBackground(() => {
 
     if (response.success) {
       await incrementStat("sent");
+      return true;
     } else {
       await incrementStat("failed");
-      // 发送失败入队，等待 App 启动后重试（弱网 / App 未运行场景）
-      await enqueuePending(request);
-      notify(
-        t("notify.sendFailed"),
-        t("notify.connectionFailed", { message: response.message }),
+      console.warn(
+        "[FluxDown] sendToFluxDown failed:",
+        response.message,
+        "url:",
+        url,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * 回退到浏览器下载：当发送到 FluxDown 失败时，重新发起浏览器下载。
+   * 用于 onDeterminingFilename 同步路径中，下载已被 cancel+erase 后需要恢复的场景。
+   * 设置 bypassToken 防止新下载被再次拦截。
+   */
+  async function fallbackToBrowserDownload(url: string, filename?: string) {
+    // 设置 bypass token，15 秒内对该 URL 的下载不拦截
+    bypassTokens.set(url, Date.now() + 15_000);
+    try {
+      const opts: Record<string, any> = { url };
+      if (filename) opts.filename = filename;
+      await browser.downloads.download(opts);
+      console.log("[FluxDown] Fallback: re-initiated browser download:", url);
+    } catch (e) {
+      console.error(
+        "[FluxDown] Fallback: failed to re-initiate browser download:",
+        e,
       );
     }
+    notify(
+      t("notify.fallbackBrowser"),
+      t("notify.fallbackBrowserDetail", { url }),
+    );
   }
 
   // ===== 统一消息处理（Popup + Content Script） =====
