@@ -4,11 +4,57 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '同步到 R2 的版本 tag（如 v0.1.28）'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  # ── 手动触发时：仅同步指定版本文件到 R2，跳过构建 ──
+  sync-r2-only:
+    name: Sync Release to R2
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets from GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          echo "Downloading assets for ${TAG}..."
+          mkdir -p release-assets
+          gh release download "${TAG}" \
+            --repo ${{ github.repository }} \
+            --dir release-assets
+          echo "Downloaded files:"
+          ls -lh release-assets/
+
+      - name: Sync to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: ${{ secrets.CF_R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.CF_R2_BUCKET }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          echo "Syncing to R2 under prefix: ${TAG}/"
+          for file in release-assets/*; do
+            filename=$(basename "$file")
+            echo "  Uploading: ${filename}"
+            aws s3 cp "$file" \
+              "s3://${R2_BUCKET}/${TAG}/${filename}" \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --no-progress
+          done
+          echo "✅ R2 sync complete: ${{ secrets.CF_R2_PUBLIC_URL }}/${TAG}/"
+
+
   # ── 并行 Job 1: 构建 Windows 安装包（x64 + ARM64）──
   build-windows:
     name: Build Windows (${{ matrix.arch }})
