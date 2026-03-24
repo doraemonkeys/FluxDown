@@ -47,12 +47,14 @@ class HeaderBar extends StatefulWidget {
   final VoidCallback onNewDownload;
   final DownloadController controller;
   final void Function(SettingsCategory category) onNavigateToSettings;
+  final VoidCallback? onSettings;
 
   const HeaderBar({
     super.key,
     required this.onNewDownload,
     required this.controller,
     required this.onNavigateToSettings,
+    this.onSettings,
   });
 
   @override
@@ -232,12 +234,13 @@ class HeaderBarState extends State<HeaderBar> {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+    final themeProvider = FluxDownApp.of(context);
     return TitleDragArea(
       child: Container(
         height: 48,
-        // right 预留 WindowControls 区域宽度：
-        // 4 工具按钮(40*4) + 分隔线(9) + 3 窗口按钮(40*3) = 289
-        padding: const EdgeInsets.only(left: 16, right: 289),
+        // right 预留窗口控制按钮宽度：3 窗口按钮(40*3) = 120
+        padding: const EdgeInsets.only(left: 16, right: 120),
         decoration: BoxDecoration(
           color: c.surface1,
           border: Border(bottom: BorderSide(color: c.border, width: 1)),
@@ -255,7 +258,7 @@ class HeaderBarState extends State<HeaderBar> {
                   const Icon(LucideIcons.plus, size: 14, color: Colors.white),
                   const SizedBox(width: 6),
                   Text(
-                    LocaleScope.of(context).newDownload,
+                    s.newDownload,
                     style: const TextStyle(
                       fontSize: 13,
                       color: Colors.white,
@@ -291,9 +294,7 @@ class HeaderBarState extends State<HeaderBar> {
                         key: _searchBoxKey,
                         controller: _searchController,
                         focusNode: _focusNode,
-                        placeholder: Text(
-                          LocaleScope.of(context).searchPlaceholder,
-                        ),
+                        placeholder: Text(s.searchPlaceholder),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 4,
@@ -345,6 +346,41 @@ class HeaderBarState extends State<HeaderBar> {
                   ),
                 ),
               ),
+            ),
+            const Spacer(),
+            // 工具按钮
+            _ToolButton(
+              icon: LucideIcons.circlePause,
+              tooltip: s.pauseAll,
+              onPressed: () => widget.controller.pauseAll(),
+              iconSize: 16,
+            ),
+            _ToolButton(
+              icon: LucideIcons.circlePlay,
+              tooltip: s.resumeAll,
+              onPressed: () => widget.controller.resumeAll(),
+              iconSize: 16,
+            ),
+            _ToolButton(
+              icon: LucideIcons.settings,
+              tooltip: s.settings,
+              onPressed: () => widget.onSettings?.call(),
+              iconSize: 16,
+            ),
+            _ToolButton(
+              icon: themeProvider.isDark(context)
+                  ? LucideIcons.sun
+                  : LucideIcons.moon,
+              tooltip: themeProvider.isDark(context)
+                  ? s.toggleToLight
+                  : s.toggleToDark,
+              onPressed: () => themeProvider.toggleTheme(context),
+              iconSize: 15,
+            ),
+            // 分隔线（工具按钮与窗口控制按钮之间）
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Container(width: 1, height: 16, color: c.border),
             ),
           ],
         ),
@@ -580,18 +616,21 @@ class _SearchResultItem extends StatelessWidget {
   }
 }
 
-/// 窗口右上角控制区：全部暂停 | 全部恢复 | 设置 | 主题切换 || 最小化 | 最大化 | 关闭
-/// 通过 Positioned 悬浮在窗口右上角，确保这些按钮始终紧挨在一起
+/// 窗口右上角控制区，通过 Positioned 悬浮在窗口右上角。
+/// - [showToolButtons] = true（默认，设置页使用）：工具按钮 + 分隔线 + 窗口按钮
+/// - [showToolButtons] = false（主页使用，工具按钮已移至 HeaderBar）：仅窗口按钮（最小化 | 最大化 | 关闭）
 class WindowControls extends StatelessWidget {
   final DownloadController controller;
   final VoidCallback? onSettings;
   final bool isSettingsActive;
+  final bool showToolButtons;
 
   const WindowControls({
     super.key,
     required this.controller,
     this.onSettings,
     this.isSettingsActive = false,
+    this.showToolButtons = true,
   });
 
   @override
@@ -603,44 +642,46 @@ class WindowControls extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 全部暂停
-          _ToolButton(
-            icon: LucideIcons.circlePause,
-            tooltip: LocaleScope.of(context).pauseAll,
-            onPressed: () => controller.pauseAll(),
-            iconSize: 16,
-          ),
-          // 全部恢复
-          _ToolButton(
-            icon: LucideIcons.circlePlay,
-            tooltip: LocaleScope.of(context).resumeAll,
-            onPressed: () => controller.resumeAll(),
-            iconSize: 16,
-          ),
-          // 设置按钮
-          _ToolButton(
-            icon: LucideIcons.settings,
-            tooltip: LocaleScope.of(context).settings,
-            onPressed: () => onSettings?.call(),
-            iconSize: 16,
-            isActive: isSettingsActive,
-          ),
-          // 主题切换按钮
-          _ToolButton(
-            icon: themeProvider.isDark(context)
-                ? LucideIcons.sun
-                : LucideIcons.moon,
-            tooltip: themeProvider.isDark(context)
-                ? LocaleScope.of(context).toggleToLight
-                : LocaleScope.of(context).toggleToDark,
-            onPressed: () => themeProvider.toggleTheme(context),
-            iconSize: 15,
-          ),
-          // 分隔线
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Container(width: 1, height: 16, color: c.border),
-          ),
+          if (showToolButtons) ...[
+            // 全部暂停
+            _ToolButton(
+              icon: LucideIcons.circlePause,
+              tooltip: LocaleScope.of(context).pauseAll,
+              onPressed: () => controller.pauseAll(),
+              iconSize: 16,
+            ),
+            // 全部恢复
+            _ToolButton(
+              icon: LucideIcons.circlePlay,
+              tooltip: LocaleScope.of(context).resumeAll,
+              onPressed: () => controller.resumeAll(),
+              iconSize: 16,
+            ),
+            // 设置按钮
+            _ToolButton(
+              icon: LucideIcons.settings,
+              tooltip: LocaleScope.of(context).settings,
+              onPressed: () => onSettings?.call(),
+              iconSize: 16,
+              isActive: isSettingsActive,
+            ),
+            // 主题切换按钮
+            _ToolButton(
+              icon: themeProvider.isDark(context)
+                  ? LucideIcons.sun
+                  : LucideIcons.moon,
+              tooltip: themeProvider.isDark(context)
+                  ? LocaleScope.of(context).toggleToLight
+                  : LocaleScope.of(context).toggleToDark,
+              onPressed: () => themeProvider.toggleTheme(context),
+              iconSize: 15,
+            ),
+            // 分隔线
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Container(width: 1, height: 16, color: c.border),
+            ),
+          ],
           // 窗口控制按钮
           _WindowButton(
             icon: LucideIcons.minus,

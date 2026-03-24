@@ -40,6 +40,7 @@ ArchitecturesInstallIn64BitMode=arm64
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
 PrivilegesRequired=lowest
+CloseApplications=force
 SetupIconFile=..\..\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
@@ -60,7 +61,10 @@ Source: "..\..\build\windows\{#MyAppArch}\runner\Release\*"; DestDir: "{app}"; F
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+; First install: create desktop icon only if user checks the task
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; Overlay/update install: always refresh the shortcut if it already exists on desktop
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Check: DesktopIconAlreadyExists
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
@@ -74,3 +78,20 @@ Root: HKCU; Subkey: "Software\Classes\.torrent"; ValueType: string; ValueData: "
 Root: HKCU; Subkey: "Software\Classes\FluxDown.TorrentFile"; ValueType: string; ValueData: "BitTorrent File"; Flags: uninsdeletekey; Tasks: torrentassoc
 Root: HKCU; Subkey: "Software\Classes\FluxDown.TorrentFile\DefaultIcon"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"",0"; Flags: uninsdeletekey; Tasks: torrentassoc
 Root: HKCU; Subkey: "Software\Classes\FluxDown.TorrentFile\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: torrentassoc
+
+[Code]
+function DesktopIconAlreadyExists: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{autodesktop}\{#MyAppName}.lnk'));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  { Force-kill flux_down.exe as a fallback in case Restart Manager fails }
+  Exec('taskkill', '/f /im {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Small delay to ensure file locks are released }
+  Sleep(500);
+end;

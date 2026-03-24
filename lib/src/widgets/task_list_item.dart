@@ -309,9 +309,11 @@ class _TaskListItemState extends State<TaskListItem> {
       case TaskStatus.pending:
         statusColor = c.textMuted;
     }
-    return Text(
-      task.statusText,
-      style: TextStyle(fontSize: 12, color: statusColor),
+    return Center(
+      child: Text(
+        task.statusText,
+        style: TextStyle(fontSize: 12, color: statusColor),
+      ),
     );
   }
 }

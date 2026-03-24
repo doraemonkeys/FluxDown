@@ -223,13 +223,16 @@ class TaskList extends StatelessWidget {
           ),
           SizedBox(
             width: 150,
-            child: Center(
-              child: Text(
-                s.colProgress,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                  color: c.textMuted,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Center(
+                child: Text(
+                  s.colProgress,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    color: c.textMuted,
+                  ),
                 ),
               ),
             ),
@@ -262,12 +265,14 @@ class TaskList extends StatelessWidget {
           ),
           SizedBox(
             width: 60,
-            child: Text(
-              s.colStatus,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-                color: c.textMuted,
+            child: Center(
+              child: Text(
+                s.colStatus,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: c.textMuted,
+                ),
               ),
             ),
           ),

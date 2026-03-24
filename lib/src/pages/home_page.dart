@@ -453,6 +453,10 @@ class _HomePageState extends State<HomePage> {
                     AnalyticsService.instance.trackView('SettingsPage');
                   });
                 },
+                onSettings: () => setState(() {
+                  _showSettings = true;
+                  AnalyticsService.instance.trackView('SettingsPage');
+                }),
               ),
             ),
             // 窗口控制按钮 — 始终固定在窗口右上角
@@ -461,10 +465,7 @@ class _HomePageState extends State<HomePage> {
               right: 0,
               child: WindowControls(
                 controller: _controller,
-                onSettings: () => setState(() {
-                  _showSettings = true;
-                  AnalyticsService.instance.trackView('SettingsPage');
-                }),
+                showToolButtons: false,
               ),
             ),
             // 批量删除进度覆盖层（带平滑动画）
