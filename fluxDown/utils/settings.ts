@@ -2,7 +2,7 @@
  * 插件设置管理模块
  */
 
-import { browser } from 'wxt/browser';
+import { browser } from "wxt/browser";
 
 /**
  * 拦截模式：
@@ -10,7 +10,7 @@ import { browser } from 'wxt/browser';
  * - 'smart': 智能模式 — 结合扩展名 + MIME 类型 + 文件名 + 文件大小综合判断
  * - 'all': 拦截所有下载（除排除域名外）
  */
-export type InterceptMode = 'extension' | 'smart' | 'all';
+export type InterceptMode = "extension" | "smart" | "all";
 
 export interface FluxDownSettings {
   /** 是否启用下载拦截 */
@@ -40,59 +40,90 @@ export interface FluxDownSettings {
 
 const DEFAULT_SETTINGS: FluxDownSettings = {
   enabled: true,
-  interceptMode: 'smart',
+  interceptMode: "smart",
   minFileSize: 0, // 不限
   interceptExtensions: [
     // 压缩文件
-    '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz',
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
     // 安装程序
-    '.exe', '.msi', '.dmg', '.deb', '.rpm', '.appimage',
+    ".exe",
+    ".msi",
+    ".dmg",
+    ".deb",
+    ".rpm",
+    ".appimage",
     // 磁盘镜像
-    '.iso', '.img',
+    ".iso",
+    ".img",
     // 视频
-    '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
     // 音频
-    '.mp3', '.flac', '.wav', '.aac', '.ogg',
+    ".mp3",
+    ".flac",
+    ".wav",
+    ".aac",
+    ".ogg",
     // 文档
-    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
     // 其他大文件
-    '.bin', '.apk', '.ipa', '.torrent',
+    ".bin",
+    ".apk",
+    ".ipa",
+    ".torrent",
   ],
   interceptMimeTypes: [
     // 通用二进制/下载
-    'application/octet-stream',
-    'application/x-download',
-    'application/force-download',
+    "application/octet-stream",
+    "application/x-download",
+    "application/force-download",
     // 压缩
-    'application/zip',
-    'application/x-rar-compressed',
-    'application/x-7z-compressed',
-    'application/gzip',
-    'application/x-tar',
-    'application/x-bzip2',
-    'application/x-xz',
+    "application/zip",
+    "application/x-rar-compressed",
+    "application/x-7z-compressed",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-bzip2",
+    "application/x-xz",
     // 安装程序
-    'application/x-msdownload',
-    'application/x-msi',
-    'application/x-apple-diskimage',
-    'application/vnd.debian.binary-package',
+    "application/x-msdownload",
+    "application/x-msi",
+    "application/x-apple-diskimage",
+    "application/vnd.debian.binary-package",
     // 磁盘镜像
-    'application/x-iso9660-image',
-    'application/x-raw-disk-image',
+    "application/x-iso9660-image",
+    "application/x-raw-disk-image",
     // 视频
-    'video/',
+    "video/",
     // 音频
-    'audio/',
+    "audio/",
     // 文档
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument',
-    'application/vnd.ms-excel',
-    'application/vnd.ms-powerpoint',
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
     // APK
-    'application/vnd.android.package-archive',
+    "application/vnd.android.package-archive",
     // torrent
-    'application/x-bittorrent',
+    "application/x-bittorrent",
   ],
   excludeDomains: [],
 
@@ -107,7 +138,7 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
  * 加载设置
  */
 export async function loadSettings(): Promise<FluxDownSettings> {
-  const result = await browser.storage.sync.get('settings') ?? {};
+  const result = (await browser.storage.sync.get("settings")) ?? {};
   if (result.settings) {
     return { ...DEFAULT_SETTINGS, ...result.settings };
   }
@@ -117,7 +148,9 @@ export async function loadSettings(): Promise<FluxDownSettings> {
 /**
  * 保存设置
  */
-export async function saveSettings(settings: Partial<FluxDownSettings>): Promise<void> {
+export async function saveSettings(
+  settings: Partial<FluxDownSettings>,
+): Promise<void> {
   const current = await loadSettings();
   const merged = { ...current, ...settings };
   await browser.storage.sync.set({ settings: merged });
@@ -163,18 +196,22 @@ export function shouldIntercept(
   }
 
   // 检查文件大小下限（仅当文件大小已知时）
-  if (fileSize !== undefined && fileSize > 0 && fileSize < settings.minFileSize) {
+  if (
+    fileSize !== undefined &&
+    fileSize > 0 &&
+    fileSize < settings.minFileSize
+  ) {
     return false;
   }
 
   // === 按模式判断 ===
 
-  if (settings.interceptMode === 'all') {
+  if (settings.interceptMode === "all") {
     // "拦截所有"模式：只要过了域名和大小过滤就拦截
     return true;
   }
 
-  if (settings.interceptMode === 'extension') {
+  if (settings.interceptMode === "extension") {
     // "仅扩展名"模式：只看 URL 路径或 filename 的扩展名
     return matchByExtension(url, filename, settings.interceptExtensions);
   }
@@ -193,14 +230,24 @@ export function shouldIntercept(
   // 3. 如果文件大小已知且超过阈值，但 MIME 未知，也拦截
   //    （很多动态下载链接没有扩展名，MIME 可能是 application/octet-stream 或空）
   if (fileSize !== undefined && fileSize >= settings.minFileSize) {
-    // 排除明显不需要拦截的 MIME（如网页、脚本、样式表）
     if (mime && isWebResourceMime(mime)) {
       return false;
     }
     return true;
   }
 
-  return false;
+  // 4. 如果 MIME 明确是网页资源类型（HTML/CSS/JS/小图片等），不拦截
+  if (mime && isWebResourceMime(mime)) {
+    return false;
+  }
+
+  // 5. 默认拦截 —— 浏览器既然触发了 downloads API 事件，
+  //    说明它已经将该请求识别为"下载"操作。
+  //    到这里意味着：扩展名不在列表中、MIME 不在列表中（或为空）、文件大小未知。
+  //    典型场景：按钮点击触发的动态下载（URL 无扩展名、MIME 未知/为空）。
+  //    同类产品（IDM/FDM）在此场景下也会拦截。
+  //    如果用户不想拦截特定站点，可通过排除域名列表处理。
+  return true;
 }
 
 /**
@@ -212,7 +259,11 @@ export function shouldIntercept(
  * 3. URL 查询参数值  — 覆盖 /download?file=report.pdf 场景
  * 4. URL pathname 任意段 — 覆盖 /file.pdf/download 场景
  */
-function matchByExtension(url: string, filename: string | undefined, extensions: string[]): boolean {
+function matchByExtension(
+  url: string,
+  filename: string | undefined,
+  extensions: string[],
+): boolean {
   if (extensions.length === 0) return false;
 
   // 策略 1: filename（Content-Disposition 给的文件名，最准确）
@@ -241,7 +292,7 @@ function matchByExtension(url: string, filename: string | undefined, extensions:
     }
 
     // 策略 4: pathname 任意段（如 /file.pdf/download）
-    const segments = pathname.split('/');
+    const segments = pathname.split("/");
     for (const seg of segments) {
       if (seg && extensions.some((ext) => seg.endsWith(ext))) {
         return true;
@@ -263,7 +314,7 @@ function matchByMime(mime: string, mimeTypes: string[]): boolean {
   return mimeTypes.some((pattern) => {
     const lowerPattern = pattern.toLowerCase();
     // 前缀匹配（如 'video/' 匹配 'video/mp4'）
-    if (lowerPattern.endsWith('/')) {
+    if (lowerPattern.endsWith("/")) {
       return lowerMime.startsWith(lowerPattern);
     }
     return lowerMime === lowerPattern;
@@ -276,22 +327,22 @@ function matchByMime(mime: string, mimeTypes: string[]): boolean {
 function isWebResourceMime(mime: string): boolean {
   const lowerMime = mime.toLowerCase();
   const webMimes = [
-    'text/html',
-    'text/css',
-    'text/javascript',
-    'application/javascript',
-    'application/json',
-    'application/xml',
-    'text/xml',
-    'image/svg+xml',
-    'text/plain',
+    "text/html",
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "text/xml",
+    "image/svg+xml",
+    "text/plain",
     // 常见小图片不需要拦截
-    'image/png',
-    'image/jpeg',
-    'image/gif',
-    'image/webp',
-    'image/x-icon',
-    'image/bmp',
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/x-icon",
+    "image/bmp",
   ];
   return webMimes.some((wm) => lowerMime === wm);
 }

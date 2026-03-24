@@ -93,7 +93,10 @@ export default defineBackground(() => {
   // storage.onChanged 保证跨标签页/窗口的实时同步
   let _settingsCache: import("@/utils/settings").FluxDownSettings | null = null;
   let _settingsCacheTs = 0;
-  const SETTINGS_CACHE_TTL = 2000; // 2 秒，足够应对快速连续下载
+  // 缓存永不主动过期，完全依赖 storage.onChanged 事件失效。
+  // 这确保同步路径（防止下载 UI 闪现的关键）覆盖率接近 100%，
+  // 仅在 Service Worker 冷启动的第一个下载时缓存为 null。
+  const SETTINGS_CACHE_TTL = Number.MAX_SAFE_INTEGER;
   // Bug 8 修复：用 inflight Promise 防止并发调用时发起多次 loadSettings
   let _settingsInflight: Promise<
     import("@/utils/settings").FluxDownSettings
@@ -136,14 +139,47 @@ export default defineBackground(() => {
       _settingsCacheTs = 0;
       _settingsInflight = null;
       _settingsVersion++; // 使任何进行中的 inflight 结果失效
+      // 设置变更时同步更新下载 UI 隐藏状态
+      getCachedSettings()
+        .then((s) => {
+          syncDownloadShelfState(s.enabled);
+        })
+        .catch(() => {});
     }
   });
+
+  // ===== 同类产品核心策略：隐藏浏览器下载 UI =====
+  // IDM / Motrix / FDM 等下载管理器均通过此 API 全局禁用浏览器下载栏，
+  // 防止 cancel/erase 下载时下载条/下载栏短暂闪现。
+  // Chrome 116+ 使用 setUiOptions，旧版使用 setShelfEnabled（Chrome 117+ 已弃用）。
+  // Firefox 不支持这些 API，但 Firefox 下使用 webRequest blocking 方案无此问题。
+  function syncDownloadShelfState(enabled: boolean) {
+    const noop = () => {};
+    try {
+      const downloads = browser.downloads as any;
+      const uiEnabled = !enabled; // 拦截启用时隐藏 UI，拦截禁用时恢复 UI
+      if (downloads.setShelfEnabled) {
+        // 旧版 Chrome（< 117），同步 API，不返回 Promise
+        downloads.setShelfEnabled(uiEnabled);
+      }
+      if (downloads.setUiOptions) {
+        // Chrome 116+，返回 Promise，需要 .catch() 捕获异步权限错误
+        Promise.resolve(downloads.setUiOptions({ enabled: uiEnabled })).catch(
+          noop,
+        );
+      }
+    } catch {
+      // Firefox 等不支持这些 API 的浏览器，静默忽略
+    }
+  }
 
   // 启动时预热缓存
   // R5-8 修复：加 .catch 防止 loadSettings 失败产生未捕获 rejection 警告
   getCachedSettings()
     .then((s) => {
       updateIcon(s.enabled);
+      // 同类产品（IDM/Motrix/FDM）共同使用的策略：启动时立即隐藏下载 UI
+      syncDownloadShelfState(s.enabled);
       console.log("[FluxDown] Settings cache warmed up");
     })
     .catch((e) => {
@@ -1068,7 +1104,119 @@ export default defineBackground(() => {
           // mime 和 filename 均为空（极少见）→ 降级到下方异步路径
         }
 
-        // 异步判断（缓存未热身 或 metadata 暂缺时的兜底路径）
+        // ===== 冷启动预防拦截（同类产品 IDM/Motrix/FDM 调研后的最优策略） =====
+        // 当 MV3 Service Worker 刚被唤醒、settings 缓存尚未热身时（_syncSettings === null），
+        // 默认按"拦截"处理：先同步 suggest() 释放文件名管线阻止浏览器弹出任何下载 UI，
+        // 然后异步加载设置判断是否真正需要拦截。
+        // 核心原则：宁可误拦截后通过 fallbackToBrowserDownload 回退（用户无感），
+        //           也不要让浏览器下载 UI 闪现（用户可见且体验差）。
+        if (_syncSettings === null) {
+          // 同步释放文件名决策管线 — 在 onCreated 触发前完成，
+          // 彻底阻止下载栏和另存为对话框的出现
+          suggest();
+          console.log(
+            "[FluxDown] Cold-start pre-emptive intercept (settings cache not warmed):",
+            { url, downloadUrl },
+          );
+          (async () => {
+            try {
+              // 立即取消浏览器下载
+              try {
+                await browser.downloads.cancel(downloadItem.id);
+              } catch {
+                console.debug("[FluxDown] cold-start: cancel (expected)");
+              }
+              try {
+                await browser.downloads.erase({ id: downloadItem.id });
+              } catch {
+                console.debug("[FluxDown] cold-start: erase (expected)");
+              }
+
+              // 加载设置（这会同时预热缓存，后续下载走同步快速路径）
+              const settings = await getCachedSettings();
+
+              // 检查 bypass 令牌
+              const bypass = bypassTokens.get(url);
+              if (bypass && bypass > Date.now()) {
+                bypassTokens.delete(url);
+                handledDownloads.delete(downloadItem.id);
+                await fallbackToBrowserDownload(downloadUrl).catch(() => {});
+                return;
+              }
+
+              // 拦截未启用 → 回退让浏览器重新下载
+              if (!settings.enabled) {
+                handledDownloads.delete(downloadItem.id);
+                await fallbackToBrowserDownload(downloadUrl).catch(() => {});
+                return;
+              }
+
+              // 收集元数据做拦截判断
+              const cached = downloadItemCache.get(downloadItem.id);
+              const mime = downloadItem.mime || cached?.mime || undefined;
+              const fileSize =
+                (downloadItem.fileSize > 0
+                  ? downloadItem.fileSize
+                  : undefined) ??
+                (cached && cached.fileSize > 0 ? cached.fileSize : undefined);
+              const filename =
+                downloadItem.filename || cached?.filename || undefined;
+              const referrer = cached?.referrer || undefined;
+              const itemInfo: DownloadItemInfo = {
+                url,
+                fileSize,
+                mime,
+                filename,
+              };
+
+              if (!shouldIntercept(itemInfo, settings)) {
+                // 不应拦截 → 回退让浏览器重新下载（用户无感）
+                handledDownloads.delete(downloadItem.id);
+                await fallbackToBrowserDownload(
+                  downloadUrl,
+                  extractCleanFilename(filename, downloadUrl),
+                ).catch(() => {});
+                return;
+              }
+
+              // 应该拦截 → 发送给 FluxDown
+              const dispositionFilename =
+                responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
+                responseDownloadCache.get(url)?.dispositionFilename ||
+                "";
+              const cleanFilename =
+                dispositionFilename ||
+                extractCleanFilename(filename, downloadUrl);
+              const sendOk = await sendToFluxDown(
+                downloadUrl,
+                referrer,
+                cleanFilename,
+                fileSize,
+                mime,
+                downloadUrl !== url ? url : undefined,
+              );
+              if (!sendOk) {
+                // 发送失败，回退到浏览器下载
+                await fallbackToBrowserDownload(
+                  downloadUrl,
+                  cleanFilename,
+                ).catch(() => {});
+              }
+            } catch (e) {
+              console.error(
+                "[FluxDown] Cold-start pre-emptive intercept error:",
+                e,
+              );
+              handledDownloads.delete(downloadItem.id);
+              await fallbackToBrowserDownload(downloadUrl).catch(() => {});
+            } finally {
+              downloadItemCache.delete(downloadItem.id);
+            }
+          })();
+          return; // 同步 suggest 已调用，无需 return true
+        }
+
+        // 异步判断（metadata 暂缺时的兜底路径 — 缓存已热但 mime/filename 均为空的极少见情况）
         (async () => {
           // Bug 2+5 修复：用 suggestCalled 保证 suggest 全局只调用一次。
           // catch 块 + 正常路径都可能调用 suggest，两次调用会导致浏览器行为异常。

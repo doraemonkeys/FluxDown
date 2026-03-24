@@ -24,6 +24,7 @@ export default defineConfig({
       : {}),
     permissions: [
       "downloads",
+      "downloads.shelf", // setShelfEnabled 隐藏下载栏
       "cookies",
       "webRequest",
       "storage",
