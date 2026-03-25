@@ -259,15 +259,18 @@ class WindowStateService {
   /// 防止 `hide()` 后异常坐标被写入。
   Future<void> _save({bool force = false}) async {
     try {
-      // ── 防护层 1：可见性检查 ──
-      // window_manager 的 hide() 在 gtk_widget_hide() 之后会调用
-      // gtk_window_move() 恢复位置，触发 configure-event → onMoved →
-      // 防抖 _save()。此时窗口已不可见，getPosition() 返回异常坐标。
-      // 跳过保存以保护 saveNow() 之前写入的正确值。
+      // ── 防护层 1：窗口状态检查 ──
+      // 以下两种状态下 getPosition() 返回的坐标不可靠，必须跳过：
+      //   - 隐藏（hide）：Linux 上 gtk_widget_hide() 后 WM 返回异常负值
+      //   - 最小化（iconify）：isVisible 仍为 true，但坐标同样不可靠
       if (!force) {
         final isVisible = await windowManager.isVisible();
-        if (!isVisible) {
-          logInfo(_tag, 'save skipped: window not visible');
+        final isMinimized = await windowManager.isMinimized();
+        if (!isVisible || isMinimized) {
+          logInfo(
+            _tag,
+            'save skipped: visible=$isVisible, minimized=$isMinimized',
+          );
           return;
         }
       }
