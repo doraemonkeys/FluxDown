@@ -5,6 +5,8 @@ const zhCN: Messages = {
   "announcement.1": "投票进行中：建微信群、QQ群还是公众号？快来参与投票吧！",
   "announcement.2":
     "QQ 群已创建！群号：832143651，欢迎加入 FluxDown 社区交流群！",
+  "announcement.3":
+    "Telegram 群已创建！欢迎加入 FluxDown 国际社区交流群！",
   "announcement.close": "关闭",
   "announcement.badge": "公告",
   "announcement.title": "最新",
@@ -14,6 +16,23 @@ const zhCN: Messages = {
   "announcement.ended": "已结束",
   "announcement.viewDetail": "查看详情",
   "announcement.empty": "暂无公告。",
+
+  // Telegram Group
+  "telegramGroup.badge": "Telegram 社区群",
+  "telegramGroup.title": "加入",
+  "telegramGroup.titleHighlight": "Telegram 群",
+  "telegramGroup.subtitle":
+    "点击下方按钮即可加入 FluxDown 国际社区，与全球开发者和用户一起交流讨论。",
+  "telegramGroup.joinBtn": "加入 Telegram 群",
+  "telegramGroup.howToJoin": "如何加入",
+  "telegramGroup.step1": "点击上方按钮，打开 Telegram 邀请链接",
+  "telegramGroup.step2": "在 Telegram 应用或网页端打开，无需搜索群组",
+  "telegramGroup.step3": "点击「加入群组」即可成为社区成员",
+
+  // Community Float
+  "community.floatLabel": "加入社区",
+  "community.telegram": "Telegram 群",
+  "community.qq": "QQ 群",
 
   // QQ Group
   "qqGroup.badge": "QQ 社区群",

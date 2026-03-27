@@ -3,6 +3,7 @@ import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
 import FaqSection from "../components/FaqSection";
 import Footer from "../components/Footer";
+import CommunityFloat from "../components/CommunityFloat";
 import en from "../lib/locales/en";
 
 // Build FAQPage JSON-LD at SSG time from English locale
@@ -36,4 +37,5 @@ const faqJsonLd = {
     <FaqSection client:load />
   </main>
   <Footer client:load />
+  <CommunityFloat client:load />
 </Layout>

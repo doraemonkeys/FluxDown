@@ -4,6 +4,8 @@ const en = {
     "Vote: Should we create a WeChat group, QQ group, or Official Account? Join the discussion!",
   "announcement.2":
     "QQ Group is live! Group number: 832143651. Join the FluxDown community now!",
+  "announcement.3":
+    "Telegram Group is live! Join the global FluxDown community on Telegram now!",
   "announcement.close": "Close",
   "announcement.badge": "Announcements",
   "announcement.title": "Latest ",
@@ -14,6 +16,23 @@ const en = {
   "announcement.ended": "Ended",
   "announcement.viewDetail": "View Details",
   "announcement.empty": "No announcements yet.",
+
+  // Telegram Group
+  "telegramGroup.badge": "Telegram Community",
+  "telegramGroup.title": "Join the ",
+  "telegramGroup.titleHighlight": "Telegram group",
+  "telegramGroup.subtitle":
+    "Click the button below to join the FluxDown global community on Telegram. Chat with developers and users from around the world.",
+  "telegramGroup.joinBtn": "Join Telegram Group",
+  "telegramGroup.howToJoin": "How to Join",
+  "telegramGroup.step1": "Click the button above to open the Telegram invite link",
+  "telegramGroup.step2": "Open in Telegram app or web — no account search needed",
+  "telegramGroup.step3": "Click 'Join Group' to become part of the community",
+
+  // Community Float
+  "community.floatLabel": "Join Community",
+  "community.telegram": "Telegram Group",
+  "community.qq": "QQ Group",
 
   // QQ Group
   "qqGroup.badge": "QQ Community",

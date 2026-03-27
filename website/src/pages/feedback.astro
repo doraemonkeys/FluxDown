@@ -3,6 +3,7 @@ import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
 import FeedbackPage from "../components/FeedbackPage";
 import Footer from "../components/Footer";
+import CommunityFloat from "../components/CommunityFloat";
 ---
 
 <Layout title="Feedback - FluxDown" description="Submit feedback, feature requests, or bug reports for FluxDown download manager. Track issue progress, view responses, and help us improve.">
@@ -16,4 +17,5 @@ import Footer from "../components/Footer";
     <FeedbackPage client:load />
   </main>
   <Footer client:load />
+  <CommunityFloat client:load />
 </Layout>

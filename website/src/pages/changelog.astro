@@ -3,6 +3,7 @@ import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
 import ChangelogSection from "../components/ChangelogSection";
 import Footer from "../components/Footer";
+import CommunityFloat from "../components/CommunityFloat";
 ---
 
 <Layout title="Changelog - FluxDown" description="FluxDown release history and changelog. Track every update, new feature, bug fix, and performance improvement across all versions.">
@@ -16,4 +17,5 @@ import Footer from "../components/Footer";
     <ChangelogSection client:load />
   </main>
   <Footer client:load />
+  <CommunityFloat client:load />
 </Layout>
