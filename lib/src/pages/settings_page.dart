@@ -255,43 +255,96 @@ class _SettingsPageState extends State<SettingsPage> {
         TitleDragArea(
           child: Container(
             height: 48,
-            padding: const EdgeInsets.only(left: 12, right: 289),
             decoration: BoxDecoration(
               color: c.surface1,
               border: Border(bottom: BorderSide(color: c.border, width: 1)),
             ),
-            child: Row(
-              children: [
-                ShadButton.ghost(
-                  onPressed: widget.onBack,
-                  size: ShadButtonSize.sm,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+            child: Platform.isMacOS
+                ? Stack(
                     children: [
-                      Icon(
-                        LucideIcons.arrowLeft,
-                        size: 14,
-                        color: c.textSecondary,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        LocaleScope.of(context).back,
-                        style: TextStyle(fontSize: 13, color: c.textSecondary),
+                      // 定位到侧边栏(180px)+分隔线(1px)右边
+                      Positioned(
+                        left: 181,
+                        top: 0,
+                        bottom: 0,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            ShadButton.ghost(
+                              onPressed: widget.onBack,
+                              size: ShadButtonSize.sm,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    LucideIcons.arrowLeft,
+                                    size: 14,
+                                    color: c.textSecondary,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    LocaleScope.of(context).back,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: c.textSecondary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              LocaleScope.of(context).settings,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: c.textPrimary,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
+                  )
+                : Padding(
+                    padding: const EdgeInsets.only(left: 12, right: 289),
+                    child: Row(
+                      children: [
+                        ShadButton.ghost(
+                          onPressed: widget.onBack,
+                          size: ShadButtonSize.sm,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                LucideIcons.arrowLeft,
+                                size: 14,
+                                color: c.textSecondary,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                LocaleScope.of(context).back,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: c.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          LocaleScope.of(context).settings,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  LocaleScope.of(context).settings,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: c.textPrimary,
-                  ),
-                ),
-              ],
-            ),
           ),
         ),
         // 主体：侧边栏 + 内容区

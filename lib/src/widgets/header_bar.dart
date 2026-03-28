@@ -241,8 +241,6 @@ class HeaderBarState extends State<HeaderBar> {
     return TitleDragArea(
       child: Container(
         height: 48,
-        // Windows/Linux right 预留窗口控制按钮宽度：3 窗口按钮(40*3) = 120
-        // macOS 右侧无窗口按钮，只留少量内边距
         padding: const EdgeInsets.only(left: 16),
         decoration: BoxDecoration(
           color: c.surface1,
@@ -351,37 +349,38 @@ class HeaderBarState extends State<HeaderBar> {
               ),
             ),
             const Spacer(),
-            // 工具按钮
-            _ToolButton(
-              icon: LucideIcons.circlePause,
-              tooltip: s.pauseAll,
-              onPressed: () => widget.controller.pauseAll(),
-              iconSize: 16,
-            ),
-            _ToolButton(
-              icon: LucideIcons.circlePlay,
-              tooltip: s.resumeAll,
-              onPressed: () => widget.controller.resumeAll(),
-              iconSize: 16,
-            ),
-            _ToolButton(
-              icon: LucideIcons.settings,
-              tooltip: s.settings,
-              onPressed: () => widget.onSettings?.call(),
-              iconSize: 16,
-            ),
-            _ToolButton(
-              icon: themeProvider.isDark(context)
-                  ? LucideIcons.sun
-                  : LucideIcons.moon,
-              tooltip: themeProvider.isDark(context)
-                  ? s.toggleToLight
-                  : s.toggleToDark,
-              onPressed: () => themeProvider.toggleTheme(context),
-              iconSize: 15,
-            ),
-            // Windows/Linux：工具按钮与窗口控制按钮之间的分隔线 + 占位宽度
+            // macOS：工具按钮由外层 Positioned(right:0) WindowControls 渲染，紧贴右边缘
+            // Windows/Linux：工具按钮内嵌在 HeaderBar Row 里
             if (!Platform.isMacOS) ...[
+              _ToolButton(
+                icon: LucideIcons.circlePause,
+                tooltip: s.pauseAll,
+                onPressed: () => widget.controller.pauseAll(),
+                iconSize: 16,
+              ),
+              _ToolButton(
+                icon: LucideIcons.circlePlay,
+                tooltip: s.resumeAll,
+                onPressed: () => widget.controller.resumeAll(),
+                iconSize: 16,
+              ),
+              _ToolButton(
+                icon: LucideIcons.settings,
+                tooltip: s.settings,
+                onPressed: () => widget.onSettings?.call(),
+                iconSize: 16,
+              ),
+              _ToolButton(
+                icon: themeProvider.isDark(context)
+                    ? LucideIcons.sun
+                    : LucideIcons.moon,
+                tooltip: themeProvider.isDark(context)
+                    ? s.toggleToLight
+                    : s.toggleToDark,
+                onPressed: () => themeProvider.toggleTheme(context),
+                iconSize: 15,
+              ),
+              // Windows/Linux：工具按钮与窗口控制按钮之间的分隔线 + 占位宽度
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: Container(width: 1, height: 16, color: c.border),
@@ -779,135 +778,7 @@ class WindowControls extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────
-// macOS Traffic Light 窗口按钮（左上角红/黄/绿）
-// ─────────────────────────────────────────────
 
-/// macOS 风格的 traffic light 窗口控制按钮。
-///
-/// 悬停时显示对应的 ✕ / – / ⤢ 符号，离开后恢复纯色圆点。
-/// 仅在 [Platform.isMacOS] 时渲染，其他平台返回空组件。
-class MacosTrafficLights extends StatefulWidget {
-  const MacosTrafficLights({super.key});
-
-  @override
-  State<MacosTrafficLights> createState() => _MacosTrafficLightsState();
-}
-
-class _MacosTrafficLightsState extends State<MacosTrafficLights> {
-  bool _hovered = false;
-
-  static const _kClose = Color(0xFFFF5F57);
-  static const _kMinimize = Color(0xFFFFBD2E);
-  static const _kMaximize = Color(0xFF28C840);
-  static const _kDotSize = 12.0;
-  static const _kSpacing = 8.0;
-
-  @override
-  Widget build(BuildContext context) {
-    if (!Platform.isMacOS) return const SizedBox.shrink();
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: SizedBox(
-        height: 48,
-        child: Padding(
-          padding: const EdgeInsets.only(left: 12),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _TrafficDot(
-                color: _kClose,
-                hovered: _hovered,
-                symbol: '✕',
-                symbolSize: 7,
-                onTap: () {
-                  logInfo('MacosTrafficLight', 'close tapped');
-                  windowManager.close();
-                },
-              ),
-              const SizedBox(width: _kSpacing),
-              _TrafficDot(
-                color: _kMinimize,
-                hovered: _hovered,
-                symbol: '–',
-                symbolSize: 8,
-                onTap: () {
-                  logInfo('MacosTrafficLight', 'minimize tapped');
-                  windowManager.minimize();
-                },
-              ),
-              const SizedBox(width: _kSpacing),
-              _TrafficDot(
-                color: _kMaximize,
-                hovered: _hovered,
-                symbol: '⤢',
-                symbolSize: 8,
-                onTap: () async {
-                  logInfo('MacosTrafficLight', 'maximize tapped');
-                  if (await windowManager.isMaximized()) {
-                    await windowManager.unmaximize();
-                  } else {
-                    await windowManager.maximize();
-                  }
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TrafficDot extends StatelessWidget {
-  final Color color;
-  final bool hovered;
-  final String symbol;
-  final double symbolSize;
-  final VoidCallback onTap;
-
-  const _TrafficDot({
-    required this.color,
-    required this.hovered,
-    required this.symbol,
-    required this.symbolSize,
-    required this.onTap,
-  });
-
-  static const _kDotSize = 12.0;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: _kDotSize,
-        height: _kDotSize,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-        ),
-        child: hovered
-            ? Center(
-                child: Text(
-                  symbol,
-                  style: TextStyle(
-                    fontSize: symbolSize,
-                    height: 1,
-                    color: Colors.black.withValues(alpha: 0.65),
-                    fontWeight: FontWeight.bold,
-                    fontFamily: 'SF Pro',
-                  ),
-                ),
-              )
-            : null,
-      ),
-    );
-  }
-}
 
 class _WindowButton extends StatefulWidget {
   final IconData icon;

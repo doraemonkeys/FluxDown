@@ -107,8 +107,13 @@ Future<void> main(List<String> args) async {
   // 窗口显示由原生层 first_frame_cb 控制（已处理 silentStart 逻辑）。
   await windowManager.setTitleBarStyle(
     TitleBarStyle.hidden,
-    windowButtonVisibility: false,
+    windowButtonVisibility: Platform.isMacOS,
   );
+  // macOS：设置 NSWindow 背景色为浅灰，使失焦时 traffic light 按钮（灰色圆圈）
+  // 在白色侧边栏背景上有足够对比度，不会"消失"。
+  if (Platform.isMacOS) {
+    await windowManager.setBackgroundColor(const Color(0xFFE5E5E5));
+  }
   await windowManager.setMinimumSize(const Size(900, 500));
   await WindowStateService.instance.applyState();
   logInfo('main', 'window state applied before runApp');
@@ -623,6 +628,25 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     return themeProvider.activeTokens(context);
   }
 
+  /// macOS：每次主题变更后同步 NSWindow 背景色，让失焦的 traffic light
+  /// 灰色圆圈在侧边栏背景上有足够对比度。
+  void _syncMacOsWindowBackground(FluxThemeTokens tokens) {
+    if (!Platform.isMacOS) return;
+    // surface1 是侧边栏背景色，traffic light 按钮就在其上方
+    final bg = tokens.surface1;
+    // 深色主题 surface1 已经足够深，浅色主题 surface1 可能是纯白，
+    // 稍微加深一点让灰色按钮有对比度
+    final windowBg = tokens.appearance == Brightness.light
+        ? Color.fromARGB(
+            255,
+            (bg.r * 255 * 0.88).round().clamp(0, 255),
+            (bg.g * 255 * 0.88).round().clamp(0, 255),
+            (bg.b * 255 * 0.88).round().clamp(0, 255),
+          )
+        : bg;
+    windowManager.setBackgroundColor(windowBg);
+  }
+
   @override
   Widget build(BuildContext context) {
     // 手动组合 ShadTheme + WidgetsApp，跳过 ShadApp 内部的：
@@ -631,6 +655,9 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     // - materialTheme() 每帧重建 ThemeData + applyGoogleFontToTextTheme
     final tokens = _resolveTokens(context);
     final theme = buildThemeFromTokens(tokens);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _syncMacOsWindowBackground(tokens),
+    );
     return LocaleScope(
       s: _localeNotifier.s,
       child: FluxThemeScope(

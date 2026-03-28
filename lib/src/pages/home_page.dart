@@ -274,13 +274,7 @@ class _HomePageState extends State<HomePage> {
               initialCategory: _initialSettingsCategory,
             ),
           ),
-          // macOS traffic light — 左上角
-          if (Platform.isMacOS)
-            const Positioned(
-              top: 0,
-              left: 0,
-              child: MacosTrafficLights(),
-            ),
+
           // 工具按钮（设置页：暂停/恢复/设置/主题） — 右上角
           Positioned(
             top: 0,
@@ -466,20 +460,20 @@ class _HomePageState extends State<HomePage> {
                 }),
               ),
             ),
-            // macOS traffic light — 左上角
-            if (Platform.isMacOS)
-              const Positioned(
-                top: 0,
-                left: 0,
-                child: MacosTrafficLights(),
-              ),
-            // Windows/Linux 窗口控制按钮 — 右上角（macOS 上此组件返回空）
+
+            // 窗口控制按钮 — 右上角
+            // macOS：showToolButtons=true，工具按钮通过 Positioned 渲染，紧贴右边缘（与设置页一致）
+            // Windows/Linux：showToolButtons=false，工具按钮已在 HeaderBar 内
             Positioned(
               top: 0,
               right: 0,
               child: WindowControls(
                 controller: _controller,
-                showToolButtons: false,
+                onSettings: () => setState(() {
+                  _showSettings = true;
+                  AnalyticsService.instance.trackView('SettingsPage');
+                }),
+                showToolButtons: Platform.isMacOS,
               ),
             ),
             // 批量删除进度覆盖层（带平滑动画）
