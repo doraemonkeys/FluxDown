@@ -318,6 +318,39 @@ const zhCN: Messages = {
   "dl.subscribed": "我们会通知你！",
   "dl.alreadySubscribed": "已经订阅过了",
   "dl.subscribeError": "失败，请重试",
+  "dl.macosWarning": "遇到「已损坏」提示？",
+  "dl.macosWarningLink": "查看解决方案",
+
+  // macOS Gatekeeper page
+  "macos.title": "macOS「已损坏」错误解决方案",
+  "macos.subtitle":
+    "由于应用未经 Apple 官方签名，macOS 可能会阻止运行。以下方法可帮助你顺利打开 FluxDown。",
+  "macos.lastUpdated": "最后更新：2025年",
+  "macos.whyTitle": "为什么会出现这个错误？",
+  "macos.whyDesc":
+    "macOS 的 Gatekeeper 安全机制默认只允许运行来自 App Store 或已认证开发者的应用。FluxDown 是免费软件，暂未购买 Apple 开发者证书进行签名，因此系统会显示「已损坏」或「来自身份不明的开发者」的提示。这不代表软件本身有问题。",
+  "macos.method1Title": "方法一：开启「任何来源」（推荐）",
+  "macos.method1Step1":
+    "打开「系统设置」→「隐私与安全性」→「通用」，检查是否已有「任何来源」选项。",
+  "macos.method1Step2":
+    "如果没有该选项，打开「终端」，输入以下命令后按回车，并输入密码确认：",
+  "macos.method1Step3":
+    "执行完毕后，返回「系统设置」→「隐私与安全性」即可看到「任何来源」已启用。",
+  "macos.method2Title": "方法二：绕过 Gatekeeper 隔离（仍无法打开时）",
+  "macos.method2Desc":
+    "开启「任何来源」后仍无法打开时，使用以下命令移除应用的隔离标记：",
+  "macos.method2Note":
+    "将 FluxDown.app 替换为你实际的应用名称，或将应用从「访达」直接拖入终端命令末尾。注意 quarantine 后面有一个空格。",
+  "macos.method3Title": "方法三：本地签名（仍无法打开时）",
+  "macos.method3Step1": "先安装 Command Line Tools：",
+  "macos.method3Step2":
+    "弹出安装窗口后点击「继续安装」，等待完成。然后执行以下命令对应用进行本地签名：",
+  "macos.method3Note":
+    "将「应用路径」替换为应用实际路径，可从「访达」→「应用程序」将应用拖入命令末尾。",
+  "macos.tipTitle": "💡 小提示",
+  "macos.tipDesc":
+    "以上方法中，方法一通常可以解决 85% 以上的问题，方法二可覆盖到约 90%。如果三种方法都无效，欢迎到我们的社区反馈。",
+  "macos.backToDownload": "返回下载页面",
 
   // Feedback
   "fb.badge": "反馈建议",

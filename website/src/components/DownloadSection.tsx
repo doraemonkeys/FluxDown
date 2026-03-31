@@ -10,6 +10,7 @@ import {
   Bell,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Globe,
   Smartphone,
 } from "lucide-react";
@@ -497,6 +498,20 @@ export default function DownloadSection() {
                             </a>
                           )}
                         </>
+                      )}
+
+                      {/* macOS 「已损坏」提示 */}
+                      {p.key === "macos" && (
+                        <a
+                          href="/macos-gatekeeper"
+                          className="inline-flex items-center justify-center gap-1.5 mt-1 rounded-lg border border-amber-500/50 bg-amber-500/15 px-3 py-2 text-[10px] text-dark-text hover:bg-amber-500/25 hover:border-amber-500/70 transition-colors"
+                        >
+                          <AlertTriangle className="w-3 h-3 flex-shrink-0 text-amber-500 shrink-0" />
+                          {t("dl.macosWarning")}
+                          <span className="text-amber-600 underline underline-offset-2 font-semibold">
+                            {t("dl.macosWarningLink")}
+                          </span>
+                        </a>
                       )}
                     </div>
                   ) : (

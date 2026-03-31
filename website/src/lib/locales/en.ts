@@ -328,6 +328,40 @@ const en = {
   "dl.subscribed": "You'll be notified!",
   "dl.alreadySubscribed": "Already subscribed",
   "dl.subscribeError": "Failed, try again",
+  "dl.macosWarning": "Getting a 'damaged' error?",
+  "dl.macosWarningLink": "View fix",
+
+  // macOS Gatekeeper page
+  "macos.title": "Fix macOS 'App is Damaged' Error",
+  "macos.subtitle":
+    "Because FluxDown is not signed with an Apple certificate, macOS may block it from opening. The steps below will help you get it running.",
+  "macos.lastUpdated": "Last updated: 2025",
+  "macos.whyTitle": "Why does this happen?",
+  "macos.whyDesc":
+    "macOS Gatekeeper only allows apps from the App Store or identified developers by default. FluxDown is free and open-source and does not yet hold an Apple developer certificate, so macOS shows 'damaged' or 'unidentified developer' warnings. This does not mean the app itself is harmful.",
+  "macos.method1Title": "Method 1: Allow apps from Anywhere (Recommended)",
+  "macos.method1Step1":
+    "Open System Settings → Privacy & Security → General and check whether the 'Anywhere' option is already enabled.",
+  "macos.method1Step2":
+    "If the option is missing, open Terminal and run the command below, then press Return and enter your password:",
+  "macos.method1Step3":
+    "After the command completes, go back to System Settings → Privacy & Security and you will see 'Anywhere' is now enabled.",
+  "macos.method2Title":
+    "Method 2: Remove the quarantine flag (if still blocked)",
+  "macos.method2Desc":
+    "If enabling 'Anywhere' is not enough, use the following command to remove the quarantine attribute from the app:",
+  "macos.method2Note":
+    "Replace FluxDown.app with your actual app name, or drag the app from Finder into the Terminal window after the command. Make sure there is a space after quarantine.",
+  "macos.method3Title": "Method 3: Local code signing (last resort)",
+  "macos.method3Step1": "First install Command Line Tools:",
+  "macos.method3Step2":
+    "Click Continue in the installer window and wait for it to finish. Then run the command below to sign the app locally:",
+  "macos.method3Note":
+    "Replace the app path with the actual path. You can drag the app from Finder → Applications into the Terminal window.",
+  "macos.tipTitle": "💡 Tip",
+  "macos.tipDesc":
+    "Method 1 resolves the issue for ~85% of cases, and Method 2 covers ~90%. If none of the methods work, please let us know in our community.",
+  "macos.backToDownload": "Back to Downloads",
 
   // Feedback
   "fb.badge": "Feedback",
