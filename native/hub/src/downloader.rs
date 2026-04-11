@@ -1568,7 +1568,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     //
     // For new downloads we still use the plain overwrite (update_task_file_info)
     // because there is no prior state to protect.
-    let effective_total_bytes = if p.is_resume {
+    let mut effective_total_bytes = if p.is_resume {
         let (effective, updated) =
             p.db.update_task_file_info_resume(&p.task_id, &actual_name, info.total_bytes)
                 .await?;
@@ -1700,7 +1700,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         dest_path.display()
     );
 
-    if use_segments {
+    let single_result: Option<SingleDownloadResult> = if use_segments {
         download_multi_segment(
             &p.task_id,
             &p.url,
@@ -1719,8 +1719,9 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &info.last_modified,
         )
         .await?;
+        None
     } else {
-        download_single(
+        let result = download_single(
             &p.task_id,
             &p.url,
             &temp_path,
@@ -1736,7 +1737,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.extra_headers,
         )
         .await?;
-    }
+        Some(result)
+    };
 
     // Integrity check — verify download completeness.
     if effective_total_bytes > 0 {
@@ -1766,12 +1768,49 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         } else {
             // Single-thread: no pre-allocation, file size == downloaded bytes.
             let meta = tokio::fs::metadata(&temp_path).await?;
-            if (meta.len() as i64) != effective_total_bytes {
-                return Err(DownloadError::Other(format!(
-                    "size mismatch: expected {} bytes, got {} bytes",
-                    effective_total_bytes,
-                    meta.len()
-                )));
+            let file_len = meta.len() as i64;
+            if file_len != effective_total_bytes {
+                // The stream ended normally — check whether the response had
+                // its own Content-Length that matches the actual file.  This
+                // handles servers (e.g. CNKI) where the browser-extension hint
+                // size differs from what the server actually delivers to
+                // FluxDown's own request (dynamic tokens, re-generated PDFs,
+                // slight header drift, etc.).
+                let resp_cl = single_result
+                    .as_ref()
+                    .map(|r| r.response_content_length)
+                    .unwrap_or(-1);
+                if resp_cl > 0 && file_len == resp_cl {
+                    log_info!(
+                        "[download] task {} size drift accepted: hint={} bytes, \
+                         response content-length={}, file={} (stream completed normally)",
+                        p.task_id,
+                        effective_total_bytes,
+                        resp_cl,
+                        file_len
+                    );
+                    // Update DB so the stored total_bytes reflects reality.
+                    let _ = p.db.update_task_total_bytes(&p.task_id, file_len).await;
+                    effective_total_bytes = file_len;
+                } else if resp_cl <= 0 && file_len > 0 {
+                    // Server didn't send Content-Length (chunked transfer) but
+                    // the stream ended cleanly.  Trust the actual file.
+                    log_info!(
+                        "[download] task {} no response content-length, trusting \
+                         actual file size: hint={}, file={} (stream completed normally)",
+                        p.task_id,
+                        effective_total_bytes,
+                        file_len
+                    );
+                    let _ = p.db.update_task_total_bytes(&p.task_id, file_len).await;
+                    effective_total_bytes = file_len;
+                } else {
+                    return Err(DownloadError::Other(format!(
+                        "size mismatch: expected {} bytes, got {} bytes \
+                         (response content-length={})",
+                        effective_total_bytes, file_len, resp_cl
+                    )));
+                }
             }
         }
     }
@@ -1780,7 +1819,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     // Content-Length (total_bytes == 0), read the real file size from disk so
     // that the completion signal carries accurate byte counts.
     let actual_total = if effective_total_bytes > 0 {
-        effective_total_bytes
+        effective_total_bytes // may have been corrected by size-drift logic above
     } else {
         match tokio::fs::metadata(&temp_path).await {
             Ok(m) => m.len() as i64,
@@ -1834,6 +1873,14 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+/// Result of a single-thread download, carrying response metadata for the
+/// caller's integrity check.
+struct SingleDownloadResult {
+    /// The `Content-Length` header value from the server's actual response.
+    /// -1 when the header was absent (e.g. chunked transfer).
+    response_content_length: i64,
+}
+
 async fn download_single(
     task_id: &str,
     url: &str,
@@ -1848,7 +1895,7 @@ async fn download_single(
     cookies: &str,
     referrer: &str,
     extra_headers: &std::collections::HashMap<String, String>,
-) -> Result<(), DownloadError> {
+) -> Result<SingleDownloadResult, DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -1917,6 +1964,18 @@ async fn download_single(
             existing_len
         );
     }
+
+    // Capture the response's own Content-Length before consuming the body.
+    // For resumed downloads (206), this is the *remaining* length, not total.
+    // For full downloads (200), this is the complete file size.
+    let response_content_length: i64 = if actual_resume {
+        // For 206 responses, the full size is existing_len + Content-Length.
+        resp.content_length()
+            .map(|cl| existing_len + cl as i64)
+            .unwrap_or(-1)
+    } else {
+        resp.content_length().map(|cl| cl as i64).unwrap_or(-1)
+    };
 
     if actual_resume {
         downloaded = existing_len;
@@ -2055,7 +2114,9 @@ async fn download_single(
 
     file.flush().await?;
     let _ = db.update_task_progress(task_id, downloaded).await;
-    Ok(())
+    Ok(SingleDownloadResult {
+        response_content_length,
+    })
 }
 
 // ---------------------------------------------------------------------------
