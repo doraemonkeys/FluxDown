@@ -238,10 +238,10 @@ mod server {
         }
     }
 
-    /// Spawn the Named Pipe server.
-    pub fn spawn_listener() -> mpsc::Receiver<DownloadRequest> {
-        let (tx, rx) = mpsc::channel::<DownloadRequest>(64);
-
+    /// Spawn the Named Pipe server, feeding download requests into `tx`.
+    /// The receiving end is owned by `download_actor` and shared with the
+    /// local HTTP takeover server so both transports converge on one channel.
+    pub fn spawn_listener_with(tx: mpsc::Sender<DownloadRequest>) {
         tokio::spawn(async move {
             log_info!("[nmh-pipe] starting Named Pipe server at {}", PIPE_NAME);
 
@@ -288,8 +288,6 @@ mod server {
                 tokio::spawn(handle_pipe_client(connected, tx_clone));
             }
         });
-
-        rx
     }
 }
 
@@ -513,8 +511,7 @@ mod server {
         }
     }
 
-    pub fn spawn_listener() -> mpsc::Receiver<DownloadRequest> {
-        let (tx, rx) = mpsc::channel::<DownloadRequest>(64);
+    pub fn spawn_listener_with(tx: mpsc::Sender<DownloadRequest>) {
         let sock_path = socket_path();
 
         tokio::spawn(async move {
@@ -555,19 +552,26 @@ mod server {
                 }
             }
         });
-
-        rx
     }
 }
 
-/// Spawn the Named Pipe server that listens for incoming browser extension
-/// requests relayed through the NMH binary.
+/// Spawn the Native Messaging listener, feeding requests into the provided
+/// sender. Used by `download_actor` so that both the NMH transport and the
+/// local HTTP takeover server can push `DownloadRequest`s into one shared
+/// channel — the actor's `native_msg_rx` branch then handles both uniformly.
+pub fn spawn_native_messaging_listener_with(tx: mpsc::Sender<DownloadRequest>) {
+    server::spawn_listener_with(tx);
+}
+
+/// Spawn the Native Messaging listener and return a fresh receiver.
 ///
-/// Returns a receiver that yields `DownloadRequest` items whenever the
-/// browser extension sends a download request via Native Messaging.
+/// Convenience wrapper for callers that don't need to share the channel.
 /// Ping requests are handled internally (immediate pong response).
+#[allow(dead_code)]
 pub fn spawn_native_messaging_listener() -> mpsc::Receiver<DownloadRequest> {
-    server::spawn_listener()
+    let (tx, rx) = mpsc::channel::<DownloadRequest>(64);
+    server::spawn_listener_with(tx);
+    rx
 }
 
 #[cfg(test)]

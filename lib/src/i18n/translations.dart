@@ -364,6 +364,9 @@ class S {
   String get settingsCatBtDesc => _t('BT 下载设置', 'BitTorrent settings');
   String get settingsCatProxy => _t('代理', 'Proxy');
   String get settingsCatProxyDesc => _t('网络代理配置', 'Network proxy settings');
+  String get settingsCatLocalServer => _t('本地服务', 'Local Service');
+  String get settingsCatLocalServerDesc =>
+      _t('油猴脚本接管浏览器下载', 'Capture browser downloads via userscript');
   String get settingsCatAbout => _t('关于', 'About');
   String get settingsCatAboutDesc => _t('版本信息与更新', 'Version info & Updates');
 
@@ -669,6 +672,40 @@ class S {
         'Supported types: http / https / socks4 / socks5\n'
         'Leave empty to use global proxy settings',
   );
+
+  // ─────────────────────────────────────────────
+  // Settings — 本地下载服务
+  // ─────────────────────────────────────────────
+
+  String get localServerEnable =>
+      _t('启用本地下载服务', 'Enable Local Download Service');
+  String get localServerEnableDesc => _t(
+    '启动本地 HTTP 服务（仅 127.0.0.1），供 FluxDown 油猴脚本接管浏览器下载',
+    'Start a local HTTP server (127.0.0.1 only) for the FluxDown userscript to capture downloads',
+  );
+  String get localServerPort => _t('监听端口', 'Listen Port');
+  String get localServerPortDesc =>
+      _t('默认 17800，修改后需重启应用生效', 'Default 17800; restart required to apply');
+  String get localServerToken => _t('访问 Token（可选）', 'Access Token (optional)');
+  String get localServerTokenDesc => _t(
+    '留空则免鉴权（仍受确认弹框保护）；填写后需在油猴脚本菜单中填入相同 Token',
+    'Leave empty for no auth (still protected by the confirm dialog); if set, enter the same token in the userscript menu',
+  );
+  String get localServerTokenGenerate => _t('重新生成', 'Regenerate');
+  String get localServerTokenCopy => _t('复制', 'Copy');
+  String get localServerTokenCopied => _t('Token 已复制', 'Token copied');
+  String get localServerCopyScript => _t('复制油猴脚本', 'Copy Userscript');
+  String get localServerScriptCopied => _t(
+    '脚本已复制，请在 Tampermonkey 新建脚本粘贴',
+    'Script copied; paste it into a new Tampermonkey script',
+  );
+  String get localServerAddress => _t('连接地址', 'Connection URL');
+  String get localServerRestartHint =>
+      _t('修改端口后需重启应用生效', 'Restart the app after changing the port');
+  List<String> get searchKeywordsLocalServer => _t(
+    '油猴,脚本,接管,本地,服务,端口,token,浏览器',
+    'userscript,tampermonkey,capture,local,server,port,token,browser',
+  ).split(',')..addAll(['userscript', 'tampermonkey', 'local', 'server']);
 
   // ─────────────────────────────────────────────
   // Settings — BT 下载

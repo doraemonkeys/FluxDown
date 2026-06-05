@@ -225,9 +225,25 @@ pub async fn run(db_dir: PathBuf) {
     let probe_torrent_meta_recv = ProbeTorrentMeta::get_dart_signal_receiver();
     let reveal_file_recv = RevealFile::get_dart_signal_receiver();
 
-    // Spawn the Native Messaging listener (reads from stdin in a blocking thread).
-    // When the browser extension sends a download request, it arrives on this channel.
-    let mut native_msg_rx = native_messaging::spawn_native_messaging_listener();
+    // Shared channel for external download requests. Both the Native Messaging
+    // listener (browser extension via the NMH relay) and the local HTTP takeover
+    // server (Tampermonkey userscripts via GM_xmlhttpRequest) push
+    // `DownloadRequest`s into this channel; the `native_msg_rx` select! branch
+    // below handles both transports with identical logic.
+    let (ext_dl_tx, mut native_msg_rx) = mpsc::channel::<native_messaging::DownloadRequest>(64);
+
+    // Native Messaging listener (reads from the Named Pipe / Unix socket).
+    native_messaging::spawn_native_messaging_listener_with(ext_dl_tx.clone());
+
+    // Local HTTP takeover server for userscripts. Bound to 127.0.0.1 only;
+    // disabled / port / token are read from config and applied at startup
+    // (changes require an app restart — see the SaveConfig handler below).
+    {
+        let http_cfg = crate::http_takeover::HttpTakeoverConfig::from_config_map(
+            &db.get_all_config().await.unwrap_or_default(),
+        );
+        crate::http_takeover::spawn_http_takeover_server(ext_dl_tx.clone(), http_cfg);
+    }
 
     // Auto-register fluxdown:// URL protocol on startup (idempotent).
     tokio::task::spawn_blocking(|| {
@@ -397,6 +413,14 @@ pub async fn run(db_dir: PathBuf) {
                             log_info!("[actor] updating default_segments to {}", v);
                             manager.set_default_segments(v);
                         }
+                    }
+                    // 本地 HTTP 接管服务的启停/端口/token 在启动时绑定，
+                    // 运行时变更仅写入 DB，需重启应用才能生效。
+                    "local_server_enabled" | "local_server_port" | "local_server_token" => {
+                        log_info!(
+                            "[actor] local_server config '{}' changed, restart required to take effect",
+                            msg.key
+                        );
                     }
                     _ => {} // other config keys — no runtime action needed
                 }

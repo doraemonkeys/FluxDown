@@ -62,6 +62,11 @@ class SettingsProvider extends ChangeNotifier {
   int _btPortEnd = 6891; // 监听端口结束
   String _btCustomTrackers = ''; // 用户自定义 Tracker 列表（换行分隔）
 
+  // 本地下载服务（油猴脚本接管）
+  bool _localServerEnabled = true;
+  int _localServerPort = 17800;
+  String _localServerToken = '';
+
   // UA 设置
   String _globalUserAgent = ''; // 空字符串 = 使用内置 Chrome UA
 
@@ -157,6 +162,11 @@ class SettingsProvider extends ChangeNotifier {
   int get btPortStart => _btPortStart;
   int get btPortEnd => _btPortEnd;
   String get btCustomTrackers => _btCustomTrackers;
+
+  // 本地下载服务 Getters
+  bool get localServerEnabled => _localServerEnabled;
+  int get localServerPort => _localServerPort;
+  String get localServerToken => _localServerToken;
 
   // UA 设置 Getter
   String get globalUserAgent => _globalUserAgent;
@@ -421,6 +431,30 @@ class SettingsProvider extends ChangeNotifier {
     _saveToRust('bt_custom_trackers', value);
   }
 
+  // 本地下载服务 Setters
+
+  void setLocalServerEnabled(bool value) {
+    if (_localServerEnabled == value) return;
+    _localServerEnabled = value;
+    notifyListeners();
+    _saveToRust('local_server_enabled', value.toString());
+  }
+
+  void setLocalServerPort(int value) {
+    if (value < 1 || value > 65535) return;
+    if (_localServerPort == value) return;
+    _localServerPort = value;
+    notifyListeners();
+    _saveToRust('local_server_port', value.toString());
+  }
+
+  void setLocalServerToken(String value) {
+    if (_localServerToken == value) return;
+    _localServerToken = value;
+    notifyListeners();
+    _saveToRust('local_server_token', value);
+  }
+
   // UA 设置 Setter
 
   void setGlobalUserAgent(String value) {
@@ -595,6 +629,12 @@ class SettingsProvider extends ChangeNotifier {
           _proxyPassword = entry.value;
         case 'proxy_no_list':
           _proxyNoList = entry.value;
+        case 'local_server_enabled':
+          _localServerEnabled = entry.value == 'true';
+        case 'local_server_port':
+          _localServerPort = int.tryParse(entry.value) ?? 17800;
+        case 'local_server_token':
+          _localServerToken = entry.value;
         case 'global_user_agent':
           _globalUserAgent = entry.value;
         case 'default_queue_id':

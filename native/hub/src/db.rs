@@ -898,6 +898,12 @@ impl Db {
                 ("proxy_password", ""),
                 ("proxy_no_list", ""),
                 ("global_user_agent", ""),
+                // 本地 HTTP 接管服务（供油猴脚本通过 GM_xmlhttpRequest 发送下载）。
+                // 仅监听 127.0.0.1；token 为空表示不鉴权（仍受自定义请求头门禁 +
+                // 下载确认弹框保护）。详见 native/hub/src/http_takeover.rs。
+                ("local_server_enabled", "true"),
+                ("local_server_port", "17800"),
+                ("local_server_token", ""),
             ];
             for (key, value) in defaults {
                 conn.execute(

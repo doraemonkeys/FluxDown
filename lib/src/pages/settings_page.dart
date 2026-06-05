@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_selector/file_selector.dart';
 import '../services/file_picker_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import '../../main.dart';
@@ -34,6 +37,7 @@ enum SettingsCategory {
   download(icon: LucideIcons.download),
   bt(icon: LucideIcons.magnet),
   proxy(icon: LucideIcons.globe),
+  localServer(icon: LucideIcons.code),
   about(icon: LucideIcons.info);
 
   final IconData icon;
@@ -50,6 +54,7 @@ extension SettingsCategoryI18n on SettingsCategory {
       SettingsCategory.download => s.settingsCatDownload,
       SettingsCategory.bt => s.settingsCatBt,
       SettingsCategory.proxy => s.settingsCatProxy,
+      SettingsCategory.localServer => s.settingsCatLocalServer,
       SettingsCategory.about => s.settingsCatAbout,
     };
   }
@@ -62,6 +67,7 @@ extension SettingsCategoryI18n on SettingsCategory {
       SettingsCategory.download => s.settingsCatDownloadDesc,
       SettingsCategory.bt => s.settingsCatBtDesc,
       SettingsCategory.proxy => s.settingsCatProxyDesc,
+      SettingsCategory.localServer => s.settingsCatLocalServerDesc,
       SettingsCategory.about => s.settingsCatAboutDesc,
     };
   }
@@ -220,6 +226,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       description: s.proxySettingsDesc,
       keywords: s.searchKeywordsProxy,
       icon: LucideIcons.globe,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.localServer,
+      label: s.localServerEnable,
+      description: s.localServerEnableDesc,
+      keywords: s.searchKeywordsLocalServer,
+      icon: LucideIcons.code,
     ),
     SettingsSearchItem(
       category: SettingsCategory.about,
@@ -557,6 +570,10 @@ class _SettingsContent extends StatelessWidget {
                   ),
                   SettingsCategory.proxy => _ProxyContent(
                     key: const ValueKey('proxy'),
+                    settingsProvider: settingsProvider,
+                  ),
+                  SettingsCategory.localServer => _LocalServerContent(
+                    key: const ValueKey('localServer'),
                     settingsProvider: settingsProvider,
                   ),
                   SettingsCategory.about => _AboutContent(
@@ -2667,6 +2684,273 @@ class _ReadOnlyValueBox extends StatelessWidget {
           fontSize: 12,
           color: value.isEmpty ? colors.textMuted : colors.textPrimary,
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 本地下载服务子组件
+// ─────────────────────────────────────────────
+
+class _LocalServerContent extends StatelessWidget {
+  final SettingsProvider settingsProvider;
+
+  const _LocalServerContent({super.key, required this.settingsProvider});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: settingsProvider,
+      builder: (context, _) {
+        return Column(
+          children: [_LocalServerCard(settingsProvider: settingsProvider)],
+        );
+      },
+    );
+  }
+}
+
+class _LocalServerCard extends StatefulWidget {
+  final SettingsProvider settingsProvider;
+
+  const _LocalServerCard({required this.settingsProvider});
+
+  @override
+  State<_LocalServerCard> createState() => _LocalServerCardState();
+}
+
+class _LocalServerCardState extends State<_LocalServerCard> {
+  late TextEditingController _portController;
+  late TextEditingController _tokenController;
+
+  @override
+  void initState() {
+    super.initState();
+    final sp = widget.settingsProvider;
+    _portController = TextEditingController(text: sp.localServerPort.toString());
+    _tokenController = TextEditingController(text: sp.localServerToken);
+  }
+
+  @override
+  void didUpdateWidget(_LocalServerCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final sp = widget.settingsProvider;
+    if (sp.localServerPort.toString() != _portController.text) {
+      _portController.text = sp.localServerPort.toString();
+    }
+    if (sp.localServerToken != _tokenController.text) {
+      _tokenController.text = sp.localServerToken;
+    }
+  }
+
+  @override
+  void dispose() {
+    _portController.dispose();
+    _tokenController.dispose();
+    super.dispose();
+  }
+
+  String _generateToken() {
+    final r = Random.secure();
+    return base64Url
+        .encode(List.generate(24, (_) => r.nextInt(256)))
+        .replaceAll('=', '');
+  }
+
+  Future<void> _copyToken() async {
+    final token = widget.settingsProvider.localServerToken;
+    await Clipboard.setData(ClipboardData(text: token));
+    if (!mounted) return;
+    ShadSonner.of(context).show(
+      ShadToast(
+        title: Text(LocaleScope.of(context).localServerTokenCopied),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _copyScript() async {
+    try {
+      final script = await rootBundle.loadString('userscript/fluxdown.user.js');
+      await Clipboard.setData(ClipboardData(text: script));
+      if (!mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast(
+          title: Text(LocaleScope.of(context).localServerScriptCopied),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ShadSonner.of(context).show(
+        ShadToast.destructive(
+          title: Text('Error: $e'),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+    final sp = widget.settingsProvider;
+    final enabled = sp.localServerEnabled;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: c.surface1,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border.withValues(alpha: 0.6), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 标题 + 描述
+          Text(
+            s.localServerEnable,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: c.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            s.localServerEnableDesc,
+            style: TextStyle(fontSize: 11.5, color: c.textMuted),
+          ),
+          const SizedBox(height: 12),
+          // 启用开关
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  s.localServerEnable,
+                  style: TextStyle(fontSize: 13, color: c.textPrimary),
+                ),
+              ),
+              ShadSwitch(
+                value: enabled,
+                onChanged: (v) => sp.setLocalServerEnabled(v),
+              ),
+            ],
+          ),
+          if (enabled) ...[
+            const SizedBox(height: 14),
+            // 端口行
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        s.localServerPort,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: c.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        s.localServerRestartHint,
+                        style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 120,
+                  child: ShadInput(
+                    controller: _portController,
+                    onChanged: (v) {
+                      final port = int.tryParse(v);
+                      if (port != null) sp.setLocalServerPort(port);
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            // Token 行
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  s.localServerToken,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: c.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  s.localServerTokenDesc,
+                  style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  spacing: 8,
+                  children: [
+                    Expanded(
+                      child: ShadInput(
+                        controller: _tokenController,
+                        onChanged: (v) => sp.setLocalServerToken(v),
+                      ),
+                    ),
+                    ShadButton.outline(
+                      size: ShadButtonSize.sm,
+                      onPressed: () {
+                        final token = _generateToken();
+                        sp.setLocalServerToken(token);
+                        _tokenController.text = token;
+                      },
+                      child: Text(s.localServerTokenGenerate),
+                    ),
+                    ShadButton.outline(
+                      size: ShadButtonSize.sm,
+                      onPressed: _copyToken,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(LucideIcons.copy, size: 13),
+                          const SizedBox(width: 4),
+                          Text(s.localServerTokenCopy),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            // 复制油猴脚本按钮
+            ShadButton(
+              onPressed: _copyScript,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(LucideIcons.code, size: 14),
+                  const SizedBox(width: 6),
+                  Text(s.localServerCopyScript),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            // 连接地址只读预览
+            _ReadOnlyProxyField(
+              label: s.localServerAddress,
+              value: 'http://127.0.0.1:${sp.localServerPort}',
+              colors: c,
+            ),
+          ],
+        ],
       ),
     );
   }

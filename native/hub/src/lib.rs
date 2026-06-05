@@ -8,6 +8,7 @@ mod downloader;
 mod file_association;
 mod ftp_downloader;
 mod hls_downloader;
+mod http_takeover;
 mod logger;
 mod meta_prober;
 mod native_messaging;
