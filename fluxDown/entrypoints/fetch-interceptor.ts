@@ -183,13 +183,23 @@ export default defineUnlistedScript(() => {
     url: string | URL,
     ...rest: any[]
   ) {
-    const urlStr = typeof url === "string" ? url : url.href;
-    (this as any).__fluxdown_url = urlStr;
-
-    if (isStreamingUrl(urlStr)) {
-      notify("xhr-detected", urlStr, classifyStreamUrl(urlStr));
+    // 嗅探绝不可干扰页面请求（#329 #337）：取 URL 与通知整体包 try/catch。
+    // 旧实现对非 string/非 URL 的 url 直接取 url.href，页面以 undefined 等
+    // 调用 xhr.open 时抛 "Cannot read properties of undefined (reading 'href')"，
+    // 异常冒泡使原始 open 无法执行 → 打断页面 XHR（openlist 播放、微博评论）。
+    try {
+      let urlStr = "";
+      if (typeof url === "string") urlStr = url;
+      else if (url && typeof (url as any).href === "string")
+        urlStr = (url as any).href;
+      (this as any).__fluxdown_url = urlStr;
+      if (urlStr && isStreamingUrl(urlStr)) {
+        notify("xhr-detected", urlStr, classifyStreamUrl(urlStr));
+      }
+    } catch {
+      // ignore — 嗅探异常绝不能打断页面请求
     }
-
+    // 始终用原始 url 透传委托，保持页面语义
     return originalOpen.apply(this, [method, url, ...rest] as any);
   };
 

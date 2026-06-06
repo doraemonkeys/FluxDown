@@ -35,6 +35,13 @@ mod inner {
     /// Chrome extension ID — pinned via `key` in wxt.config.ts manifest.
     const CHROME_EXTENSION_ID: &str = "chrome-extension://meleenglfggcmcajknpeeeiobnpfmahc/";
 
+    /// Edge Add-ons store extension ID. Edge ignores the manifest `key` field, so
+    /// its store build gets a different ID than Chrome and must be listed
+    /// explicitly (Chromium native messaging `allowed_origins` has no wildcard).
+    /// Without this, Edge store users get "Access to the specified native
+    /// messaging host is forbidden" → extension stuck on "未连接".
+    const EDGE_EXTENSION_ID: &str = "chrome-extension://nglkkjbogjghekbhhcnccnpfedjbdhhd/";
+
     /// Firefox extension ID (matches `browser_specific_settings.gecko.id` in manifest).
     const FIREFOX_EXTENSION_ID: &str = "fluxdown@fluxdown.app";
 
@@ -134,7 +141,10 @@ mod inner {
             description: NMH_DESCRIPTION.to_string(),
             path: nmh_path_str.clone(),
             host_type: "stdio".to_string(),
-            allowed_origins: vec![CHROME_EXTENSION_ID.to_string()],
+            allowed_origins: vec![
+                CHROME_EXTENSION_ID.to_string(),
+                EDGE_EXTENSION_ID.to_string(),
+            ],
         };
         let chromium_json = serde_json::to_string_pretty(&chromium)
             .map_err(|e| io::Error::other(format!("JSON serialize error: {}", e)))?;
@@ -264,6 +274,12 @@ mod inner {
             if !content.contains(&expected_exe) {
                 return true;
             }
+            // Content versioning: an existing manifest predating Edge support
+            // lacks the Edge origin. Force a rewrite so upgraded users get it
+            // (path-only checks above would otherwise return false and skip register()).
+            if !content.contains(EDGE_EXTENSION_ID) {
+                return true;
+            }
         }
 
         // Firefox 是可选浏览器：注册表项不存在时跳过，不触发重新注册。
@@ -364,6 +380,10 @@ mod inner {
     const MANIFEST_FILENAME_CHROMIUM: &str = "com.fluxdown.nmh.json";
     const MANIFEST_FILENAME_FIREFOX: &str = "com.fluxdown.nmh.json";
     const CHROME_EXTENSION_ID: &str = "chrome-extension://meleenglfggcmcajknpeeeiobnpfmahc/";
+    /// Edge Add-ons store extension ID — differs from Chrome (Edge ignores the
+    /// manifest `key`) and must be whitelisted explicitly, else Edge store users
+    /// get "forbidden" on connectNative → stuck on "未连接".
+    const EDGE_EXTENSION_ID: &str = "chrome-extension://nglkkjbogjghekbhhcnccnpfedjbdhhd/";
     const FIREFOX_EXTENSION_ID: &str = "fluxdown@fluxdown.app";
 
     #[derive(Serialize)]
@@ -471,6 +491,8 @@ mod inner {
                 .join("native-messaging-hosts"),
             // LibreWolf (privacy-focused Firefox fork, verified via official FAQ)
             home.join(".librewolf").join("native-messaging-hosts"),
+            // Zen Browser (Firefox fork, uses its own ~/.zen profile root, #313)
+            home.join(".zen").join("native-messaging-hosts"),
             // Flatpak LibreWolf
             var_app
                 .join("io.gitlab.librewolf-community")
@@ -566,7 +588,10 @@ mod inner {
             description: NMH_DESCRIPTION.to_string(),
             path: wrapper.to_string_lossy().into_owned(),
             host_type: "stdio".to_string(),
-            allowed_origins: vec![CHROME_EXTENSION_ID.to_string()],
+            allowed_origins: vec![
+                CHROME_EXTENSION_ID.to_string(),
+                EDGE_EXTENSION_ID.to_string(),
+            ],
         };
         let json = serde_json::to_string_pretty(&manifest)
             .map_err(|e| io::Error::other(format!("JSON error: {}", e)))?;
@@ -614,11 +639,13 @@ mod inner {
 
         let wrapper_str = wp.to_string_lossy().into_owned();
 
-        // At least one Chromium dir must have a manifest pointing to the wrapper.
+        // At least one Chromium dir must have a manifest pointing to the wrapper
+        // AND containing the Edge origin (content versioning: rewrite manifests
+        // predating Edge support so upgraded users get the Edge allowed_origins).
         let chromium_ok = chromium_nmh_dirs().iter().any(|dir| {
             let path = dir.join(MANIFEST_FILENAME_CHROMIUM);
             std::fs::read_to_string(path)
-                .map(|c| c.contains(&wrapper_str))
+                .map(|c| c.contains(&wrapper_str) && c.contains(EDGE_EXTENSION_ID))
                 .unwrap_or(false)
         });
 
@@ -717,6 +744,10 @@ mod inner {
     const NMH_WRAPPER_NAME: &str = "fluxdown_nmh.sh";
     const MANIFEST_FILENAME: &str = "com.fluxdown.nmh.json";
     const CHROME_EXTENSION_ID: &str = "chrome-extension://meleenglfggcmcajknpeeeiobnpfmahc/";
+    /// Edge Add-ons store extension ID — differs from Chrome (Edge ignores the
+    /// manifest `key`) and must be whitelisted explicitly, else Edge store users
+    /// get "forbidden" on connectNative → stuck on "未连接".
+    const EDGE_EXTENSION_ID: &str = "chrome-extension://nglkkjbogjghekbhhcnccnpfedjbdhhd/";
     const FIREFOX_EXTENSION_ID: &str = "fluxdown@fluxdown.app";
 
     #[derive(Serialize)]
@@ -912,7 +943,10 @@ mod inner {
             description: NMH_DESCRIPTION.to_string(),
             path: wrapper.to_string_lossy().into_owned(),
             host_type: "stdio".to_string(),
-            allowed_origins: vec![CHROME_EXTENSION_ID.to_string()],
+            allowed_origins: vec![
+                CHROME_EXTENSION_ID.to_string(),
+                EDGE_EXTENSION_ID.to_string(),
+            ],
         };
         let json = serde_json::to_string_pretty(&manifest)
             .map_err(|e| io::Error::other(format!("JSON error: {}", e)))?;
@@ -976,11 +1010,13 @@ mod inner {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // At least one Chromium dir must have a manifest pointing to the wrapper.
+        // At least one Chromium dir must have a manifest pointing to the wrapper
+        // AND containing the Edge origin (content versioning: rewrite manifests
+        // predating Edge support so upgraded users get the Edge allowed_origins).
         let chromium_ok = chromium_nmh_dirs().iter().any(|dir| {
             let path = dir.join(MANIFEST_FILENAME);
             std::fs::read_to_string(path)
-                .map(|c| c.contains(&wrapper_str))
+                .map(|c| c.contains(&wrapper_str) && c.contains(EDGE_EXTENSION_ID))
                 .unwrap_or(false)
         });
 

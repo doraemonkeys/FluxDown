@@ -2073,13 +2073,14 @@ export default defineBackground(() => {
    * 用于 onDeterminingFilename 同步路径中，下载已被 cancel+erase 后需要恢复的场景。
    * 设置 bypassToken 防止新下载被再次拦截。
    *
-   * @param silent - 静默模式，不弹出通知。用于冷启动预防拦截中"不应拦截→回退"
-   *                 等场景，这些场景对用户来说是正常行为，弹通知反而造成困惑。
+   * @param silent - 静默模式，不弹出通知。默认 true：所有现有调用方都显式静默，
+   *                 失败通知统一由 fallbackAfterSendFailure 的一次性提示接管。
+   *                 默认静默可避免未来新增调用方误触发逐次回退弹窗（#308 #346）。
    */
   async function fallbackToBrowserDownload(
     url: string,
     filename?: string,
-    silent = false,
+    silent = true,
   ) {
     // 设置 bypass token，15 秒内对该 URL 的下载不拦截
     bypassTokens.set(url, Date.now() + 15_000);

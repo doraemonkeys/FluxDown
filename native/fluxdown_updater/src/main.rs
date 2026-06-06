@@ -305,15 +305,14 @@ fn do_portable_zip(zip: &Path, dir: &Path, exe: &str) -> Result<(), UpdaterError
 fn do_setup(installer: &Path) -> Result<(), UpdaterError> {
     log_msg(&format!("setup: installer={}", installer.display())).ok();
 
-    // Remove the Zone.Identifier ADS (Mark of the Web) from the downloaded
-    // installer.  On Windows 11 with Smart App Control enabled this is
-    // essential: our updater binary is already installed and trusted, so it is
-    // allowed to unblock files on behalf of the user.
-    #[cfg(target_os = "windows")]
-    remove_zone_identifier(installer);
-
     #[cfg(target_os = "windows")]
     {
+        // Remove the Zone.Identifier ADS (Mark of the Web) from the downloaded
+        // installer.  On Windows 11 with Smart App Control enabled this is
+        // essential: our updater binary is already installed and trusted, so it
+        // is allowed to unblock files on behalf of the user.
+        remove_zone_identifier(installer);
+
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -322,14 +321,14 @@ fn do_setup(installer: &Path) -> Result<(), UpdaterError> {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(UpdaterError::Io)?;
+
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
-    return Err(UpdaterError::Other(
+    Err(UpdaterError::Other(
         "setup mode is only supported on Windows".to_string(),
-    ));
-
-    Ok(())
+    ))
 }
 
 /// Linux AppImage: replace current AppImage with new one and relaunch.
@@ -354,7 +353,7 @@ fn do_appimage(src: &Path, dst: &Path) -> Result<(), UpdaterError> {
             .spawn()
             .map_err(UpdaterError::Io)?;
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -392,7 +391,7 @@ fn do_tarball(tarball: &Path, dir: &Path, exe: &str) -> Result<(), UpdaterError>
             .spawn()
             .map_err(UpdaterError::Io)?;
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -408,7 +407,7 @@ fn do_pkg_deb(package: &Path) -> Result<(), UpdaterError> {
     {
         log_msg(&format!("deb: {}", package.display())).ok();
         pkexec_install(&["dpkg", "-i", &package.to_string_lossy()])?;
-        return restart_current_exe();
+        restart_current_exe()
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -424,7 +423,7 @@ fn do_pkg_arch(package: &Path) -> Result<(), UpdaterError> {
     {
         log_msg(&format!("arch: {}", package.display())).ok();
         pkexec_install(&["pacman", "-U", "--noconfirm", &package.to_string_lossy()])?;
-        return restart_current_exe();
+        restart_current_exe()
     }
 
     #[cfg(not(target_os = "linux"))]
