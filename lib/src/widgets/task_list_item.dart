@@ -50,6 +50,24 @@ class TaskListItem extends StatefulWidget {
 class _TaskListItemState extends State<TaskListItem> {
   bool _isHovered = false;
 
+  // 手动双击检测：避免使用 GestureDetector.onDoubleTap，
+  // 否则手势竞技场会为等待第二次点击而延迟单击响应。
+  DateTime? _lastTapTime;
+  static const _doubleTapWindow = Duration(milliseconds: 280);
+
+  /// 单击立即触发；若与上一次点击间隔在双击窗口内，则额外触发双击。
+  void _handleTapDown() {
+    final now = DateTime.now();
+    final last = _lastTapTime;
+    if (last != null && now.difference(last) < _doubleTapWindow) {
+      _lastTapTime = null; // 消费掉，避免三连击误判
+      widget.onDoubleTap?.call();
+    } else {
+      _lastTapTime = now;
+      widget.onTap();
+    }
+  }
+
   void _showContextMenu(TapDownDetails details) {
     showTaskContextMenu(
       context,
@@ -74,8 +92,12 @@ class _TaskListItemState extends State<TaskListItem> {
       onExit: (_) => setState(() => _isHovered = false),
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: isManage ? widget.onToggleChecked : widget.onTap,
-        onDoubleTap: isManage ? null : widget.onDoubleTap,
+        // 管理模式：单击切换勾选（非幂等），无双击需求，直接用 onTap。
+        // 非管理模式：用 onTapDown + 手动双击检测，单击立即响应、零延迟，
+        //   双击仍可触发；避免 GestureDetector.onDoubleTap 因等待第二击
+        //   而把单击延迟 ~300ms。
+        onTap: isManage ? widget.onToggleChecked : null,
+        onTapDown: isManage ? null : (_) => _handleTapDown(),
         onSecondaryTapDown: isManage ? null : _showContextMenu,
         child: Container(
           height: 64,
