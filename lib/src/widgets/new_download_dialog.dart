@@ -138,11 +138,21 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
 
   // ── 磁力链接等待文件列表状态机 ─────────────────────────────────────────────
   // 状态：null = 普通模式；'probing' = 已创建任务正在等待 DHT 解析；
-  //        'selecting' = 文件列表已到达，等待用户选择
-  String? _btWaitPhase; // null | 'probing' | 'selecting'
+  //        'selecting' = 文件列表已到达，等待用户选择；
+  //        'error' = 解析失败（任务已转 error，如元数据解析超时）
+  String? _btWaitPhase; // null | 'probing' | 'selecting' | 'error'
 
   /// 收到 BtFilesInfo 后记录的真实 task_id（用于发送 SelectBtFiles）
   String? _btPendingTaskId;
+
+  /// 提交的磁力链接 URL（probing 阶段 task_id 未知，用 URL 匹配错误信号）
+  String? _btSubmittedUrl;
+
+  /// 解析失败时 Rust 返回的错误消息（phase=error 时显示）
+  String _btErrorMessage = '';
+
+  /// TaskProgress 信号订阅 — 监听磁力任务在等待阶段转入 error 状态（#379）
+  StreamSubscription<RustSignalPack<TaskProgress>>? _btProgressSub;
 
   /// 收到的 BT 文件列表（Phase=selecting 时非空）
   List<BtFileEntry> _btFiles = [];
@@ -189,6 +199,38 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
         : _effectiveSegmentsOption(_selectedQueueId);
     // 订阅 torrent meta 解析结果（.torrent 文件预解析）
     _metaSub = TorrentMetaResult.rustSignalStream.listen(_onTorrentMetaResult);
+    // 订阅任务进度 — 磁力等待阶段任务转 error 时跳出等待并展示错误（#379）
+    _btProgressSub = TaskProgress.rustSignalStream.listen(_onBtTaskProgress);
+  }
+
+  /// 磁力等待阶段（probing/selecting）监听任务错误信号。
+  ///
+  /// Rust 端磁力元数据解析超时（或其他失败）会把任务标为 status=4 并发
+  /// TaskProgress，但不会发 BtFilesInfo——若不处理，对话框会永远停留在
+  /// “正在解析磁力链接”。probing 阶段 task_id 未知，用任务 URL 与提交的
+  /// 磁力链接匹配；selecting 阶段直接按 task_id 匹配。
+  void _onBtTaskProgress(RustSignalPack<TaskProgress> pack) {
+    final msg = pack.message;
+    if (!mounted) return;
+    if (_btWaitPhase != 'probing' && _btWaitPhase != 'selecting') return;
+    if (msg.status != 4) return;
+
+    if (_btWaitPhase == 'selecting') {
+      if (msg.taskId != _btPendingTaskId) return;
+    } else {
+      // probing：通过 controller 中的任务记录用 URL 匹配
+      final task = widget.controller.tasks
+          .where((t) => t.id == msg.taskId)
+          .firstOrNull;
+      if (task == null || task.url != _btSubmittedUrl) return;
+    }
+
+    BtFileSelectionService.registerPendingHandler(null);
+    setState(() {
+      _btWaitPhase = 'error';
+      _btErrorMessage = msg.errorMessage;
+      _btPendingTaskId = null;
+    });
   }
 
   /// 由 [BtFileSelectionService] 回调：DHT 解析完成，文件列表已就绪。
@@ -376,10 +418,11 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
       _btCancelPending = true;
       // 不清除 Service 回调——让信号路由过来，回调发 [-1] 后 Rust 暂停任务
     } else {
-      // 普通关闭，清除任何残留的 Service 回调
+      // 普通关闭（含 error 阶段），清除任何残留的 Service 回调
       BtFileSelectionService.registerPendingHandler(null);
     }
     _metaSub?.cancel();
+    _btProgressSub?.cancel();
     _urlController.removeListener(_onUrlChanged);
     _urlController.dispose();
     _urlFocusNode.dispose();
@@ -902,6 +945,8 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
       setState(() {
         _btWaitPhase = 'probing';
         _btPendingTaskId = null;
+        _btSubmittedUrl = entry.url;
+        _btErrorMessage = '';
       });
       return;
     }
@@ -1008,9 +1053,9 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
           Text(s.newDownload),
         ],
       ),
-      description: Text(
-        _btWaitPhase != null ? s.btWaitingFiles : s.batchDownloadDesc,
-      ),
+      description: _btWaitPhase == 'error'
+          ? null
+          : Text(_btWaitPhase != null ? s.btWaitingFiles : s.batchDownloadDesc),
       actions: _btWaitPhase != null
           ? _buildBtWaitActions(s, c)
           : [
@@ -1564,6 +1609,18 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
         ),
       ];
     }
+    if (_btWaitPhase == 'error') {
+      // 解析失败：只显示关闭按钮（任务已是 error 状态，无需再发 [-1]）
+      return [
+        ShadButton.outline(
+          onPressed: () {
+            _btWaitPhase = null;
+            if (mounted) Navigator.of(context).pop();
+          },
+          child: Text(s.close),
+        ),
+      ];
+    }
     // selecting 阶段
     return [
       ShadButton.outline(
@@ -1592,6 +1649,42 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
 
   /// 构建磁力链接等待阶段的对话框主体
   Widget _buildBtWaitBody(S s, AppColors c) {
+    if (_btWaitPhase == 'error') {
+      // 解析失败：错误提示
+      return Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: c.statusError.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: c.statusError.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(LucideIcons.circleAlert, size: 13, color: c.statusError),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    s.btResolveFailed,
+                    style: TextStyle(fontSize: 12.5, color: c.statusError),
+                  ),
+                  if (_btErrorMessage.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      _btErrorMessage,
+                      style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     if (_btWaitPhase == 'probing') {
       // 解析中：loading 动画
       return Container(

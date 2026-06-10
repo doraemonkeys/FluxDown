@@ -37,7 +37,7 @@ enum SettingsCategory {
   download(icon: LucideIcons.download),
   bt(icon: LucideIcons.magnet),
   proxy(icon: LucideIcons.globe),
-  localServer(icon: LucideIcons.code),
+  localServer(icon: LucideIcons.server),
   about(icon: LucideIcons.info);
 
   final IconData icon;
@@ -232,7 +232,7 @@ List<SettingsSearchItem> get settingsSearchItems {
       label: s.localServerEnable,
       description: s.localServerEnableDesc,
       keywords: s.searchKeywordsLocalServer,
-      icon: LucideIcons.code,
+      icon: LucideIcons.server,
     ),
     SettingsSearchItem(
       category: SettingsCategory.about,
@@ -2900,6 +2900,19 @@ class _LocalServerCardState extends State<_LocalServerCard> {
     );
   }
 
+  Future<void> _copyRpcAddress() async {
+    final url =
+        'http://127.0.0.1:${widget.settingsProvider.localServerPort}/jsonrpc';
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    ShadSonner.of(context).show(
+      ShadToast(
+        title: Text(LocaleScope.of(context).localServerAddressCopied),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _copyScript() async {
     try {
       final script = await rootBundle.loadString('userscript/fluxdown.user.js');
@@ -3073,11 +3086,36 @@ class _LocalServerCardState extends State<_LocalServerCard> {
               ),
             ),
             const SizedBox(height: 14),
-            // 连接地址只读预览
-            _ReadOnlyProxyField(
-              label: s.localServerAddress,
-              value: 'http://127.0.0.1:${sp.localServerPort}',
-              colors: c,
+            // RPC 地址只读预览 + 快速复制（aria2 兼容端点 /jsonrpc）
+            Row(
+              children: [
+                SizedBox(
+                  width: 80,
+                  child: Text(
+                    s.localServerAddress,
+                    style: TextStyle(fontSize: 12, color: c.textSecondary),
+                  ),
+                ),
+                Expanded(
+                  child: _ReadOnlyValueBox(
+                    value: 'http://127.0.0.1:${sp.localServerPort}/jsonrpc',
+                    colors: c,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ShadButton.outline(
+                  size: ShadButtonSize.sm,
+                  onPressed: _copyRpcAddress,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(LucideIcons.copy, size: 13),
+                      const SizedBox(width: 4),
+                      Text(s.localServerTokenCopy),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ],

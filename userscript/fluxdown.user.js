@@ -825,7 +825,7 @@
     add('📂 显示/隐藏 资源面板', () => togglePanel());
     add('⬇ 下载本页全部链接', () => downloadAllLinks());
     add(`🔌 设置端口（当前 ${CFG.port}）`, () => {
-      const p = prompt('FluxDown 本地服务端口（与设置页一致，默认 17800）：', String(CFG.port));
+      const p = prompt('FluxDown RPC 端口（与设置页一致，默认 17800）：', String(CFG.port));
       if (p !== null) {
         const n = parseInt(p.trim(), 10);
         if (n >= 1 && n <= 65535) { CFG.port = n; toast(`端口已设为 ${n}`); registerMenu(); }
@@ -833,13 +833,13 @@
       }
     });
     add('🔑 设置 Token（可选）', () => {
-      const t = prompt('FluxDown 访问 Token（在 FluxDown 设置页生成，可留空）：', CFG.token);
+      const t = prompt('FluxDown RPC 授权密钥（在 FluxDown 设置页生成，可留空）：', CFG.token);
       if (t !== null) { CFG.token = t.trim(); toast('Token 已保存'); }
     });
     add('🩺 测试连接', async () => {
       toast('正在测试…');
       const ok = await ping();
-      toast(ok ? `已连接 FluxDown（${base()}）` : `无法连接 ${base()}，请确认 FluxDown 已启动且本地服务已开启`, !ok);
+      toast(ok ? `已连接 FluxDown（${base()}）` : `无法连接 ${base()}，请确认 FluxDown 已启动且 RPC 服务已开启`, !ok);
     });
   }
 

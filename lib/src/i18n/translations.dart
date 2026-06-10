@@ -29,6 +29,7 @@ class S {
 
   String get cancel => _t('取消', 'Cancel');
   String get confirm => _t('确定', 'OK');
+  String get close => _t('关闭', 'Close');
   String get back => _t('返回', 'Back');
   String get settings => _t('设置', 'Settings');
   String get browse => _t('浏览', 'Browse');
@@ -324,6 +325,10 @@ class S {
       _t('下载 $count 个文件（$size）', 'Download $count file(s) ($size)');
   String get btResolvingMagnet =>
       _t('正在解析磁力链接，请稍候...', 'Resolving magnet link, please wait...');
+  String get btResolveFailed => _t(
+    '磁力链接解析失败：未获取到元数据（无可用 peers 或 DHT 被屏蔽）。任务已标记为错误，可稍后在任务列表重试。',
+    'Failed to resolve magnet link: no metadata received (no peers or DHT blocked). The task was marked as error; you can retry it later from the task list.',
+  );
   String get btWaitingFiles => _t('请选择要下载的文件', 'Select files to download');
   String get btProbing => _t('正在解析种子文件...', 'Parsing torrent file...');
   String get btProbeError => _t(
@@ -364,7 +369,7 @@ class S {
   String get settingsCatBtDesc => _t('BT 下载设置', 'BitTorrent settings');
   String get settingsCatProxy => _t('代理', 'Proxy');
   String get settingsCatProxyDesc => _t('网络代理配置', 'Network proxy settings');
-  String get settingsCatLocalServer => _t('本地服务', 'Local Service');
+  String get settingsCatLocalServer => _t('RPC', 'RPC');
   String get settingsCatLocalServerDesc =>
       _t('油猴脚本接管浏览器下载', 'Capture browser downloads via userscript');
   String get settingsCatAbout => _t('关于', 'About');
@@ -718,19 +723,18 @@ class S {
   String get taskHeadersAdd => _t('添加请求头', 'Add header');
 
   // ─────────────────────────────────────────────
-  // Settings — 本地下载服务
+  // Settings — RPC
   // ─────────────────────────────────────────────
 
-  String get localServerEnable =>
-      _t('启用本地下载服务', 'Enable Local Download Service');
+  String get localServerEnable => _t('启用 RPC 服务', 'Enable RPC Service');
   String get localServerEnableDesc => _t(
-    '启动本地 HTTP 服务（仅 127.0.0.1），供 FluxDown 油猴脚本接管浏览器下载',
-    'Start a local HTTP server (127.0.0.1 only) for the FluxDown userscript to capture downloads',
+    '启动本地 RPC 服务（仅 127.0.0.1），供 FluxDown 油猴脚本接管浏览器下载',
+    'Start a local RPC service (127.0.0.1 only) for the FluxDown userscript to capture downloads',
   );
-  String get localServerPort => _t('监听端口', 'Listen Port');
+  String get localServerPort => _t('RPC 监听端口', 'RPC Listen Port');
   String get localServerPortDesc =>
       _t('默认 17800，修改后需重启应用生效', 'Default 17800; restart required to apply');
-  String get localServerToken => _t('访问 Token（可选）', 'Access Token (optional)');
+  String get localServerToken => _t('RPC 授权密钥（可选）', 'RPC Secret (optional)');
   String get localServerTokenDesc => _t(
     '留空则免鉴权（仍受确认弹框保护）；填写后需在油猴脚本菜单中填入相同 Token',
     'Leave empty for no auth (still protected by the confirm dialog); if set, enter the same token in the userscript menu',
@@ -743,13 +747,14 @@ class S {
     '脚本已复制，请在 Tampermonkey 新建脚本粘贴',
     'Script copied; paste it into a new Tampermonkey script',
   );
-  String get localServerAddress => _t('连接地址', 'Connection URL');
+  String get localServerAddress => _t('RPC 地址', 'RPC URL');
+  String get localServerAddressCopied => _t('RPC 地址已复制', 'RPC URL copied');
   String get localServerRestartHint =>
       _t('修改端口后需重启应用生效', 'Restart the app after changing the port');
   List<String> get searchKeywordsLocalServer => _t(
-    '油猴,脚本,接管,本地,服务,端口,token,浏览器',
-    'userscript,tampermonkey,capture,local,server,port,token,browser',
-  ).split(',')..addAll(['userscript', 'tampermonkey', 'local', 'server']);
+    'rpc,油猴,脚本,接管,本地,服务,端口,token,密钥,浏览器',
+    'rpc,userscript,tampermonkey,capture,local,server,port,token,secret,browser',
+  ).split(',')..addAll(['rpc', 'userscript', 'tampermonkey']);
 
   // ─────────────────────────────────────────────
   // Settings — BT 下载
