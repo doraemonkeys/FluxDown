@@ -12,7 +12,6 @@
 #   - 失败立即中止，不会留下半启动状态
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
