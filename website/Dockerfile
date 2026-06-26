@@ -6,9 +6,10 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # 仅先复制依赖声明，利用 Docker layer 缓存
-COPY package.json package-lock.json ./
+# 本地用 bun/pnpm，不维护 package-lock.json，故用 install 而非 ci（lock 文件可有可无）
+COPY package.json ./
 
-RUN npm ci
+RUN npm install
 
 # 复制源码
 COPY . .
