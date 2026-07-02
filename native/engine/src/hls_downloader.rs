@@ -1355,6 +1355,17 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
 
 const MAX_REMUX_BYTES: u64 = 512 * 1024 * 1024;
 
+/// remux 需要 dest 卷至少还有 `file_len`(mp4 产物 ≈ ts 体积,仅重封装
+/// 无转码)+ 安全余量——remux 期间 `.ts` 与 `.mp4` 并存,峰值 ≈ 2x。
+/// `avail=None`(网络盘/权限/超时,无法探测)按放行处理:预检是优化,
+/// 安全网是下方既有的写失败清理路径。
+fn remux_space_ok(avail: Option<u64>, file_len: u64) -> bool {
+    match avail {
+        Some(a) => a >= file_len.saturating_add(crate::disk_space::PRECHECK_MARGIN),
+        None => true,
+    }
+}
+
 async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<PathBuf> {
     let ext = ts_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !ext.eq_ignore_ascii_case("ts") {
@@ -1376,6 +1387,18 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
     }
 
     let parent = ts_path.parent()?;
+
+    // ENOSPC 预检:空间不足时跳过 remux,走既有"保留 .ts"降级路径。
+    let avail = crate::disk_space::available_space_checked(parent.to_path_buf()).await;
+    if !remux_space_ok(avail, file_len) {
+        log_info!(
+            "[hls] task {} skipping TS→MP4 remux: insufficient disk space (avail={:?}, need {}+margin), keeping .ts",
+            task_id,
+            avail,
+            file_len
+        );
+        return None;
+    }
     let stem = ts_path.file_stem().and_then(|s| s.to_str())?;
     let desired_name = format!("{}.mp4", stem);
     let unique_name =
@@ -1695,7 +1718,8 @@ async fn download_segment_once(
 mod tests {
     use super::{
         DEFAULT_HLS_CONCURRENCY, MAX_HLS_CONCURRENCY, compute_default_iv, decrypt_segment,
-        hls_concurrency, is_hls_url, parse_iv_hex, parse_resume_checkpoint, resolve_uri,
+        hls_concurrency, is_hls_url, parse_iv_hex, parse_resume_checkpoint, remux_space_ok,
+        resolve_uri,
     };
     use aes::Aes128;
     use cbc::cipher::block_padding::{NoPadding, Pkcs7};
@@ -1713,6 +1737,24 @@ mod tests {
             .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf)
             .ok()?;
         Some(ct.to_vec())
+    }
+
+    // ---------------------------------------------------------------------
+    // remux_space_ok — ENOSPC 预检阈值(remux 期间 .ts 与 .mp4 并存 ≈ 2x)。
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn remux_space_ok_thresholds() {
+        const MARGIN: u64 = crate::disk_space::PRECHECK_MARGIN;
+        let file_len = 100 * 1024 * 1024u64;
+        // 无法探测(网络盘/超时)→ 乐观放行。
+        assert!(remux_space_ok(None, file_len));
+        // 恰好够(file_len + margin)→ 放行。
+        assert!(remux_space_ok(Some(file_len + MARGIN), file_len));
+        // 差 1 字节 → 拒绝。
+        assert!(!remux_space_ok(Some(file_len + MARGIN - 1), file_len));
+        // 溢出安全:file_len 接近 u64::MAX 时 saturating_add 不回绕。
+        assert!(!remux_space_ok(Some(u64::MAX - 1), u64::MAX));
     }
 
     /// No-padding encrypt (input must be block-aligned), returning ciphertext.

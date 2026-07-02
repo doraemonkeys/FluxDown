@@ -141,15 +141,34 @@ pub async fn run_dash_download(params: DownloadParams) {
 ///
 /// The muxing is done with `-c copy` (stream copy, no re-encoding) which is
 /// near-instant regardless of file size.
+///
+/// `expected_bytes`:muxed 产物预估大小(≈ video+audio 之和,stream copy
+/// 无转码)。用于 ENOSPC 预检——mux 期间 video、audio、muxed_tmp 三文件
+/// 并存,峰值 ≈ 2x;空间不足时提前返回 Err,复用调用方"mux 失败保留
+/// 双文件"的既有降级分支,避免 ffmpeg 中途 ENOSPC。
 async fn mux_audio_video(
     video_path: &Path,
     audio_path: &Path,
+    expected_bytes: u64,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), DownloadError> {
     use tokio::process::Command;
 
     // Build a temporary output path to avoid overwriting the video while muxing
     let muxed_tmp = video_path.with_extension("muxed.mp4");
+
+    // ENOSPC 预检:None(网络盘/超时,无法探测)乐观放行——预检是优化,
+    // 安全网是下方既有的 ffmpeg 失败清理路径。
+    if let Some(parent) = video_path.parent() {
+        let avail = crate::disk_space::available_space_checked(parent.to_path_buf()).await;
+        if let Some(a) = avail
+            && a < expected_bytes.saturating_add(crate::disk_space::PRECHECK_MARGIN)
+        {
+            return Err(DownloadError::Other(format!(
+                "insufficient disk space for mux: need ~{expected_bytes}B + margin, have {a}B"
+            )));
+        }
+    }
 
     let video_str = video_path.to_string_lossy().to_string();
     let audio_str = audio_path.to_string_lossy().to_string();
@@ -394,7 +413,8 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     let mut mux_succeeded = true;
     if audio_bytes > 0 {
         let audio_path = build_audio_path(&dest_path);
-        match mux_audio_video(&dest_path, &audio_path, &p.cancel_token).await {
+        let expected = (video_bytes + audio_bytes).max(0) as u64;
+        match mux_audio_video(&dest_path, &audio_path, expected, &p.cancel_token).await {
             Ok(()) => {
                 log_info!(
                     "[dash] task {} audio+video muxed successfully, cleaning up audio track",
