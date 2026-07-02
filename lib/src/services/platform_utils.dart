@@ -1,8 +1,7 @@
 import 'dart:io';
 
 /// Marker file name — a zero-byte file placed next to the exe by the portable
-/// ZIP distribution.  Matches the Rust-side `PORTABLE_MARKER` constant and
-/// the existing `_portableMarker` in `windows_toast_helper.dart`.
+/// ZIP distribution.  Matches the Rust-side `PORTABLE_MARKER` constant.
 const portableMarker = 'portable';
 
 /// Whether the current Windows installation is portable mode.

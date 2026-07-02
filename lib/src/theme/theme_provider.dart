@@ -259,6 +259,10 @@ class ThemeProvider extends ChangeNotifier {
     return _cachedTokens!;
   }
 
+  /// 免 BuildContext 解析指定亮/暗模式下的生效 token
+  /// （供离屏渲染等无 context 场景使用，如 Win32 Toast 卡片）。
+  FluxThemeTokens tokensFor({required bool dark}) => _computeTokens(dark);
+
   FluxThemeTokens _computeTokens(bool dark) {
     // 优先级 1：选中的导入主题
     final customId = dark ? _selectedCustomDarkId : _selectedCustomLightId;

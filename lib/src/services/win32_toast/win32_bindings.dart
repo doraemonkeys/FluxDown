@@ -9,15 +9,10 @@ import 'package:ffi/ffi.dart';
 
 typedef HWND = IntPtr;
 typedef HDC = IntPtr;
-typedef HBRUSH = IntPtr;
-typedef HFONT = IntPtr;
 typedef HBITMAP = IntPtr;
 typedef HGDIOBJ = IntPtr;
 typedef HINSTANCE = IntPtr;
 typedef HCURSOR = IntPtr;
-typedef HRGN = IntPtr;
-typedef UINT_PTR = IntPtr;
-typedef LONG_PTR = IntPtr;
 typedef WPARAM = IntPtr;
 typedef LPARAM = IntPtr;
 typedef LRESULT = IntPtr;
@@ -55,19 +50,50 @@ final class RECT extends Struct {
   external int bottom;
 }
 
-/// PAINTSTRUCT 结构体（仅作备用，新实现不使用 WM_PAINT）
-final class PAINTSTRUCT extends Struct {
-  @IntPtr()
-  external int hdc;
+/// SIZE 结构体
+final class SIZE extends Struct {
   @Int32()
-  external int fErase;
-  external RECT rcPaint;
+  external int cx;
   @Int32()
-  external int fRestore;
+  external int cy;
+}
+
+/// BLENDFUNCTION 结构体
+final class BLENDFUNCTION extends Struct {
+  @Uint8()
+  external int BlendOp;
+  @Uint8()
+  external int BlendFlags;
+  @Uint8()
+  external int SourceConstantAlpha;
+  @Uint8()
+  external int AlphaFormat;
+}
+
+/// BITMAPINFOHEADER 结构体
+final class BITMAPINFOHEADER extends Struct {
+  @Uint32()
+  external int biSize;
   @Int32()
-  external int fIncUpdate;
-  @Array(32)
-  external Array<Uint8> rgbReserved;
+  external int biWidth;
+  @Int32()
+  external int biHeight;
+  @Uint16()
+  external int biPlanes;
+  @Uint16()
+  external int biBitCount;
+  @Uint32()
+  external int biCompression;
+  @Uint32()
+  external int biSizeImage;
+  @Int32()
+  external int biXPelsPerMeter;
+  @Int32()
+  external int biYPelsPerMeter;
+  @Uint32()
+  external int biClrUsed;
+  @Uint32()
+  external int biClrImportant;
 }
 
 /// WNDCLASSEXW 结构体
@@ -95,18 +121,6 @@ final class WNDCLASSEXW extends Struct {
   external int hIconSm;
 }
 
-/// TRACKMOUSEEVENT 结构体（保留备用）
-final class TRACKMOUSEEVENT extends Struct {
-  @Uint32()
-  external int cbSize;
-  @Uint32()
-  external int dwFlags;
-  @IntPtr()
-  external int hwndTrack;
-  @Uint32()
-  external int dwHoverTime;
-}
-
 // =============================================================================
 // Win32 常量
 // =============================================================================
@@ -123,54 +137,22 @@ const int WS_EX_LAYERED = 0x00080000;
 // ShowWindow commands
 const int SW_SHOWNOACTIVATE = 4;
 
-// SetWindowPos flags
-const int SWP_NOACTIVATE = 0x0010;
-const int SWP_SHOWWINDOW = 0x0040;
-
-// SetLayeredWindowAttributes flags
-const int LWA_ALPHA = 0x00000002;
-
-// GDI constants
-const int TRANSPARENT = 1;
-const int NULL_BRUSH = 5;
-
-// DT_ flags for DrawTextW (user32.dll)
-const int DT_LEFT = 0x00000000;
-const int DT_CENTER = 0x00000001;
-const int DT_RIGHT = 0x00000002;
-const int DT_VCENTER = 0x00000004;
-const int DT_SINGLELINE = 0x00000020;
-const int DT_END_ELLIPSIS = 0x00008000;
-const int DT_NOPREFIX = 0x00000800;
-
 // SystemParametersInfoW
 const int SPI_GETWORKAREA = 0x0030;
-
-// DWM
-const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
-const int DWMWCP_ROUND = 2;
-
-// Font weight
-const int FW_NORMAL = 400;
-const int FW_SEMIBOLD = 600;
-const int FW_BOLD = 700;
-
-// Font charset & quality
-const int DEFAULT_CHARSET = 1;
-const int CLEARTYPE_QUALITY = 5;
-const int OUT_DEFAULT_PRECIS = 0;
-const int CLIP_DEFAULT_PRECIS = 0;
-const int DEFAULT_PITCH = 0;
-const int FF_DONTCARE = 0;
-
-// SRCCOPY for BitBlt
-const int SRCCOPY = 0x00CC0020;
 
 // Virtual key codes
 const int VK_LBUTTON = 0x01;
 
-// HWND insert-after values
-const int HWND_TOPMOST = -1;
+// BLENDFUNCTION 常量
+const int AC_SRC_OVER = 0x00;
+const int AC_SRC_ALPHA = 0x01;
+
+// UpdateLayeredWindow flags
+const int ULW_ALPHA = 0x00000002;
+
+// BITMAPINFOHEADER 常量
+const int BI_RGB = 0;
+const int DIB_RGB_COLORS = 0;
 
 // =============================================================================
 // DLL 句柄
@@ -179,7 +161,6 @@ const int HWND_TOPMOST = -1;
 final _user32 = DynamicLibrary.open('user32.dll');
 final _gdi32 = DynamicLibrary.open('gdi32.dll');
 final _kernel32 = DynamicLibrary.open('kernel32.dll');
-final _dwmapi = DynamicLibrary.open('dwmapi.dll');
 
 // =============================================================================
 // kernel32.dll
@@ -261,14 +242,6 @@ final showWindow = _user32
 final defWindowProcWPtr = _user32
     .lookup<NativeFunction<WNDPROC_Native>>('DefWindowProcW');
 
-// GetSystemMetrics
-typedef _GetSystemMetrics_Native = Int32 Function(Int32 nIndex);
-typedef _GetSystemMetrics_Dart = int Function(int nIndex);
-final getSystemMetrics = _user32
-    .lookupFunction<_GetSystemMetrics_Native, _GetSystemMetrics_Dart>(
-      'GetSystemMetrics',
-    );
-
 // SystemParametersInfoW
 typedef _SystemParametersInfoW_Native =
     Int32 Function(
@@ -290,46 +263,6 @@ final systemParametersInfoW = _user32
       _SystemParametersInfoW_Dart
     >('SystemParametersInfoW');
 
-// SetWindowPos
-typedef _SetWindowPos_Native =
-    Int32 Function(
-      IntPtr hWnd,
-      IntPtr hWndInsertAfter,
-      Int32 X,
-      Int32 Y,
-      Int32 cx,
-      Int32 cy,
-      Uint32 uFlags,
-    );
-typedef _SetWindowPos_Dart =
-    int Function(
-      int hWnd,
-      int hWndInsertAfter,
-      int X,
-      int Y,
-      int cx,
-      int cy,
-      int uFlags,
-    );
-final setWindowPos = _user32
-    .lookupFunction<_SetWindowPos_Native, _SetWindowPos_Dart>('SetWindowPos');
-
-// SetLayeredWindowAttributes
-typedef _SetLayeredWindowAttributes_Native =
-    Int32 Function(
-      IntPtr hwnd,
-      COLORREF crKey,
-      Uint8 bAlpha,
-      Uint32 dwFlags,
-    );
-typedef _SetLayeredWindowAttributes_Dart =
-    int Function(int hwnd, int crKey, int bAlpha, int dwFlags);
-final setLayeredWindowAttributes = _user32
-    .lookupFunction<
-      _SetLayeredWindowAttributes_Native,
-      _SetLayeredWindowAttributes_Dart
-    >('SetLayeredWindowAttributes');
-
 // GetCursorPos
 typedef _GetCursorPos_Native = Int32 Function(Pointer<POINT> lpPoint);
 typedef _GetCursorPos_Dart = int Function(Pointer<POINT> lpPoint);
@@ -346,16 +279,6 @@ final screenToClient = _user32
     .lookupFunction<_ScreenToClient_Native, _ScreenToClient_Dart>(
       'ScreenToClient',
     );
-
-// SetWindowRgn
-typedef _SetWindowRgn_Native = Int32 Function(
-  IntPtr hWnd,
-  HRGN hRgn,
-  Int32 bRedraw,
-);
-typedef _SetWindowRgn_Dart = int Function(int hWnd, int hRgn, int bRedraw);
-final setWindowRgn = _user32
-    .lookupFunction<_SetWindowRgn_Native, _SetWindowRgn_Dart>('SetWindowRgn');
 
 // LoadCursorW
 typedef _LoadCursorW_Native = HCURSOR Function(
@@ -377,37 +300,6 @@ final getDpiForWindow = _user32
       'GetDpiForWindow',
     );
 
-// GetClientRect
-typedef _GetClientRect_Native = Int32 Function(
-  IntPtr hWnd,
-  Pointer<RECT> lpRect,
-);
-typedef _GetClientRect_Dart = int Function(int hWnd, Pointer<RECT> lpRect);
-final getClientRect = _user32
-    .lookupFunction<_GetClientRect_Native, _GetClientRect_Dart>(
-      'GetClientRect',
-    );
-
-// GetDC — 获取窗口设备上下文（用于在 WM_PAINT 之外绘制）
-typedef _GetDC_Native = HDC Function(IntPtr hWnd);
-typedef _GetDC_Dart = int Function(int hWnd);
-final getDC = _user32.lookupFunction<_GetDC_Native, _GetDC_Dart>('GetDC');
-
-// ReleaseDC — 释放 GetDC 获取的 DC
-typedef _ReleaseDC_Native = Int32 Function(IntPtr hWnd, HDC hDC);
-typedef _ReleaseDC_Dart = int Function(int hWnd, int hDC);
-final releaseDC = _user32
-    .lookupFunction<_ReleaseDC_Native, _ReleaseDC_Dart>('ReleaseDC');
-
-// ValidateRect — 将区域标记为有效，阻止 WM_PAINT 派发
-typedef _ValidateRect_Native = Int32 Function(
-  IntPtr hWnd,
-  Pointer<RECT> lpRect,
-);
-typedef _ValidateRect_Dart = int Function(int hWnd, Pointer<RECT> lpRect);
-final validateRect = _user32
-    .lookupFunction<_ValidateRect_Native, _ValidateRect_Dart>('ValidateRect');
-
 // GetAsyncKeyState — 查询键/鼠标按钮异步状态（返回 SHORT）
 typedef _GetAsyncKeyState_Native = Int16 Function(Int32 vKey);
 typedef _GetAsyncKeyState_Dart = int Function(int vKey);
@@ -416,47 +308,39 @@ final getAsyncKeyState = _user32
       'GetAsyncKeyState',
     );
 
-// FillRect — 用画刷填充矩形
-typedef _FillRect_Native = Int32 Function(
-  HDC hDC,
-  Pointer<RECT> lprc,
-  HBRUSH hbr,
-);
-typedef _FillRect_Dart = int Function(int hDC, Pointer<RECT> lprc, int hbr);
-final fillRect = _user32
-    .lookupFunction<_FillRect_Native, _FillRect_Dart>('FillRect');
-
-// DrawTextW — 在矩形内绘制格式化文本（user32.dll，非 gdi32.dll）
-typedef _DrawTextW_Native =
+// UpdateLayeredWindow — per-pixel alpha 分层窗口整图更新
+typedef _UpdateLayeredWindow_Native =
     Int32 Function(
-      HDC hdc,
-      Pointer<Utf16> lpchText,
-      Int32 cchText,
-      Pointer<RECT> lprc,
-      Uint32 format,
+      IntPtr hWnd,
+      HDC hdcDst,
+      Pointer<POINT> pptDst,
+      Pointer<SIZE> psize,
+      HDC hdcSrc,
+      Pointer<POINT> pptSrc,
+      COLORREF crKey,
+      Pointer<BLENDFUNCTION> pblend,
+      Uint32 dwFlags,
     );
-typedef _DrawTextW_Dart =
+typedef _UpdateLayeredWindow_Dart =
     int Function(
-      int hdc,
-      Pointer<Utf16> lpchText,
-      int cchText,
-      Pointer<RECT> lprc,
-      int format,
+      int hWnd,
+      int hdcDst,
+      Pointer<POINT> pptDst,
+      Pointer<SIZE> psize,
+      int hdcSrc,
+      Pointer<POINT> pptSrc,
+      int crKey,
+      Pointer<BLENDFUNCTION> pblend,
+      int dwFlags,
     );
-final drawTextW = _user32
-    .lookupFunction<_DrawTextW_Native, _DrawTextW_Dart>('DrawTextW');
+final updateLayeredWindow = _user32
+    .lookupFunction<_UpdateLayeredWindow_Native, _UpdateLayeredWindow_Dart>(
+      'UpdateLayeredWindow',
+    );
 
 // =============================================================================
 // gdi32.dll
 // =============================================================================
-
-// CreateSolidBrush
-typedef _CreateSolidBrush_Native = HBRUSH Function(COLORREF color);
-typedef _CreateSolidBrush_Dart = int Function(int color);
-final createSolidBrush = _gdi32
-    .lookupFunction<_CreateSolidBrush_Native, _CreateSolidBrush_Dart>(
-      'CreateSolidBrush',
-    );
 
 // DeleteObject
 typedef _DeleteObject_Native = Int32 Function(HGDIOBJ ho);
@@ -464,86 +348,11 @@ typedef _DeleteObject_Dart = int Function(int ho);
 final deleteObject = _gdi32
     .lookupFunction<_DeleteObject_Native, _DeleteObject_Dart>('DeleteObject');
 
-// CreateFontW
-typedef _CreateFontW_Native =
-    HFONT Function(
-      Int32 cHeight,
-      Int32 cWidth,
-      Int32 cEscapement,
-      Int32 cOrientation,
-      Int32 cWeight,
-      Uint32 bItalic,
-      Uint32 bUnderline,
-      Uint32 bStrikeOut,
-      Uint32 iCharSet,
-      Uint32 iOutPrecision,
-      Uint32 iClipPrecision,
-      Uint32 iQuality,
-      Uint32 iPitchAndFamily,
-      Pointer<Utf16> pszFaceName,
-    );
-typedef _CreateFontW_Dart =
-    int Function(
-      int cHeight,
-      int cWidth,
-      int cEscapement,
-      int cOrientation,
-      int cWeight,
-      int bItalic,
-      int bUnderline,
-      int bStrikeOut,
-      int iCharSet,
-      int iOutPrecision,
-      int iClipPrecision,
-      int iQuality,
-      int iPitchAndFamily,
-      Pointer<Utf16> pszFaceName,
-    );
-final createFontW = _gdi32
-    .lookupFunction<_CreateFontW_Native, _CreateFontW_Dart>('CreateFontW');
-
 // SelectObject
 typedef _SelectObject_Native = HGDIOBJ Function(HDC hdc, HGDIOBJ h);
 typedef _SelectObject_Dart = int Function(int hdc, int h);
 final selectObject = _gdi32
     .lookupFunction<_SelectObject_Native, _SelectObject_Dart>('SelectObject');
-
-// SetBkMode
-typedef _SetBkMode_Native = Int32 Function(HDC hdc, Int32 mode);
-typedef _SetBkMode_Dart = int Function(int hdc, int mode);
-final setBkMode = _gdi32
-    .lookupFunction<_SetBkMode_Native, _SetBkMode_Dart>('SetBkMode');
-
-// SetTextColor
-typedef _SetTextColor_Native = COLORREF Function(HDC hdc, COLORREF color);
-typedef _SetTextColor_Dart = int Function(int hdc, int color);
-final setTextColor = _gdi32
-    .lookupFunction<_SetTextColor_Native, _SetTextColor_Dart>('SetTextColor');
-
-// GetStockObject
-typedef _GetStockObject_Native = HGDIOBJ Function(Int32 i);
-typedef _GetStockObject_Dart = int Function(int i);
-final getStockObject = _gdi32
-    .lookupFunction<_GetStockObject_Native, _GetStockObject_Dart>(
-      'GetStockObject',
-    );
-
-// CreateRoundRectRgn
-typedef _CreateRoundRectRgn_Native =
-    HRGN Function(
-      Int32 x1,
-      Int32 y1,
-      Int32 x2,
-      Int32 y2,
-      Int32 w,
-      Int32 h,
-    );
-typedef _CreateRoundRectRgn_Dart =
-    int Function(int x1, int y1, int x2, int y2, int w, int h);
-final createRoundRectRgn = _gdi32
-    .lookupFunction<_CreateRoundRectRgn_Native, _CreateRoundRectRgn_Dart>(
-      'CreateRoundRectRgn',
-    );
 
 // CreateCompatibleDC
 typedef _CreateCompatibleDC_Native = HDC Function(HDC hdc);
@@ -553,84 +362,32 @@ final createCompatibleDC = _gdi32
       'CreateCompatibleDC',
     );
 
-// CreateCompatibleBitmap
-typedef _CreateCompatibleBitmap_Native = HBITMAP Function(
-  HDC hdc,
-  Int32 cx,
-  Int32 cy,
-);
-typedef _CreateCompatibleBitmap_Dart = int Function(int hdc, int cx, int cy);
-final createCompatibleBitmap = _gdi32
-    .lookupFunction<
-      _CreateCompatibleBitmap_Native,
-      _CreateCompatibleBitmap_Dart
-    >('CreateCompatibleBitmap');
-
-// BitBlt
-typedef _BitBlt_Native =
-    Int32 Function(
-      HDC hdc,
-      Int32 x,
-      Int32 y,
-      Int32 cx,
-      Int32 cy,
-      HDC hdcSrc,
-      Int32 x1,
-      Int32 y1,
-      Uint32 rop,
-    );
-typedef _BitBlt_Dart =
-    int Function(
-      int hdc,
-      int x,
-      int y,
-      int cx,
-      int cy,
-      int hdcSrc,
-      int x1,
-      int y1,
-      int rop,
-    );
-final bitBlt = _gdi32.lookupFunction<_BitBlt_Native, _BitBlt_Dart>('BitBlt');
-
 // DeleteDC
 typedef _DeleteDC_Native = Int32 Function(HDC hdc);
 typedef _DeleteDC_Dart = int Function(int hdc);
 final deleteDC = _gdi32
     .lookupFunction<_DeleteDC_Native, _DeleteDC_Dart>('DeleteDC');
 
-// =============================================================================
-// dwmapi.dll
-// =============================================================================
-
-typedef _DwmSetWindowAttribute_Native =
-    Int32 Function(
-      IntPtr hwnd,
-      Uint32 dwAttribute,
-      Pointer<Void> pvAttribute,
-      Uint32 cbAttribute,
+// CreateDIBSection — 创建可直接写像素的 32bpp DIB
+typedef _CreateDIBSection_Native =
+    HBITMAP Function(
+      HDC hdc,
+      Pointer<BITMAPINFOHEADER> pbmi,
+      Uint32 usage,
+      Pointer<Pointer<Void>> ppvBits,
+      IntPtr hSection,
+      Uint32 offset,
     );
-typedef _DwmSetWindowAttribute_Dart =
+typedef _CreateDIBSection_Dart =
     int Function(
-      int hwnd,
-      int dwAttribute,
-      Pointer<Void> pvAttribute,
-      int cbAttribute,
+      int hdc,
+      Pointer<BITMAPINFOHEADER> pbmi,
+      int usage,
+      Pointer<Pointer<Void>> ppvBits,
+      int hSection,
+      int offset,
     );
-final dwmSetWindowAttribute = _dwmapi
-    .lookupFunction<
-      _DwmSetWindowAttribute_Native,
-      _DwmSetWindowAttribute_Dart
-    >('DwmSetWindowAttribute');
-
-// =============================================================================
-// 工具函数
-// =============================================================================
-
-/// 将 Dart Color int（0xAARRGGBB）转换为 COLORREF（0x00BBGGRR）
-int colorToCOLORREF(int argb) {
-  final r = (argb >> 16) & 0xFF;
-  final g = (argb >> 8) & 0xFF;
-  final b = argb & 0xFF;
-  return (b << 16) | (g << 8) | r;
-}
+final createDIBSection = _gdi32
+    .lookupFunction<_CreateDIBSection_Native, _CreateDIBSection_Dart>(
+      'CreateDIBSection',
+    );

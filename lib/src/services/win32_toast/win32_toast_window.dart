@@ -5,59 +5,13 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 import '../../i18n/locale_provider.dart';
 import '../../models/download_task.dart';
+import '../../theme/flux_theme_tokens.dart';
 import '../log_service.dart';
 import '../open_folder.dart';
+import 'toast_card_renderer.dart';
 import 'win32_bindings.dart';
 
 const _tag = 'Win32Toast';
-
-// =============================================================================
-// 颜色方案
-// =============================================================================
-
-class _ToastColors {
-  final int bg;
-  final int text;
-  final int textMuted;
-  final int border;
-  final int btnHover;
-  final int accent;
-  final int green;
-  final int divider;
-
-  const _ToastColors({
-    required this.bg,
-    required this.text,
-    required this.textMuted,
-    required this.border,
-    required this.btnHover,
-    required this.accent,
-    required this.green,
-    required this.divider,
-  });
-
-  static const dark = _ToastColors(
-    bg: 0x1F1F1F,
-    text: 0xF5F5F5,
-    textMuted: 0x999999,
-    border: 0x3A3A3A,
-    btnHover: 0x3D3D3D,
-    accent: 0x4A9EFF,
-    green: 0x4CAF50,
-    divider: 0x2D2D2D,
-  );
-
-  static const light = _ToastColors(
-    bg: 0xFFFFFF,
-    text: 0x1A1A1A,
-    textMuted: 0x888888,
-    border: 0xE0E0E0,
-    btnHover: 0xE8E8E8,
-    accent: 0x0066CC,
-    green: 0x4CAF50,
-    divider: 0xF0F0F0,
-  );
-}
 
 // =============================================================================
 // 生命周期阶段
@@ -70,11 +24,7 @@ enum _Phase { fadeIn, autoClose, fadeOut }
 // =============================================================================
 
 class _ToastState {
-  final String title;
-  final String body;
-  final String fileExt;
   final String filePath;
-  final int batchCount;
   final void Function() onOpenFile;
   final void Function() onOpenFolder;
   final void Function() onDismissed;
@@ -88,13 +38,21 @@ class _ToastState {
   // autoClose 阶段开始时间
   DateTime? autoCloseStart;
 
-  // GDI 字体句柄（窗口销毁时释放）
-  int hFontTitle = 0;
-  int hFontBody = 0;
+  // ── 分层窗口位图资源（窗口销毁时释放）──
+  // 4 张 hover 变体 DIB（索引与 hoveredButton 对应）
+  final List<int> hBitmaps = [];
+  int memDC = 0;
+
+  /// 当前贴入窗口的变体索引（-1 = 尚未贴过）
+  int currentVariant = -1;
 
   // 物理尺寸（DPI 缩放后）
   int scaledW = 0;
   int scaledH = 0;
+
+  // 屏幕位置（UpdateLayeredWindow 需要显式传递）
+  int screenX = 0;
+  int screenY = 0;
 
   // 命中测试区域（物理像素，客户端坐标）
   int closeX1 = 0, closeY1 = 0, closeX2 = 0, closeY2 = 0;
@@ -102,11 +60,7 @@ class _ToastState {
   int fileX1 = 0, fileY1 = 0, fileX2 = 0, fileY2 = 0;
 
   _ToastState({
-    required this.title,
-    required this.body,
-    required this.fileExt,
     required this.filePath,
-    required this.batchCount,
     required this.onOpenFile,
     required this.onOpenFolder,
     required this.onDismissed,
@@ -119,7 +73,7 @@ class _ToastState {
 
 final Map<int, _ToastState> _states = {}; // hwnd → state
 bool _classRegistered = false;
-const String _className = 'FluxDownToast_v2';
+const String _className = 'FluxDownToast_v3';
 
 // 复用的 POINT 指针：避免每 tick calloc/free（16ms × 整个 Toast 生命周期）
 final _sharedCursorPt = calloc<POINT>();
@@ -140,7 +94,7 @@ class _ToastBatch {
 // Win32ToastWindow — 公开 API
 // =============================================================================
 
-/// Win32 悬浮通知窗口。
+/// Win32 悬浮通知窗口 — 主显示器工作区右下角。
 ///
 /// ## 设计原则
 ///
@@ -148,26 +102,52 @@ class _ToastBatch {
 /// - WndProc 直接使用 `DefWindowProcW` 原生函数指针（纯 Win32，无 Dart 回调）
 /// - 所有状态机逻辑（淡入/倒计时/淡出）由 Dart `Timer.periodic` 驱动
 /// - 鼠标输入通过 `GetCursorPos` + `GetAsyncKeyState` 轮询实现
-/// - 绘制通过 `GetDC` + GDI 在 Timer 回调中完成（无 WM_PAINT）
+///
+/// ## 渲染
+///
+/// 卡片由 Flutter 主引擎**离屏光栅化**（[renderToastCardVariants]）：
+/// 与 App 主窗口共享同一套主题 token / MiSans 字体 / 渲染管线，
+/// UI 观感与应用内完全一致。位图经 `UpdateLayeredWindow`
+/// （per-pixel alpha）整图贴入分层窗口 — 真 alpha 圆角+阴影，
+/// 无需 SetWindowRgn 硬裁剪。
+///
+/// 4 张 hover 变体在显示前一次性渲染完成，Toast 生命周期内
+/// tick 只做位图切换与整窗 alpha 渐变，无异步渲染竞态。
 class Win32ToastWindow {
   Win32ToastWindow._();
   static final instance = Win32ToastWindow._();
 
-  /// 是否为深色模式
-  bool isDarkMode = false;
+  /// 当前主题 token（由 NotificationService 在冲刷前注入）
+  FluxThemeTokens? themeTokens;
 
   final List<_ToastBatch> _queue = [];
   bool _showing = false;
   Timer? _masterTimer;
+
+  /// 是否有正在显示或等待显示的 Toast（退出前等待用）。
+  bool get hasActive => _showing || _queue.isNotEmpty;
 
   /// 将一批下载任务加入显示队列（800ms 防抖后由 NotificationService 调用）。
   ///
   /// 批次中的所有任务对应一个 Toast：
   /// - count=1 → 显示文件名 + "下载完成"
   /// - count>1 → 显示代表文件名 + "N个文件已下载"
+  ///
+  /// 已有批次在排队时，新批次直接并入队尾批次（更新代表任务与计数），
+  /// 避免高频完成时连续弹出多张卡片。
   void enqueueBatch(List<DownloadTask> tasks) {
     if (!Platform.isWindows || tasks.isEmpty) return;
-    if (_queue.length >= 5) _queue.removeAt(0);
+    if (_queue.isNotEmpty) {
+      final tail = _queue.removeLast();
+      _queue.add(_ToastBatch(tasks.last, tail.count + tasks.length));
+      logInfo(
+        _tag,
+        'enqueueBatch: merged ${tasks.length} into tail batch, '
+        'queueSize=${_queue.length}',
+      );
+      _tryShowNext();
+      return;
+    }
     final batch = _ToastBatch(tasks.last, tasks.length);
     _queue.add(batch);
     logInfo(
@@ -204,10 +184,10 @@ class Win32ToastWindow {
     _showBatch(batch);
   }
 
-  void _showBatch(_ToastBatch batch) {
+  Future<void> _showBatch(_ToastBatch batch) async {
     try {
       _ensureClassRegistered();
-      _createToastWindow(batch);
+      await _createToastWindow(batch);
       _ensureMasterTimer();
     } catch (e, stack) {
       logError(_tag, 'showBatch failed', e, stack);
@@ -264,7 +244,7 @@ void _ensureClassRegistered() {
     wndClass.ref.hInstance = hInstance;
     wndClass.ref.hIcon = 0;
     wndClass.ref.hCursor = loadCursorW(0, cursorPtr);
-    wndClass.ref.hbrBackground = 0; // 自绘，不使用系统背景刷
+    wndClass.ref.hbrBackground = 0; // 分层窗口，无背景刷
     wndClass.ref.lpszMenuName = nullptr;
     wndClass.ref.lpszClassName = classNamePtr;
     wndClass.ref.hIconSm = 0;
@@ -280,180 +260,219 @@ void _ensureClassRegistered() {
 }
 
 // =============================================================================
-// 创建窗口
+// 创建窗口 — 离屏渲染 Flutter 卡片 → DIB → UpdateLayeredWindow
 // =============================================================================
 
-void _createToastWindow(_ToastBatch batch) {
-  const logicalW = 340;
-  const logicalH = 130;
-
+Future<void> _createToastWindow(_ToastBatch batch) async {
   final task = batch.representative;
 
+  // ── 1. 组装渲染 spec（主题 token 来自 NotificationService 注入）──────────
+  final s = currentS;
+  final tokens =
+      Win32ToastWindow.instance.themeTokens ?? FluxThemeTokens.defaultDark();
+  final spec = ToastCardSpec(
+    title: batch.count > 1
+        ? s.batchDownloadCompleted(batch.count)
+        : s.downloadCompleted,
+    fileName: task.fileName,
+    fileExt: task.fileExtension,
+    subtitle: batch.count > 1
+        ? s.andMoreFiles(batch.count - 1)
+        : task.sizeText,
+    openFolderLabel: s.openFileFolder,
+    openFileLabel: s.openFile,
+    tokens: tokens,
+  );
+
+  // ── 2. 主屏工作区 + DPI → 计算物理尺寸与位置 ────────────────────────────
   final workArea = calloc<RECT>();
+  final int waRight;
+  final int waBottom;
   try {
     systemParametersInfoW(SPI_GETWORKAREA, 0, workArea.cast(), 0);
-
-    final classNamePtr = _className.toNativeUtf16();
-    final titlePtr = ''.toNativeUtf16();
-
-    try {
-      final exStyle =
-          WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
-
-      // 先以逻辑坐标创建，获取 hwnd 后读取 DPI 再调整
-      final hwnd = createWindowExW(
-        exStyle,
-        classNamePtr,
-        titlePtr,
-        WS_POPUP,
-        workArea.ref.right - logicalW - 12,
-        workArea.ref.bottom - logicalH - 12,
-        logicalW,
-        logicalH,
-        0,
-        0,
-        getModuleHandleW(nullptr),
-        nullptr,
-      );
-      if (hwnd == 0) throw StateError('CreateWindowExW returned 0');
-
-      // DPI 感知
-      final dpi = getDpiForWindow(hwnd);
-      final scale = dpi / 96.0;
-      final scaledW = (logicalW * scale).round();
-      final scaledH = (logicalH * scale).round();
-      final scaledX = workArea.ref.right - scaledW - 12;
-      final scaledY = workArea.ref.bottom - scaledH - 12;
-
-      // 构建状态（批量时标题显示数量）
-      final filePath =
-          '${task.saveDir}${Platform.pathSeparator}${task.fileName}';
-      final title = batch.count > 1
-          ? currentS.batchDownloadCompleted(batch.count)
-          : currentS.downloadCompleted;
-      final state = _ToastState(
-        title: title,
-        body: task.fileName,
-        fileExt: task.fileExtension.toUpperCase(),
-        filePath: filePath,
-        batchCount: batch.count,
-        onOpenFile: () => openFile(filePath),
-        onOpenFolder: () => openFolder(filePath),
-        onDismissed: Win32ToastWindow.instance._onToastDismissed,
-      );
-
-      state.scaledW = scaledW;
-      state.scaledH = scaledH;
-      _calcHitAreas(state, scaledW, scaledH, scale);
-
-      state.hFontTitle = _createGdiFont((13 * scale).round(), FW_SEMIBOLD);
-      state.hFontBody = _createGdiFont((11 * scale).round(), FW_NORMAL);
-
-      _states[hwnd] = state;
-
-      // 应用圆角
-      _applyRoundCorners(hwnd, scaledW, scaledH);
-
-      // 调整到 DPI 校正后的位置和大小
-      setWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        scaledX,
-        scaledY,
-        scaledW,
-        scaledH,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-      );
-
-      // 初始透明度 0（不可见），Timer 驱动淡入
-      setLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
-      showWindow(hwnd, SW_SHOWNOACTIVATE);
-
-      // 立即绘制内容（alpha=0 时用户不可见，但内容已写入 DC）
-      _repaintWindow(hwnd, state);
-
-      logInfo(
-        _tag,
-        'toast created hwnd=$hwnd, dpi=$dpi, '
-        'scale=$scale, size=${scaledW}x$scaledH',
-      );
-    } finally {
-      calloc.free(classNamePtr);
-      calloc.free(titlePtr);
-    }
+    waRight = workArea.ref.right;
+    waBottom = workArea.ref.bottom;
   } finally {
     calloc.free(workArea);
   }
-}
 
-void _calcHitAreas(_ToastState state, int scaledW, int scaledH, double scale) {
-  final closeBtnSize = (30 * scale).round();
-  state.closeX1 = scaledW - closeBtnSize;
-  state.closeY1 = 0;
-  state.closeX2 = scaledW;
-  state.closeY2 = closeBtnSize;
-
-  final actionH = (42 * scale).round();
-  final dividerY = scaledH - actionH;
-
-  state.folderX1 = 0;
-  state.folderY1 = dividerY;
-  state.folderX2 = scaledW ~/ 2;
-  state.folderY2 = scaledH;
-
-  state.fileX1 = scaledW ~/ 2;
-  state.fileY1 = dividerY;
-  state.fileX2 = scaledW;
-  state.fileY2 = scaledH;
-}
-
-int _createGdiFont(int height, int weight) {
-  final facePtr = 'Segoe UI'.toNativeUtf16();
+  // ── 3. 创建隐藏分层窗口（先建窗才能查该窗口的 DPI）──────────────────────
+  final classNamePtr = _className.toNativeUtf16();
+  final titlePtr = ''.toNativeUtf16();
+  final int hwnd;
   try {
-    return createFontW(
-      -height,
+    final exStyle =
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
+    hwnd = createWindowExW(
+      exStyle,
+      classNamePtr,
+      titlePtr,
+      WS_POPUP,
+      waRight - kToastWindowW.round(),
+      waBottom - kToastWindowH.round(),
+      kToastWindowW.round(),
+      kToastWindowH.round(),
       0,
       0,
-      0,
-      weight,
-      0,
-      0,
-      0,
-      DEFAULT_CHARSET,
-      OUT_DEFAULT_PRECIS,
-      CLIP_DEFAULT_PRECIS,
-      CLEARTYPE_QUALITY,
-      DEFAULT_PITCH | FF_DONTCARE,
-      facePtr,
+      getModuleHandleW(nullptr),
+      nullptr,
     );
   } finally {
-    calloc.free(facePtr);
+    calloc.free(classNamePtr);
+    calloc.free(titlePtr);
+  }
+  if (hwnd == 0) throw StateError('CreateWindowExW returned 0');
+
+  try {
+    // ── 4. DPI 感知 → 离屏渲染 4 张 hover 变体 ────────────────────────────
+    final dpi = getDpiForWindow(hwnd);
+    final scale = dpi / 96.0;
+    final images = await renderToastCardVariants(spec, scale: scale);
+
+    final scaledW = images.first.width;
+    final scaledH = images.first.height;
+    // 阴影出血区已含在窗口内，卡片距工作区边缘 = shadowPad 的富余，
+    // 窗口本体直接贴右下角再留 4px 呼吸位。
+    final margin = (4 * scale).round();
+    final x = waRight - scaledW - margin;
+    final y = waBottom - scaledH - margin;
+
+    // ── 5. 构建状态 + DIB 资源 ────────────────────────────────────────────
+    final filePath = '${task.saveDir}${Platform.pathSeparator}${task.fileName}';
+    final state = _ToastState(
+      filePath: filePath,
+      onOpenFile: () => openFile(filePath),
+      onOpenFolder: () => openFolder(filePath),
+      onDismissed: Win32ToastWindow.instance._onToastDismissed,
+    );
+    state.scaledW = scaledW;
+    state.scaledH = scaledH;
+    state.screenX = x;
+    state.screenY = y;
+    _calcHitAreas(state, scale);
+
+    state.memDC = createCompatibleDC(0);
+    if (state.memDC == 0) throw StateError('CreateCompatibleDC failed');
+    for (final img in images) {
+      state.hBitmaps.add(_createDibFromImage(img));
+    }
+
+    _states[hwnd] = state;
+
+    // ── 6. 贴入 base 变体（alpha=0 不可见），Timer 驱动淡入 ───────────────
+    _pushVariant(hwnd, state, 0);
+    showWindow(hwnd, SW_SHOWNOACTIVATE);
+
+    logInfo(
+      _tag,
+      'toast created hwnd=$hwnd, dpi=$dpi, '
+      'scale=$scale, size=${scaledW}x$scaledH',
+    );
+  } catch (e) {
+    // 渲染/资源失败 → 回收半成品窗口
+    final state = _states.remove(hwnd);
+    if (state != null) _freeStateResources(state);
+    try {
+      destroyWindow(hwnd);
+    } catch (_) {}
+    rethrow;
   }
 }
 
-void _applyRoundCorners(int hwnd, int w, int h) {
-  // Win11 原生圆角
+/// premultiplied BGRA 像素 → 32bpp top-down DIB
+int _createDibFromImage(ToastCardImage img) {
+  final bmi = calloc<BITMAPINFOHEADER>();
+  final ppvBits = calloc<Pointer<Void>>();
   try {
-    final pref = calloc<Int32>();
-    try {
-      pref.value = DWMWCP_ROUND;
-      dwmSetWindowAttribute(
-        hwnd,
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-        pref.cast(),
-        sizeOf<Int32>(),
-      );
-    } finally {
-      calloc.free(pref);
+    bmi.ref
+      ..biSize = sizeOf<BITMAPINFOHEADER>()
+      ..biWidth = img.width
+      ..biHeight = -img.height // 负值 = top-down 行序
+      ..biPlanes = 1
+      ..biBitCount = 32
+      ..biCompression = BI_RGB;
+
+    final hBitmap = createDIBSection(0, bmi, DIB_RGB_COLORS, ppvBits, 0, 0);
+    if (hBitmap == 0 || ppvBits.value == nullptr) {
+      throw StateError('CreateDIBSection failed');
     }
-  } catch (_) {
-    // Win10 不支持
+
+    final dst = ppvBits.value
+        .cast<Uint8>()
+        .asTypedList(img.bgraPremultiplied.length);
+    dst.setAll(0, img.bgraPremultiplied);
+    return hBitmap;
+  } finally {
+    calloc.free(bmi);
+    calloc.free(ppvBits);
   }
-  // 所有版本补充 SetWindowRgn（Win11 上两者互补）
-  final hRgn = createRoundRectRgn(0, 0, w, h, 12, 12);
-  if (hRgn != 0) {
-    setWindowRgn(hwnd, hRgn, 1);
-    // SetWindowRgn 接管 hRgn 所有权，无需 DeleteObject
+}
+
+/// 命中区域：渲染器逻辑坐标 × DPI scale → 物理像素
+void _calcHitAreas(_ToastState state, double scale) {
+  state.closeX1 = (kToastHitClose.left * scale).round();
+  state.closeY1 = (kToastHitClose.top * scale).round();
+  state.closeX2 = (kToastHitClose.right * scale).round();
+  state.closeY2 = (kToastHitClose.bottom * scale).round();
+
+  state.folderX1 = (kToastHitFolder.left * scale).round();
+  state.folderY1 = (kToastHitFolder.top * scale).round();
+  state.folderX2 = (kToastHitFolder.right * scale).round();
+  state.folderY2 = (kToastHitFolder.bottom * scale).round();
+
+  state.fileX1 = (kToastHitFile.left * scale).round();
+  state.fileY1 = (kToastHitFile.top * scale).round();
+  state.fileX2 = (kToastHitFile.right * scale).round();
+  state.fileY2 = (kToastHitFile.bottom * scale).round();
+}
+
+// =============================================================================
+// UpdateLayeredWindow 贴图 / 整窗 alpha
+// =============================================================================
+
+/// 把变体位图贴入分层窗口（同时应用当前整窗 alpha）。
+void _pushVariant(int hwnd, _ToastState state, int variant) {
+  if (variant < 0 || variant >= state.hBitmaps.length) return;
+  final old = selectObject(state.memDC, state.hBitmaps[variant]);
+
+  final ptDst = calloc<POINT>();
+  final size = calloc<SIZE>();
+  final ptSrc = calloc<POINT>();
+  final blend = calloc<BLENDFUNCTION>();
+  try {
+    ptDst.ref
+      ..x = state.screenX
+      ..y = state.screenY;
+    size.ref
+      ..cx = state.scaledW
+      ..cy = state.scaledH;
+    ptSrc.ref
+      ..x = 0
+      ..y = 0;
+    blend.ref
+      ..BlendOp = AC_SRC_OVER
+      ..BlendFlags = 0
+      ..SourceConstantAlpha = state.alpha
+      ..AlphaFormat = AC_SRC_ALPHA;
+
+    updateLayeredWindow(
+      hwnd,
+      0,
+      ptDst,
+      size,
+      state.memDC,
+      ptSrc,
+      0,
+      blend,
+      ULW_ALPHA,
+    );
+    state.currentVariant = variant;
+  } finally {
+    selectObject(state.memDC, old);
+    calloc.free(ptDst);
+    calloc.free(size);
+    calloc.free(ptSrc);
+    calloc.free(blend);
   }
 }
 
@@ -471,7 +490,6 @@ void _processWindowTick(int hwnd, _ToastState state) {
   state.isHovered =
       cx >= 0 && cy >= 0 && cx < state.scaledW && cy < state.scaledH;
 
-  final prevButton = state.hoveredButton;
   if (state.isHovered) {
     state.hoveredButton = _hitTest(state, cx, cy);
   } else {
@@ -490,12 +508,12 @@ void _processWindowTick(int hwnd, _ToastState state) {
   }
 
   // ── 3. 阶段状态机 ──────────────────────────────────────────────────────
+  var alphaChanged = false;
   switch (state.phase) {
     case _Phase.fadeIn:
-      state.alpha = (state.alpha + 20).clamp(0, 230);
-      // alpha 变化只需 SetLayeredWindowAttributes，无需重新绘制 GDI 内容
-      setLayeredWindowAttributes(hwnd, 0, state.alpha, LWA_ALPHA);
-      if (state.alpha >= 230) {
+      state.alpha = (state.alpha + 20).clamp(0, 255);
+      alphaChanged = true;
+      if (state.alpha >= 255) {
         state.phase = _Phase.autoClose;
         state.autoCloseStart = DateTime.now();
       }
@@ -515,17 +533,16 @@ void _processWindowTick(int hwnd, _ToastState state) {
 
     case _Phase.fadeOut:
       state.alpha = (state.alpha - 20).clamp(0, 255);
-      // alpha 变化只需 SetLayeredWindowAttributes，无需重新绘制 GDI 内容
-      setLayeredWindowAttributes(hwnd, 0, state.alpha, LWA_ALPHA);
+      alphaChanged = true;
       if (state.alpha <= 0) {
         _destroyToast(hwnd, state);
         return;
       }
   }
 
-  // ── 4. 仅在悬停按钮变化时重绘（GDI 内容变了），alpha 变化不触发重绘 ──────
-  if (state.hoveredButton != prevButton) {
-    _repaintWindow(hwnd, state);
+  // ── 4. 变体或 alpha 变化 → 重贴（UpdateLayeredWindow 同时携带两者）──────
+  if (state.hoveredButton != state.currentVariant || alphaChanged) {
+    _pushVariant(hwnd, state, state.hoveredButton);
   }
 }
 
@@ -582,388 +599,16 @@ void _destroyToast(int hwnd, _ToastState state) {
 void _releaseWindowResources(int hwnd, {_ToastState? state}) {
   final s = state ?? _states[hwnd];
   if (s == null) return;
-  if (s.hFontTitle != 0) {
-    deleteObject(s.hFontTitle);
-    s.hFontTitle = 0;
-  }
-  if (s.hFontBody != 0) {
-    deleteObject(s.hFontBody);
-    s.hFontBody = 0;
-  }
+  _freeStateResources(s);
 }
 
-// =============================================================================
-// GDI 绘制（GetDC + 双缓冲，在 Dart Timer 回调中执行）
-// =============================================================================
-
-void _repaintWindow(int hwnd, _ToastState state) {
-  final hdc = getDC(hwnd);
-  if (hdc == 0) return;
-
-  final w = state.scaledW;
-  final h = state.scaledH;
-
-  // 双缓冲
-  final memDC = createCompatibleDC(hdc);
-  final hBitmap = createCompatibleBitmap(hdc, w, h);
-  final oldBitmap = selectObject(memDC, hBitmap);
-
-  try {
-    final colors = Win32ToastWindow.instance.isDarkMode
-        ? _ToastColors.dark
-        : _ToastColors.light;
-    final scale = h / 130.0;
-
-    _drawBackground(memDC, w, h, colors);
-    _drawHeader(memDC, state, w, h, scale, colors);
-    _drawContent(memDC, state, w, h, scale, colors);
-    _drawDivider(memDC, w, h, scale, colors);
-    _drawActions(memDC, state, w, h, scale, colors);
-
-    bitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
-  } finally {
-    selectObject(memDC, oldBitmap);
-    deleteObject(hBitmap);
-    deleteDC(memDC);
-    releaseDC(hwnd, hdc);
+void _freeStateResources(_ToastState s) {
+  if (s.memDC != 0) {
+    deleteDC(s.memDC);
+    s.memDC = 0;
   }
-
-  // 防止 DefWindowProcW 在 WM_PAINT 中擦除我们的内容
-  validateRect(hwnd, nullptr);
-}
-
-void _drawBackground(int dc, int w, int h, _ToastColors colors) {
-  final brush = createSolidBrush(colorToCOLORREF(colors.bg));
-  final rect = calloc<RECT>();
-  try {
-    rect.ref
-      ..left = 0
-      ..top = 0
-      ..right = w
-      ..bottom = h;
-    fillRect(dc, rect, brush);
-  } finally {
-    calloc.free(rect);
-    deleteObject(brush);
+  for (final hBitmap in s.hBitmaps) {
+    if (hBitmap != 0) deleteObject(hBitmap);
   }
-}
-
-void _drawHeader(
-  int dc,
-  _ToastState state,
-  int w,
-  int h,
-  double scale,
-  _ToastColors colors,
-) {
-  final headerH = (36 * scale).round();
-  final pad = (14 * scale).round();
-  final iconSize = (18 * scale).round();
-  final iconX = pad;
-  final iconY = (headerH - iconSize) ~/ 2;
-
-  // 绿色方块（简化的勾图标背景）
-  final greenBrush = createSolidBrush(colorToCOLORREF(colors.green));
-  final iconRect = calloc<RECT>();
-  try {
-    iconRect.ref
-      ..left = iconX
-      ..top = iconY
-      ..right = iconX + iconSize
-      ..bottom = iconY + iconSize;
-    fillRect(dc, iconRect, greenBrush);
-
-    // "✓" 文字
-    setBkMode(dc, TRANSPARENT);
-    setTextColor(dc, colorToCOLORREF(0xFFFFFF));
-    final checkFont = _createGdiFont((9 * scale).round(), FW_BOLD);
-    final oldFont = selectObject(dc, checkFont);
-    final checkPtr = '✓'.toNativeUtf16();
-    try {
-      drawTextW(
-        dc,
-        checkPtr,
-        -1,
-        iconRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-      );
-    } finally {
-      calloc.free(checkPtr);
-      selectObject(dc, oldFont);
-      deleteObject(checkFont);
-    }
-  } finally {
-    calloc.free(iconRect);
-    deleteObject(greenBrush);
-  }
-
-  // 标题文字
-  final titleX = iconX + iconSize + (7 * scale).round();
-  final titleRect = calloc<RECT>();
-  final titlePtr = state.title.toNativeUtf16();
-  try {
-    titleRect.ref
-      ..left = titleX
-      ..top = 0
-      ..right = w - (36 * scale).round()
-      ..bottom = headerH;
-    final oldFont = selectObject(dc, state.hFontTitle);
-    setTextColor(dc, colorToCOLORREF(colors.text));
-    setBkMode(dc, TRANSPARENT);
-    drawTextW(
-      dc,
-      titlePtr,
-      -1,
-      titleRect,
-      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-    );
-    selectObject(dc, oldFont);
-  } finally {
-    calloc.free(titleRect);
-    calloc.free(titlePtr);
-  }
-
-  // 关闭按钮
-  final closeSize = (30 * scale).round();
-  final closeBtnX = w - closeSize;
-  if (state.hoveredButton == 1) {
-    final hoverBrush = createSolidBrush(colorToCOLORREF(colors.btnHover));
-    final closeRect = calloc<RECT>();
-    try {
-      closeRect.ref
-        ..left = closeBtnX
-        ..top = 0
-        ..right = w
-        ..bottom = closeSize;
-      fillRect(dc, closeRect, hoverBrush);
-    } finally {
-      calloc.free(closeRect);
-      deleteObject(hoverBrush);
-    }
-  }
-
-  final xFont = _createGdiFont((12 * scale).round(), FW_NORMAL);
-  final oldXFont = selectObject(dc, xFont);
-  setTextColor(
-    dc,
-    colorToCOLORREF(state.hoveredButton == 1 ? colors.text : colors.textMuted),
-  );
-  final xRect = calloc<RECT>();
-  final xPtr = '✕'.toNativeUtf16();
-  try {
-    xRect.ref
-      ..left = closeBtnX
-      ..top = 0
-      ..right = w
-      ..bottom = closeSize;
-    drawTextW(
-      dc,
-      xPtr,
-      -1,
-      xRect,
-      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-  } finally {
-    calloc.free(xPtr);
-    calloc.free(xRect);
-    selectObject(dc, oldXFont);
-    deleteObject(xFont);
-  }
-}
-
-void _drawContent(
-  int dc,
-  _ToastState state,
-  int w,
-  int h,
-  double scale,
-  _ToastColors colors,
-) {
-  final headerH = (36 * scale).round();
-  final actionH = (42 * scale).round();
-  final dividerY = h - actionH;
-  final contentH = dividerY - headerH;
-  final pad = (14 * scale).round();
-
-  // EXT 徽章
-  final badgeW = (38 * scale).round();
-  final badgeH = (38 * scale).round();
-  final badgeX = pad;
-  final badgeY = headerH + (contentH - badgeH) ~/ 2;
-
-  final badgeBrush = createSolidBrush(colorToCOLORREF(colors.btnHover));
-  final badgeRect = calloc<RECT>();
-  try {
-    badgeRect.ref
-      ..left = badgeX
-      ..top = badgeY
-      ..right = badgeX + badgeW
-      ..bottom = badgeY + badgeH;
-    fillRect(dc, badgeRect, badgeBrush);
-
-    final extFont = _createGdiFont((10 * scale).round(), FW_SEMIBOLD);
-    final oldExtFont = selectObject(dc, extFont);
-    setBkMode(dc, TRANSPARENT);
-    setTextColor(dc, colorToCOLORREF(colors.accent));
-    final extPtr = state.fileExt.toNativeUtf16();
-    try {
-      drawTextW(
-        dc,
-        extPtr,
-        -1,
-        badgeRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-      );
-    } finally {
-      calloc.free(extPtr);
-      selectObject(dc, oldExtFont);
-      deleteObject(extFont);
-    }
-  } finally {
-    calloc.free(badgeRect);
-    deleteObject(badgeBrush);
-  }
-
-  // 文件名
-  final textX = badgeX + badgeW + (10 * scale).round();
-  final textW = w - textX - pad;
-  final nameRect = calloc<RECT>();
-  final namePtr = state.body.toNativeUtf16();
-  try {
-    nameRect.ref
-      ..left = textX
-      ..top = badgeY
-      ..right = textX + textW
-      ..bottom = badgeY + badgeH;
-    final oldFont = selectObject(dc, state.hFontBody);
-    setTextColor(dc, colorToCOLORREF(colors.text));
-    setBkMode(dc, TRANSPARENT);
-    drawTextW(
-      dc,
-      namePtr,
-      -1,
-      nameRect,
-      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-    );
-    selectObject(dc, oldFont);
-  } finally {
-    calloc.free(namePtr);
-    calloc.free(nameRect);
-  }
-}
-
-void _drawDivider(int dc, int w, int h, double scale, _ToastColors colors) {
-  final actionH = (42 * scale).round();
-  final dividerY = h - actionH;
-  final divBrush = createSolidBrush(colorToCOLORREF(colors.divider));
-  final divRect = calloc<RECT>();
-  try {
-    divRect.ref
-      ..left = 0
-      ..top = dividerY
-      ..right = w
-      ..bottom = dividerY + 1;
-    fillRect(dc, divRect, divBrush);
-  } finally {
-    calloc.free(divRect);
-    deleteObject(divBrush);
-  }
-}
-
-void _drawActions(
-  int dc,
-  _ToastState state,
-  int w,
-  int h,
-  double scale,
-  _ToastColors colors,
-) {
-  final actionH = (42 * scale).round();
-  final dividerY = h - actionH;
-  final halfW = w ~/ 2;
-
-  // 打开文件夹（左半）
-  if (state.hoveredButton == 2) {
-    final hoverBrush = createSolidBrush(colorToCOLORREF(colors.btnHover));
-    final rect = calloc<RECT>();
-    try {
-      rect.ref
-        ..left = 0
-        ..top = dividerY
-        ..right = halfW
-        ..bottom = h;
-      fillRect(dc, rect, hoverBrush);
-    } finally {
-      calloc.free(rect);
-      deleteObject(hoverBrush);
-    }
-  }
-
-  // 打开文件（右半，accent 背景）
-  final fileBg = state.hoveredButton == 3
-      ? (Win32ToastWindow.instance.isDarkMode ? 0x3A7FCC : 0x0055AA)
-      : colors.accent;
-  final fileBrush = createSolidBrush(colorToCOLORREF(fileBg));
-  final fileRect = calloc<RECT>();
-  try {
-    fileRect.ref
-      ..left = halfW
-      ..top = dividerY
-      ..right = w
-      ..bottom = h;
-    fillRect(dc, fileRect, fileBrush);
-  } finally {
-    calloc.free(fileRect);
-    deleteObject(fileBrush);
-  }
-
-  // 文字
-  final btnFont = _createGdiFont((11 * scale).round(), FW_NORMAL);
-  final oldFont = selectObject(dc, btnFont);
-  setBkMode(dc, TRANSPARENT);
-
-  final folderRect = calloc<RECT>();
-  final folderPtr = currentS.openFileFolder.toNativeUtf16();
-  try {
-    folderRect.ref
-      ..left = 0
-      ..top = dividerY
-      ..right = halfW
-      ..bottom = h;
-    setTextColor(dc, colorToCOLORREF(colors.text));
-    drawTextW(
-      dc,
-      folderPtr,
-      -1,
-      folderRect,
-      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-  } finally {
-    calloc.free(folderPtr);
-    calloc.free(folderRect);
-  }
-
-  final fileTextRect = calloc<RECT>();
-  final fileTextPtr = currentS.openFile.toNativeUtf16();
-  try {
-    fileTextRect.ref
-      ..left = halfW
-      ..top = dividerY
-      ..right = w
-      ..bottom = h;
-    setTextColor(dc, colorToCOLORREF(0xFFFFFF));
-    drawTextW(
-      dc,
-      fileTextPtr,
-      -1,
-      fileTextRect,
-      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-  } finally {
-    calloc.free(fileTextPtr);
-    calloc.free(fileTextRect);
-  }
-
-  selectObject(dc, oldFont);
-  deleteObject(btnFont);
+  s.hBitmaps.clear();
 }

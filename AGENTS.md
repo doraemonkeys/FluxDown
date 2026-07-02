@@ -82,13 +82,13 @@ x_down/
 │       │   ├── external_download_service.dart  # 监听浏览器扩展请求（Rinf 信号）
 │       │   ├── hls_quality_service.dart        # HLS 画质选择服务
 │       │   ├── tray_service.dart               # 系统托盘
-│       │   ├── notification_service.dart       # 下载完成通知（2s 聚合）
+│       │   ├── notification_service.dart       # 下载完成通知（800ms 防抖合批，Win: Win32 悬浮窗 / Linux/mac: 系统通知）
 │       │   ├── update_service.dart             # 自动更新（GitHub Releases）
 │       │   ├── analytics_service.dart          # 匿名数据分析（GA4）
 │       │   ├── feedback_service.dart           # 反馈提交（GitHub Issues）
 │       │   ├── log_service.dart                # 日志管理（2MB 分卷，总量默认 10MB 超量清理，保留 7 天）
 │       │   ├── open_folder.dart                # 打开文件夹（跨平台）
-│       │   └── windows_toast_helper.dart       # Windows Toast 通知辅助
+│       │   └── win32_toast/                    # Windows 悬浮通知窗（纯 Win32 GDI，主屏右下角）
 │       ├── theme/                     # 主题
 │       │   ├── app_theme.dart         # 浅色/深色主题构建
 │       │   ├── app_colors.dart        # 主题感知色板（AppColors.of(context)）
@@ -189,7 +189,7 @@ x_down/
 
 | 文件 | 功能描述 |
 |------|---------|
-| `pages/home_page.dart` | 主页面。三栏布局（侧边栏 180-320px / 任务列表 / 详情面板 240-420px），全局快捷键（Ctrl+F/A/Esc/Del），Boost 优先下载 Banner，下载完成 2s 聚合通知 |
+| `pages/home_page.dart` | 主页面。三栏布局（侧边栏 180-320px / 任务列表 / 详情面板 240-420px），全局快捷键（Ctrl+F/A/Esc/Del），Boost 优先下载 Banner |
 | `pages/settings_page.dart` | 设置页面。侧边栏导航 6 个分类：通用（开机启动/关闭到托盘/torrent关联/匿名分析）、外观（语言/主题/颜色）、下载（目录/线程/并发/速度/UA/队列）、BT（自定义 Tracker）、代理（无/系统/手动 + 代理测试）、关于（版本更新） |
 
 ### 核心布局组件
@@ -416,13 +416,13 @@ NMH 注册：
 | `external_download_service.dart` | 监听 Rust 发来的 ExternalDownloadRequest 信号，弹出快速下载确认对话框 |
 | `hls_quality_service.dart` | 监听 HLS 画质信号，弹窗让用户选择码率 |
 | `tray_service.dart` | 系统托盘图标+菜单（多语言），菜单项：显示窗口/新建下载/暂停恢复/退出 |
-| `notification_service.dart` | Windows Toast 通知，2s 内多个完成合并为摘要通知 |
+| `notification_service.dart` | 下载完成通知。800ms 防抖合批（3s 最长等待），Windows → Win32ToastWindow 主显示器右下角悬浮窗（无论主窗口可见性），Linux/macOS → 系统通知带"打开文件夹/打开文件"动作按钮（Linux D-Bus actions / macOS UNNotificationCategory；Wayland 禁止全局坐标定位，D-Bus 通知是唯一正确做法） |
 | `update_service.dart` | GitHub Releases 检查，启动后 5s 静默检查，弹窗展示 changelog |
 | `analytics_service.dart` | GA4 匿名埋点：启动/退出/创建/完成/失败/视图切换 |
 | `feedback_service.dart` | POST GitHub Issues API 提交反馈（含 OS/版本/语言系统信息） |
 | `log_service.dart` | 按日期写入 `fluxdown_YYYY-MM-DD.log`，启动时清理 7 天前日志，提供 `logInfo()`/`logError()` 全局函数 |
 | `open_folder.dart` | 跨平台打开文件夹（调用系统文件管理器） |
-| `windows_toast_helper.dart` | Windows Toast 通知底层辅助（win32_toast 封装） |
+| `win32_toast/win32_toast_window.dart` | Win32 悬浮通知窗。卡片由 Flutter 主引擎离屏光栅化（`toast_card_renderer.dart`，与 App 同主题/字体），经 UpdateLayeredWindow（per-pixel alpha）贴入分层窗口；窗口侧 DefWindowProcW 原生指针 + Dart Timer 驱动（零 Dart 原生回调，无 Isolate 竞态），SPI_GETWORKAREA 定位主屏工作区右下角，串行播放+批次合并，hover 4 变体预渲染 |
 
 ## 官网（website/）
 

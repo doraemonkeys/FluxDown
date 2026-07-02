@@ -46,8 +46,6 @@ class _HomePageState extends State<HomePage> {
   final _controller = DownloadController();
   final _settingsProvider = SettingsProvider();
   final _headerBarKey = GlobalKey<HeaderBarState>();
-  int _pendingCompletionNotifies = 0;
-  Timer? _completionSummaryTimer;
 
   // 页面切换
   bool _showSettings = false;
@@ -116,7 +114,6 @@ class _HomePageState extends State<HomePage> {
     _settingsProvider.removeListener(_onSettingsLoadedForAssocPrompt);
     _controller.removeListener(_onControllerChanged);
     _controller.onTaskCompleted = null;
-    _completionSummaryTimer?.cancel();
     _controller.dispose();
     _settingsProvider.dispose();
     super.dispose();
@@ -227,19 +224,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _handleTaskCompleted(DownloadTask task) {
+    // 通知服务内部做 800ms 防抖合批（多文件 → "N 个文件已下载"），
+    // 此处无需再做汇总聚合。
     NotificationService.instance.showDownloadComplete(task);
-
-    _pendingCompletionNotifies += 1;
-    _completionSummaryTimer?.cancel();
-    _completionSummaryTimer = Timer(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      if (_pendingCompletionNotifies >= 2) {
-        NotificationService.instance.showAllCompletedSummary(
-          _pendingCompletionNotifies,
-        );
-      }
-      _pendingCompletionNotifies = 0;
-    });
   }
 
   /// 全局快捷键处理 — 不依赖焦点树

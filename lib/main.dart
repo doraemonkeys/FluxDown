@@ -267,8 +267,8 @@ class _FluxDownAppState extends State<FluxDownApp>
     // 阻止默认关闭行为，由 onWindowClose 接管
     windowManager.setPreventClose(true);
 
-    // 初始化通知服务 — 传递导航 Key 和主题信息
-    NotificationService.instance.init(navigatorKey: _navigatorKey);
+    // 初始化通知服务 — 传入主题信息（Windows Toast 深浅色绘制用）
+    NotificationService.instance.init();
     NotificationService.instance.setThemeProvider(themeProvider);
 
     // 设置托盘退出回调 — 统一走优雅退出流程
