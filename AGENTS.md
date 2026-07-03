@@ -88,7 +88,9 @@ x_down/
 │       │   ├── locale_provider.dart   # 语言切换与持久化
 │       │   └── translations.dart      # 中英双语翻译字符串
 │       ├── services/                  # 服务层
-│       │   ├── external_download_service.dart  # 监听浏览器扩展请求（Rinf 信号）
+│       │   ├── external_download_service.dart  # 监听浏览器扩展/RPC/API 请求（Rinf 信号），首选独立小窗，回退主窗口内对话框
+│       │   ├── popup_window_service.dart       # 独立快速下载小窗（主引擎侧：fluxdown/popup_host 通道 + 载荷组装 + 结果回填）
+│       │   ├── quick_download_submitter.dart   # 表单结果统一提交器（解析多行 URL / 记录偏好 / 发送下载信号）
 │       │   ├── hls_quality_service.dart        # HLS 画质选择服务
 │       │   ├── tray_service.dart               # 系统托盘
 │       │   ├── notification_service.dart       # 下载完成通知（800ms 防抖合批，Win: Win32 悬浮窗 / Linux/mac: 系统通知）
@@ -248,7 +250,8 @@ x_down/
 | 文件 | 功能描述 |
 |------|---------|
 | `widgets/new_download_dialog.dart` | 新建下载。URL（多行批量）、文件名、保存目录、线程数、队列、Cookies、代理、UA、Checksum |
-| `widgets/quick_download_dialog.dart` | 快速下载对话框（浏览器扩展调起用） |
+|`widgets/quick_download_dialog.dart`|快速下载对话框（主窗口内回退路径 + 悬浮球拖链入口；表单主体复用 quick_download_form）|
+|`widgets/quick_download_form.dart`|快速下载共享表单（URL/目录/线程/重命名/队列 + 高级选项：任务代理/UA/Cookie 预填可编辑/哈希校验 + 动作按钮）。经 QuickDownloadFormHost 抽象隔离全局单例，主窗口对话框与独立小窗共用|
 | `widgets/hls_quality_dialog.dart` | HLS 画质选择。M3U8 多码率选择，显示带宽/分辨率 |
 | `widgets/update_changelog_dialog.dart` | 版本更新对话框。Markdown 渲染更新日志，立即更新/稍后提醒 |
 | `widgets/feedback_dialog.dart` | 反馈对话框。提交到 GitHub Issues |
@@ -489,7 +492,9 @@ NMH 注册：
 
 | 服务 | 职责 |
 |------|------|
-| `external_download_service.dart` | 监听 Rust 发来的 ExternalDownloadRequest 信号，弹出快速下载确认对话框 |
+| `external_download_service.dart` | 监听 Rust 发来的 ExternalDownloadRequest 信号：免打扰直建任务 → 首选独立小窗（PopupWindowService）→ 回退主窗口内快速下载对话框 |
+| `popup_window_service.dart` | 外部唤起独立小窗（主引擎侧）。原生窗口承载**第二 Flutter 引擎**（entrypoint 参数 `--quick-popup`，零插件、不初始化 Rust），懒创建常驻复用；载荷（主题 tokens/语言/队列/默认目录）JSON 注入，结果经原生中继回主引擎发信号。原生宿主：windows/runner/popup_window_host.cpp、macos/Runner/PopupWindowHost.swift、linux/popup_window_host.cc |
+| `quick_download_submitter.dart` | 快速下载表单结果统一提交器：解析 aria2 风格多行条目、记录上次目录/线程数、发 ConfirmExternalDownload/BatchCreateTask |
 | `hls_quality_service.dart` | 监听 HLS 画质信号，弹窗让用户选择码率 |
 | `tray_service.dart` | 系统托盘图标+菜单（多语言），菜单项：显示窗口/新建下载/暂停恢复/退出 |
 | `notification_service.dart` | 下载完成通知。800ms 防抖合批（3s 最长等待），Windows → Win32ToastWindow 主显示器右下角悬浮窗（无论主窗口可见性），Linux/macOS → 系统通知带"打开文件夹/打开文件"动作按钮（Linux D-Bus actions / macOS UNNotificationCategory；Wayland 禁止全局坐标定位，D-Bus 通知是唯一正确做法） |

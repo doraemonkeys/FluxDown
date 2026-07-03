@@ -10,18 +10,23 @@ import 'package:window_manager/window_manager.dart';
 import '../bindings/bindings.dart';
 import '../models/settings_provider.dart';
 import '../widgets/quick_download_dialog.dart';
+import '../widgets/quick_download_form.dart';
 import 'log_service.dart';
+import 'popup_window_service.dart';
 
 const _tag = 'ExtDownSvc';
 
-/// 监听来自浏览器扩展的外部下载请求，弹出主窗口内的快速下载确认对话框。
+/// 监听来自浏览器扩展/aria2 RPC/管理 API 的外部下载请求。
 ///
 /// 架构：
 /// 1. Rust HTTP server 收到浏览器扩展的下载请求
 /// 2. Rust 发送 ExternalDownloadRequest 信号到 Dart
-/// 3. 本服务监听该信号，在主窗口内弹出 Dialog（无需创建独立子窗口）
-/// 4. 用户在 Dialog 中确认下载参数
-/// 5. Dialog 直接发送 ConfirmExternalDownload 信号到 Rust
+/// 3. 本服务监听该信号：
+///    - 免打扰开启 → 不弹窗，直接按默认设置创建任务；
+///    - 否则首选**独立小窗**（PopupWindowService，原生窗口承载第二引擎，
+///      置顶且不抢主窗口前台，对标迅雷浏览器下载弹窗）；
+///    - 原生宿主不可用时回退主窗口内快速下载对话框（恢复主窗口并前台激活）
+/// 4. 用户确认后由主引擎发送 ConfirmExternalDownload/BatchCreateTask 信号
 class ExternalDownloadService {
   static ExternalDownloadService? _instance;
 
@@ -84,9 +89,12 @@ class ExternalDownloadService {
       final entries = parseQuickDownloadEntries(req.url);
       // 请求方显式指定的目录（aria2 dir / 接管 saveDir）优先于分类匹配。
       final requestedDir = req.saveDir.trim();
+      final matchedDir = silentSettings.resolveCategorySaveDir(req.filename);
       final saveDir = requestedDir.isNotEmpty
           ? requestedDir
-          : _resolveSilentSaveDir(silentSettings, req.filename);
+          : (matchedDir.isNotEmpty
+                ? matchedDir
+                : silentSettings.effectiveDefaultSaveDir);
       if (entries.isNotEmpty && saveDir.isNotEmpty) {
         logInfo(
           _tag,
@@ -135,6 +143,30 @@ class ExternalDownloadService {
       logError(_tag, 'silent download: no entries or save dir, falling back');
     }
 
+    // ── 首选路径：独立小窗（不抢主窗口前台，对标迅雷浏览器下载弹窗）──
+    // 小窗仍可见时忽略新请求（与主窗口对话框的去重语义一致）。
+    if (PopupWindowService.instance.isVisible) {
+      logInfo(_tag, 'popup still open, ignoring request');
+      return;
+    }
+    if (!_dialogOpen) {
+      final popupSettings = SettingsProvider.globalInstance ?? settingsProvider;
+      final requestedDir = req.saveDir.trim();
+      final matchedDir = popupSettings.resolveCategorySaveDir(req.filename);
+      final resolvedDir = requestedDir.isNotEmpty
+          ? requestedDir
+          : (matchedDir.isNotEmpty
+                ? matchedDir
+                : popupSettings.effectiveDefaultSaveDir);
+      final popupShown = await PopupWindowService.instance.tryShow(
+        req: req,
+        resolvedSaveDir: resolvedDir,
+      );
+      if (popupShown) return;
+      logInfo(_tag, 'popup unavailable, falling back to in-window dialog');
+    }
+
+    // ── 回退路径：主窗口内快速下载对话框 ──
     // 防止重复弹窗 — 检查标志并验证 Navigator 上是否仍有弹窗路由
     if (_dialogOpen) {
       bool stillOpen = false;
@@ -202,31 +234,6 @@ class ExternalDownloadService {
       logError(_tag, 'failed to show dialog', e, stack);
       _dialogOpen = false;
     }
-  }
-
-  /// 免打扰模式下解析保存目录，与快速下载对话框的分类匹配逻辑一致：
-  /// 普通分类（按 position 排序）→ other 分类 → 生效的默认目录。
-  String _resolveSilentSaveDir(SettingsProvider settings, String fileName) {
-    if (fileName.isNotEmpty) {
-      final categories = settings.customCategories
-          .where((c) => c.visible)
-          .toList()
-        ..sort((a, b) => a.position.compareTo(b.position));
-      final normals = categories
-          .where((c) => c.builtinType != 'all' && c.builtinType != 'other')
-          .toList();
-      for (final cat in normals) {
-        if (cat.saveDir.isNotEmpty && cat.matches(fileName)) {
-          return cat.saveDir;
-        }
-      }
-      for (final cat in categories) {
-        if (cat.builtinType != 'other' || cat.saveDir.isEmpty) continue;
-        if (!normals.any((c) => c.matches(fileName))) return cat.saveDir;
-        break;
-      }
-    }
-    return settings.effectiveDefaultSaveDir;
   }
 
   /// 强制将主窗口带到前台。

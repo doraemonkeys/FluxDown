@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "floating_ball_drop_target.h"
+#include "popup_window_host.h"
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -40,6 +41,10 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       floating_ball_channel_;
   FloatingBallDropTarget* ball_drop_target_ = nullptr;  // COM ref-counted
+
+  // 外部唤起独立快速下载小窗宿主（第二 Flutter 引擎，懒创建常驻复用）。
+  // 必须先于 flutter_controller_ 销毁（其 host_channel_ 引用主引擎 messenger）。
+  std::unique_ptr<PopupWindowHost> popup_host_;
 
   // Tracks whether the window was hidden via ShowWindow(SW_HIDE) so that
   // we can synthesize a SIZE_RESTORED event when it becomes visible again.

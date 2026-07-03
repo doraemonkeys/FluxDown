@@ -89,6 +89,11 @@ bool FlutterWindow::OnCreate() {
         }
       });
 
+  // 外部唤起独立快速下载小窗宿主 — 注册 fluxdown/popup_host 通道。
+  // 弹窗窗口与第二引擎在首次 show 时才懒创建。
+  popup_host_ = std::make_unique<PopupWindowHost>(
+      flutter_controller_->engine()->messenger());
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   // Check --silentStart before the callback to avoid capturing by reference.
@@ -115,6 +120,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  // 先销毁弹窗宿主：其主引擎通道引用 flutter_controller_ 的 messenger
+  popup_host_ = nullptr;
   if (ball_drop_target_) {
     ball_drop_target_->Revoke();
     ball_drop_target_->Release();

@@ -8,6 +8,7 @@
 #include "flutter/generated_plugin_registrant.h"
 
 #include "floating_ball_window.h"
+#include "popup_window_host.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
@@ -19,6 +20,10 @@ struct _MyApplication {
   // Native controller for the com.fluxdown/floating_ball channel (S3.4/A6).
   // Created once in my_application_activate() and owned here.
   FloatingBallWindow* floating_ball;
+  // 外部唤起下载小窗的原生宿主（跨端弹窗契约 v1）。同样在
+  // my_application_activate() 里创建一次并持有；承载第二个 Flutter 引擎的
+  // 弹窗窗口本身懒创建，首次收到 show 请求时才真正建出来。
+  PopupWindowHost* popup_host;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -118,6 +123,12 @@ static void my_application_activate(GApplication* application) {
   // outlive a hidden main window without quitting the GApplication.
   self->floating_ball =
       floating_ball_window_new(fl_engine_get_binary_messenger(fl_view_get_engine(view)));
+
+  // 外部唤起下载小窗的原生宿主（跨端弹窗契约 v1）。同样在主引擎 messenger
+  // 上注册通道；承载第二个 Flutter 引擎的弹窗窗口懒创建，首次收到 show 请
+  // 求时才真正建出来。
+  self->popup_host = popup_window_host_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)));
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -231,6 +242,7 @@ static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   g_clear_pointer(&self->floating_ball, floating_ball_window_free);
+  g_clear_pointer(&self->popup_host, popup_window_host_free);
   // self->view is owned by the GTK widget tree — do not unref here.
 }
 

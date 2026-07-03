@@ -17,6 +17,8 @@ import 'src/models/settings_provider.dart';
 import 'src/pages/home_page.dart';
 import 'src/mobile/mobile_app.dart';
 import 'src/services/external_download_service.dart';
+import 'src/services/popup_window_service.dart';
+import 'src/popup/popup_app.dart';
 import 'src/services/floating_ball/floating_ball_service.dart';
 import 'src/services/floating_ball/wayland_degradation_service.dart';
 import 'src/services/hls_quality_service.dart';
@@ -35,6 +37,14 @@ import 'src/widgets/feedback_dialog.dart';
 import 'src/widgets/update_changelog_dialog.dart';
 
 Future<void> main(List<String> args) async {
+  // 独立快速下载小窗引擎入口：原生宿主以 --quick-popup 参数启动第二引擎。
+  // 该引擎零插件注册、不初始化 Rust，所有环境数据经 fluxdown/popup_child
+  // 通道注入（见 lib/src/popup/popup_app.dart）。必须在任何插件调用之前分发。
+  if (args.contains('--quick-popup')) {
+    runQuickPopupApp();
+    return;
+  }
+
   WidgetsFlutterBinding.ensureInitialized();
 
   // 初始化 i18n — 创建 LocaleNotifier 并从 SharedPreferences 恢复语言偏好
@@ -287,6 +297,13 @@ class _FluxDownAppState extends State<FluxDownApp>
     // 初始化外部下载服务 — 监听浏览器扩展的下载请求
     ExternalDownloadService.init(
       settingsProvider: _settingsForExternal,
+      navigatorKey: _navigatorKey,
+    );
+
+    // 初始化独立小窗服务 — 外部下载请求的首选确认入口
+    // （原生窗口承载第二 Flutter 引擎，theme/navigator 用于组装载荷）
+    PopupWindowService.instance.init(
+      themeProvider: themeProvider,
       navigatorKey: _navigatorKey,
     );
 

@@ -31,6 +31,7 @@
 		33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */ = {isa = PBXBuildFile; fileRef = 33CC10F42044A3C60003C045 /* MainMenu.xib */; };
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
 		056E52CCEA199E78A1FB289F /* FloatingBallPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF71FF5310267A6C98D2614A /* FloatingBallPanel.swift */; };
+		8C7A7C18C30BC1FBC30E0878 /* PopupWindowHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA56ECEC6A11EA3DCB3BA1A1 /* PopupWindowHost.swift */; };
 		A745AF7170FC8141C255FAD8 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C2E347290CB42C9D68AE6A35 /* Pods_Runner.framework */; };
 		ED7D327E3E30AFE4D5FED464 /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2000DC82632F100EE42D96F7 /* Pods_RunnerTests.framework */; };
 /* End PBXBuildFile section */
@@ -103,6 +104,7 @@
 		FD02000000000002 /* fluxdown_updater */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = fluxdown_updater; path = "../target/release/fluxdown_updater"; sourceTree = SOURCE_ROOT; };
 		33CC11122044BFA00003C045 /* MainFlutterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainFlutterWindow.swift; sourceTree = "<group>"; };
 		FF71FF5310267A6C98D2614A /* FloatingBallPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingBallPanel.swift; sourceTree = "<group>"; };
+		AA56ECEC6A11EA3DCB3BA1A1 /* PopupWindowHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopupWindowHost.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
 		33CEB47422A05771004F2AC0 /* Flutter-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Release.xcconfig"; sourceTree = "<group>"; };
 		33CEB47722A0578A004F2AC0 /* Flutter-Generated.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "Flutter-Generated.xcconfig"; path = "ephemeral/Flutter-Generated.xcconfig"; sourceTree = "<group>"; };
@@ -218,6 +220,7 @@
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
 				FF71FF5310267A6C98D2614A /* FloatingBallPanel.swift */,
+				AA56ECEC6A11EA3DCB3BA1A1 /* PopupWindowHost.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -550,6 +553,7 @@
 			files = (
 				33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */,
 				056E52CCEA199E78A1FB289F /* FloatingBallPanel.swift in Sources */,
+				8C7A7C18C30BC1FBC30E0878 /* PopupWindowHost.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);

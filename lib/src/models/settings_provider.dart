@@ -214,6 +214,33 @@ class SettingsProvider extends ChangeNotifier {
       _customCategories.where((c) => c.visible).toList()
         ..sort((a, b) => a.position.compareTo(b.position));
 
+  /// 按分类规则解析文件的保存目录：
+  /// 普通分类（按 position 排序）→ other 分类（无普通分类命中时）。
+  /// 无匹配或 [fileName] 为空时返回 ''，由调用方决定回退目录。
+  ///
+  /// 快速下载对话框、独立小窗与免打扰静默路径共用本解析器。
+  String resolveCategorySaveDir(String fileName) {
+    if (fileName.isEmpty) return '';
+    final categories = visibleCategories;
+    final normals = categories
+        .where((c) => c.builtinType != 'all' && c.builtinType != 'other')
+        .toList();
+    for (final cat in normals) {
+      if (cat.saveDir.isNotEmpty && cat.matches(fileName)) {
+        return cat.saveDir;
+      }
+    }
+    final otherCat = categories
+        .where((c) => c.builtinType == 'other')
+        .firstOrNull;
+    if (otherCat != null &&
+        otherCat.saveDir.isNotEmpty &&
+        !normals.any((c) => c.matches(fileName))) {
+      return otherCat.saveDir;
+    }
+    return '';
+  }
+
   // 文件关联 Getters
   bool get torrentAssocPrompted => _torrentAssocPrompted;
   bool get torrentAssociated => _torrentAssociated;

@@ -34,6 +34,11 @@ class MainFlutterWindow: NSWindow {
         // 详见 FloatingBallPanel.swift；协议参照 lib/src/services/floating_ball/floating_ball_service.dart。
         FloatingBallPanel.shared.register(with: flutterViewController.engine.binaryMessenger)
 
+        // 外部唤起独立下载小窗（原生宿主，macOS）— MethodChannel `fluxdown/popup_host`。
+        // 详见 PopupWindowHost.swift；协议参照跨端契约（外部唤起独立小窗 v1）。
+        // 单例通过 static let 自持，弹窗窗口/引擎懒创建、常驻复用，不随本窗口生命周期回收。
+        PopupWindowHost.shared.register(with: flutterViewController.engine.binaryMessenger)
+
         RegisterGeneratedPlugins(registry: flutterViewController)
 
         super.awakeFromNib()
