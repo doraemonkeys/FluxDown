@@ -328,6 +328,13 @@ impl RequestSpec {
     /// `method` 解析失败(非法字符串)时回退为 GET 并记录日志,确保单一坏请求
     /// 不会让整个下载链路崩溃。
     /// `body` 解码失败(base64 错误等)时回退为 None。
+    ///
+    /// **OPTIONS 重映射为 GET(纵深防御)**:OPTIONS 是 CORS 预检请求,
+    /// 永远不可能是真实的下载事务——扩展若把预检误当下载请求捕获
+    /// (旧版本存在此 bug:预检先于真实 GET 发出,而无 body 的 GET 不会
+    /// 覆盖缓存记录),原样回放 OPTIONS 会拿到 404/HTML,且非 GET 会被
+    /// 强制单流,丢失多线程吞吐。此处统一降级为 GET:预检必无 body,
+    /// 降级后与"扩展未捕获到 method"的默认路径完全等价。
     #[allow(clippy::too_many_arguments)]
     pub fn from_captured(
         method: Option<&str>,
@@ -342,6 +349,17 @@ impl RequestSpec {
             .and_then(|s| {
                 let upper = s.trim().to_ascii_uppercase();
                 reqwest::Method::from_bytes(upper.as_bytes()).ok()
+            })
+            .map(|m| {
+                if m == reqwest::Method::OPTIONS {
+                    log_info!(
+                        "[request-spec] captured method OPTIONS is a CORS preflight, not a real \
+                         download transaction — remapping to GET"
+                    );
+                    reqwest::Method::GET
+                } else {
+                    m
+                }
             })
             .unwrap_or(reqwest::Method::GET);
 
@@ -4159,6 +4177,46 @@ mod tests {
             extra_headers: std::collections::HashMap::new(),
             body: None,
         };
+        assert!(!spec.is_get_like());
+    }
+
+    /// 扩展误捕获 CORS 预检 OPTIONS 时（飞书云盘等跨域下载 API 的经典场景），
+    /// from_captured 必须降级为 GET —— 否则非 GET 会被强制单流、回放
+    /// OPTIONS 会拿到 404/HTML。
+    #[test]
+    fn request_spec_from_captured_remaps_options_to_get() {
+        let spec = super::RequestSpec::from_captured(
+            Some("OPTIONS"),
+            String::new(),
+            String::new(),
+            std::collections::HashMap::new(),
+            None,
+        );
+        assert_eq!(spec.method, reqwest::Method::GET);
+        assert!(spec.is_get_like(), "remapped OPTIONS must be get-like");
+        // 大小写/前后空白也应命中重映射
+        let spec2 = super::RequestSpec::from_captured(
+            Some(" options "),
+            String::new(),
+            String::new(),
+            std::collections::HashMap::new(),
+            None,
+        );
+        assert_eq!(spec2.method, reqwest::Method::GET);
+    }
+
+    /// POST 不受 OPTIONS 重映射影响——form-POST 下载（uupdump 等）依赖
+    /// 原样保留 method。
+    #[test]
+    fn request_spec_from_captured_keeps_post() {
+        let spec = super::RequestSpec::from_captured(
+            Some("POST"),
+            String::new(),
+            String::new(),
+            std::collections::HashMap::new(),
+            None,
+        );
+        assert_eq!(spec.method, reqwest::Method::POST);
         assert!(!spec.is_get_like());
     }
 

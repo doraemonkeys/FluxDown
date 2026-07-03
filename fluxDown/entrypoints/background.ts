@@ -389,9 +389,16 @@ export default defineBackground(() => {
 
   // 仅当 method 非 GET 或带有 body 时才有捕获价值——单纯的 GET 请求与现有
   // URL 重发逻辑等价，缓存它会无谓占用内存。
+  //
+  // OPTIONS 必须排除：跨域下载 API（飞书云盘等）的浏览器 CORS 预检会先对
+  // 同一 URL 发一个 OPTIONS，紧随其后的真实 GET 因"无捕获价值"不会写缓存，
+  // 于是 OPTIONS 记录留存下来被 lookupRequestRecord 命中，App 端一比一回放
+  // OPTIONS → 服务器返回 404/HTML，且非 GET 请求被引擎强制单线程下载。
+  // 预检请求本身永远不可能触发下载，捕获它只有害处。
   function shouldCaptureRequest(
     details: chrome.webRequest.WebRequestBodyDetails,
   ): boolean {
+    if (details.method === "OPTIONS") return false;
     if (details.method !== "GET" && details.method !== "HEAD") return true;
     if (details.requestBody && (details.requestBody.formData || details.requestBody.raw)) {
       return true;
@@ -424,7 +431,15 @@ export default defineBackground(() => {
   function onBeforeRequestHandler(
     details: chrome.webRequest.WebRequestBodyDetails,
   ): chrome.webRequest.BlockingResponse | undefined {
-    if (!shouldCaptureRequest(details)) return undefined;
+    if (!shouldCaptureRequest(details)) {
+      // 无 body 的 GET 是该 URL 的最新真实事务——清除同 URL 的陈旧非 GET
+      // 记录（如先前的 CORS 预检 OPTIONS 或已过期的 form POST），确保
+      // lookupRequestRecord 不会把旧事务误配给这次 GET 触发的下载。
+      if (details.method === "GET" && requestRecordCache.has(details.url)) {
+        requestRecordCache.delete(details.url);
+      }
+      return undefined;
+    }
     const body = captureBody(details);
     requestRecordCache.set(details.url, {
       url: details.url,
