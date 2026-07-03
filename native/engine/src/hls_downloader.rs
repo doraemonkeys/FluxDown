@@ -71,10 +71,12 @@ const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Upper bound on concurrent segment downloads.
 ///
-/// Matches `build_client`'s `pool_max_idle_per_host(16)` in `downloader.rs`:
-/// going past the connection-pool size forces expensive TCP+TLS re-handshakes
-/// and risks tripping CDN per-IP connection limits. 16 is the same ceiling the
-/// multi-segment HTTP downloader uses.
+/// Capped at 16 to bound CDN per-IP connection pressure: HLS playlists often
+/// have hundreds of tiny segments, and opening dozens of parallel connections
+/// to a single streaming CDN risks tripping per-IP limits or throttling.
+/// This ceiling is intentionally independent of `build_client`'s idle-pool
+/// size (`pool_max_idle_per_host`, sized for the 64-segment HTTP path) —
+/// the pool is large enough to keep every HLS connection warm regardless.
 const MAX_HLS_CONCURRENCY: usize = 16;
 
 /// Concurrency used when the user left the segment count on "auto"

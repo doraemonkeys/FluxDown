@@ -650,13 +650,17 @@ pub fn build_client(
         .connect_timeout(Duration::from_secs(15))
         // No global timeout — downloads can be very long
         // Connection pool — keep enough idle connections to cover all
-        // segments of a typical multi-segment download.  16 matches
-        // MAX_SEGMENTS on a 4-core machine (cpu_cores * 4) and avoids
-        // expensive TCP+TLS re-handshakes when workers finish one segment
-        // and immediately start the next.  90 s idle timeout tolerates
-        // brief pauses / UI interaction without discarding warm connections.
+        // segments of a multi-segment download so workers reuse warm
+        // keep-alive connections instead of paying TCP+TLS re-handshake
+        // costs when finishing one segment and starting the next.
+        // 64 == MAX_SEGMENTS (segment_advisor caps io_cap at cpu_cores*4,
+        // which reaches 64 on 16+ logical-core machines downloading large
+        // files).  The previous value of 16 (sized for a 4-core machine)
+        // starved the idle pool on many-core hosts, forcing re-handshakes
+        // for every segment beyond the 16th.  90 s idle timeout reclaims
+        // the extra connections shortly after the download finishes.
         .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(64)
         // Cookies — needed for session-based downloads (Google Drive, etc.).
         // reqwest follows RFC 6265: cookies are scoped to their domain.
         .cookie_store(true)
