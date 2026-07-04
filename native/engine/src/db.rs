@@ -185,7 +185,11 @@ CREATE TABLE IF NOT EXISTS ed2k_hashset (
 
 /// SQLite 连接级 PRAGMA（在 `after_connect` 钩子中对每个新连接执行）。
 /// `foreign_keys=ON` 是 sqlx-sqlite 的默认值，无需重复设置。
+/// `busy_timeout` 让撞上写锁的连接在 5s 内自旋重试而非立即抛
+/// `SQLITE_BUSY`（code 5, database is locked）——覆盖多任务并发落库 /
+/// WAL checkpoint / 删除事务之间的瞬时写-写冲突。
 const SQLITE_PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
+ PRAGMA busy_timeout=5000;\
  PRAGMA cache_size=-512;\
  PRAGMA temp_store=MEMORY;\
  PRAGMA mmap_size=0;\
