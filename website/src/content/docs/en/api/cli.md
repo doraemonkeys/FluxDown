@@ -5,9 +5,12 @@ section: api
 order: 2
 ---
 
-FluxDown ships a command-line client, the `fluxdown` binary, modelled on `aria2c`. It's a thin, typed HTTP client over the [management API](/docs/en/api/overview/): every command talks to a running FluxDown desktop app or [headless server](/docs/en/headless-server/setup/) over `http://127.0.0.1:17800` (or wherever you point it), so it manages exactly the same tasks and queues you'd see in the app.
+FluxDown ships a command-line client, the `fluxdown` binary, modelled on `aria2c`. It works in two modes:
 
-It is not a standalone downloader — it needs a running FluxDown instance to talk to. Think of it as a scriptable remote control, the same role `aria2c`'s RPC client mode plays.
+- **Remote mode (default)**: a thin, typed HTTP client over the [management API](/docs/en/api/overview/). Most commands talk to a running FluxDown desktop app or [headless server](/docs/en/headless-server/setup/) over `http://127.0.0.1:17800` (or wherever you point it), so it manages exactly the same tasks and queues you'd see in the app. In this role it's a scriptable remote control, the same part `aria2c`'s RPC client mode plays.
+- **Standalone mode (`add --local`)**: fully independent of any running instance — it **embeds the download engine** inside the CLI process and downloads directly. This path never contacts a server and needs no token, ideal for headless environments or one-off scripted downloads. See [`add`](#add) and [Standalone mode](#standalone-mode---local) below.
+
+The [`config`](#config) subcommand is also purely local file I/O and never contacts a server.
 
 ## Getting the binary
 
@@ -100,8 +103,27 @@ cat urls.txt | fluxdown add -i -
 | `--cookies <STR>` | Cookie string. |
 | `--queue <ID>` | Named queue id (empty = default queue). |
 | `--checksum <SPEC>` | Checksum to verify, format `algo=hexhash` (e.g. `sha256=abc123...`). |
+| `--local` | Standalone mode: don't contact a server, download directly via an embedded engine in this process (see [Standalone mode](#standalone-mode---local)). Only `add` supports this. |
 
 On success it prints the new task id(s), one per line (`added <id>`), or a JSON array of ids with `--json`. When several URLs are given, each is attempted independently: a failure on one URL prints `failed to add <url>: ...` to stderr but does not abort the others or discard already-created tasks. The command exits `0` only if every URL succeeded; otherwise it reports the first failure's exit code after listing whatever was created.
+
+#### Standalone mode (`--local`)
+
+With `--local`, `add` no longer contacts any running instance. Instead it **embeds the download engine** (the same engine the desktop app/server use) inside the CLI process and downloads directly. This is the only way to run the CLI **fully offline** — no running app or server, and no token required.
+
+```bash
+# Fully offline download, independent of any running FluxDown instance
+fluxdown add https://example.com/file.zip --local
+```
+
+Behavior:
+
+- **One-shot, blocking**: the process creates the task(s), blocks until every download reaches a terminal state (completed/failed), then exits with a code reflecting the result.
+- **Shared database**: it uses the same SQLite database under the shared data directory as the desktop app/server, so tasks added with `--local` are visible in the app too (provided both resolve to the same data directory — i.e. installed mode; portable mode may keep them separate).
+- **Save-directory precedence**: `-d/--dir` > the default save directory configured in the shared database > the current working directory.
+- **Unattended selection**: HLS picks the highest bitrate, BitTorrent/magnet downloads all files (no interactive prompts).
+- **Ctrl-C semantics**: interrupting pauses unfinished tasks and exits with code `7`; you can resume later via the app/server.
+- Only `add` supports `--local`; every other command always uses remote mode.
 
 ### list
 
@@ -173,6 +195,7 @@ The CLI mirrors `aria2c`'s exit-status convention, so scripts can branch on the 
 | `2` | Request timed out (or, from clap, no subcommand given). |
 | `3` | Not found (a 404 — e.g. the task id doesn't exist). |
 | `5` | Network error (couldn't connect — is FluxDown running?). |
+| `7` | Interrupted with downloads still unfinished (Ctrl-C in `--local` mode). |
 | `24` | Authentication failed (missing or invalid token). |
 | `32` | Bad request (a 400, or invalid input such as an unknown status filter). |
 
@@ -182,4 +205,4 @@ Wherever the CLI displays sizes it uses 1024-based units (`KiB`, `MiB`, `GiB`). 
 
 ## Relationship to aria2 and the API
 
-The CLI is one of several ways to drive the same management API. If you already have aria2-targeting tooling, the [aria2-compatible RPC endpoint](/docs/en/api/overview/#curl-examples) may be a better fit; for AI clients, use [MCP](/docs/en/api/overview/#mcp-model-context-protocol). All of them operate on the same tasks and queues. Metalink, XML-RPC, and aria2's session save/restore are intentionally not implemented — FluxDown's SQLite store already persists everything across restarts.
+The CLI has two roles: remote mode drives the same management API, and standalone mode (`add --local`) embeds the engine to download offline. If you already have aria2-targeting tooling, the [aria2-compatible RPC endpoint](/docs/en/api/overview/#curl-examples) may be a better fit; for AI clients, use [MCP](/docs/en/api/overview/#mcp-model-context-protocol). Remote mode and those entry points operate on the same tasks and queues. Metalink, XML-RPC, and aria2's session save/restore are intentionally not implemented — FluxDown's SQLite store already persists everything across restarts.
