@@ -6,22 +6,21 @@ import 'dart:ui' show PlatformDispatcher;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/painting.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'kv_store.dart';
 import 'log_service.dart';
 import 'win32_toast/win32_bindings.dart';
 
 const _tag = 'WindowState';
 
-// SharedPreferences 存储 key（原生层 first_frame_cb 显示窗口前，
-// Dart 侧在 runApp 之前直接 await 读取并应用）
+// KvStore 存储 key（原生层 first_frame_cb 显示窗口前，
+// Dart 侧在 runApp 之前直接同步读取并应用）
 const _kWindowX = 'window_state_x';
 const _kWindowY = 'window_state_y';
 const _kWindowWidth = 'window_state_width';
 const _kWindowHeight = 'window_state_height';
 const _kWindowMaximized = 'window_state_maximized';
-const _kPrefsInitTimeout = Duration(seconds: 3);
 
 /// 窗口最小尺寸限制
 const _kMinWidth = 900.0;
@@ -90,10 +89,10 @@ class WindowStateService {
   double? _savedHeight;
   bool _savedMaximized = false;
 
-  /// 是否成功从 SharedPreferences 读取到了有效的宽高
+  /// 是否成功从 [KvStore] 读取到了有效的宽高
   bool get hasSavedSize => _savedWidth != null && _savedHeight != null;
 
-  /// 是否成功从 SharedPreferences 读取到了有效的位置
+  /// 是否成功从 [KvStore] 读取到了有效的位置
   bool get hasSavedPosition => _savedX != null && _savedY != null;
 
   /// 保存的窗口宽度（经过 clamp，至少 [_kMinWidth]）
@@ -124,15 +123,13 @@ class WindowStateService {
   // 启动阶段：加载 & 应用
   // ---------------------------------------------------------------------------
 
-  /// 从 SharedPreferences 读取保存的窗口状态。
+  /// 从 [KvStore] 读取保存的窗口状态（同步读取，已在 main 早期载入）。
   ///
   /// 纯读取操作，不调用任何 windowManager API。
   /// 应在 `windowManager.ensureInitialized()` 之后调用。
   Future<void> loadState() async {
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(
-        _kPrefsInitTimeout,
-      );
+      final prefs = KvStore.instance;
       _savedX = prefs.getDouble(_kWindowX);
       _savedY = prefs.getDouble(_kWindowY);
       _savedWidth = prefs.getDouble(_kWindowWidth);
@@ -251,6 +248,8 @@ class WindowStateService {
     _debounceTimer?.cancel();
     _debounceTimer = null;
     await _save(force: true);
+    // 便携模式下 KvStore 写入有防抖，退出/隐藏前强制落盘，避免最新窗口状态丢失。
+    await KvStore.instance.flush();
   }
 
   /// 释放资源
@@ -291,7 +290,7 @@ class WindowStateService {
         }
       }
 
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = KvStore.instance;
 
       await prefs.setBool(_kWindowMaximized, _isMaximized);
 

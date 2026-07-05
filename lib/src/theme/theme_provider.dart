@@ -1,9 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../i18n/locale_provider.dart';
+import '../services/kv_store.dart';
 import '../services/log_service.dart';
 import 'flux_theme_tokens.dart';
 
@@ -145,7 +145,7 @@ class ImportedThemeEntry {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  SharedPreferences 存储 key
+//  KvStore 存储 key
 // ═══════════════════════════════════════════════════════════
 
 const _kThemeMode = 'theme_mode';
@@ -160,7 +160,6 @@ const _kUiScale = 'ui_scale';
 // 旧版 key（迁移用）
 const _kLegacyCustomThemeDark = 'custom_theme_dark_json';
 const _kLegacyCustomThemeLight = 'custom_theme_light_json';
-const _kPrefsInitTimeout = Duration(seconds: 3);
 
 // ═══════════════════════════════════════════════════════════
 //  ThemeProvider
@@ -293,9 +292,7 @@ class ThemeProvider extends ChangeNotifier {
 // 失败时直接使用默认主题配置，不再阻塞进入 UI
   Future<void> init() async {
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(
-        _kPrefsInitTimeout,
-      );
+      final prefs = KvStore.instance;
 
       // 主题模式
       final modeStr = prefs.getString(_kThemeMode);
@@ -352,7 +349,7 @@ class ThemeProvider extends ChangeNotifier {
   }
 
   /// 迁移旧版存储（单个 custom_theme_dark_json / custom_theme_light_json）
-  void _migrateV1(SharedPreferences prefs) {
+  void _migrateV1(KvStore prefs) {
     var migrated = false;
     final darkJson = prefs.getString(_kLegacyCustomThemeDark);
     if (darkJson != null) {
@@ -393,6 +390,9 @@ class ThemeProvider extends ChangeNotifier {
         _persist(_kSelectedCustomLight, _selectedCustomLightId!);
       }
     }
+    // 迁移是一次性操作：立即落盘，避免启动后 400ms 内强杀导致 legacy 键
+    // 未清除、下次启动重复迁移（重复导入主题）。
+    prefs.flush();
   }
 
   // ── 主题模式 ──
@@ -680,7 +680,7 @@ class ThemeProvider extends ChangeNotifier {
     }
   }
 
-  void _loadImportedThemes(SharedPreferences prefs) {
+  void _loadImportedThemes(KvStore prefs) {
     final jsonStr = prefs.getString(_kImportedThemes);
     if (jsonStr == null) return;
     try {
@@ -703,12 +703,10 @@ class ThemeProvider extends ChangeNotifier {
   }
 
   Future<void> _persist(String key, String value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(key, value);
+    await KvStore.instance.setString(key, value);
   }
 
   Future<void> _persistRemove(String key) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(key);
+    await KvStore.instance.remove(key);
   }
 }

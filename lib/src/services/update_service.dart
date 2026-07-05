@@ -4,9 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:rinf/rinf.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../bindings/bindings.dart';
+import 'kv_store.dart';
 import 'log_service.dart';
 
 /// Application version injected at build time.
@@ -15,7 +15,7 @@ const _appVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 /// Base URL of the website API.
 const _updateApiBase = 'https://fluxdown.zerx.dev';
 
-/// SharedPreferences key for the last version whose changelog was shown.
+/// KvStore key for the last version whose changelog was shown.
 const _prefKeyLastShownVersion = 'update_changelog_last_shown';
 
 /// A single release entry from the changelog API.
@@ -128,7 +128,7 @@ class UpdateService extends ChangeNotifier {
     _shouldShowChangelog = false;
     final latest = _checkResult?.latestVersion;
     if (latest != null && latest.isNotEmpty) {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = KvStore.instance;
       await prefs.setString(_prefKeyLastShownVersion, latest);
       logInfo('UpdateService', 'marked changelog shown for v$latest');
     }
@@ -286,7 +286,7 @@ class UpdateService extends ChangeNotifier {
   Future<void> _fetchChangelogAndCheckShown(String latestVersion) async {
     try {
       // Check if we already showed changelog for this version
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = KvStore.instance;
       final lastShown = prefs.getString(_prefKeyLastShownVersion) ?? '';
       if (lastShown == latestVersion) {
         logInfo(

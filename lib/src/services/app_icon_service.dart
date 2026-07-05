@@ -5,16 +5,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'ico_codec.dart';
+import 'kv_store.dart';
 import 'log_service.dart';
 import 'platform_utils.dart';
 import 'tray_service.dart';
 
 const _tag = 'AppIconService';
-const _kPrefsInitTimeout = Duration(seconds: 3);
 
 /// 应用图标选择。
 enum AppIconChoice {
@@ -38,7 +37,7 @@ enum AppIconChoice {
 ///   PNG 压缩 ICO，持久化在数据目录 `icons/custom_icon.ico`；
 /// - 运行时通过 `window_manager.setIcon`（WM_SETICON）替换窗口与任务栏
 ///   图标，托盘图标经 [TrayService.setCustomIcon] 覆盖；
-/// - 选择持久化在 SharedPreferences，每次启动 [init] 时重新应用
+/// - 选择持久化在 [KvStore]，每次启动 [init] 时重新应用
 ///   （WM_SETICON 仅对当前进程生效）。
 ///
 /// 注意：固定到任务栏的快捷方式图标来自 .lnk/exe 资源，运行时无法修改；
@@ -94,9 +93,7 @@ class AppIconService extends ChangeNotifier {
   Future<void> init() async {
     if (!Platform.isWindows) return;
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(
-        _kPrefsInitTimeout,
-      );
+      final prefs = KvStore.instance;
       var choice = _readChoice(prefs);
       if (choice == AppIconChoice.custom && !hasCustomIcon) {
         choice = AppIconChoice.defaultIcon;
@@ -121,7 +118,7 @@ class AppIconService extends ChangeNotifier {
   }
 
   /// 读取持久化选择；无新键时从旧版 bool 键迁移。
-  AppIconChoice _readChoice(SharedPreferences prefs) {
+  AppIconChoice _readChoice(KvStore prefs) {
     final tag = prefs.getString(_kChoiceKey);
     if (tag != null) {
       return AppIconChoice.values.firstWhere(
@@ -255,7 +252,7 @@ class AppIconService extends ChangeNotifier {
 
   Future<void> _persist() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = KvStore.instance;
       await prefs.setString(_kChoiceKey, _choiceTag(_choice));
     } catch (e, stack) {
       logError(_tag, 'failed to persist app icon setting', e, stack);

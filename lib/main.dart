@@ -25,6 +25,7 @@ import 'src/services/hls_quality_service.dart';
 import 'src/services/bt_file_selection_service.dart';
 import 'src/services/app_icon_service.dart';
 import 'src/services/log_service.dart';
+import 'src/services/kv_store.dart';
 import 'src/services/notification_service.dart';
 import 'src/services/power_service.dart';
 import 'src/services/tray_service.dart';
@@ -74,6 +75,10 @@ Future<void> main(List<String> args) async {
   // 需要保证这些启动前故障也能写入日志，而不是只剩白屏。
   LogService.instance.init();
   logInfo('main', 'bootstrap start, args=$args');
+
+  // 初始化键值存储门面 — 必须早于任何 provider/service 读取（locale/theme/
+  // 窗口状态）。便携模式下改写 exe 目录 settings.json，消除首次打开写 C 盘。
+  await _runStartupStep('kv store init', () => KvStore.instance.init());
 
   // 初始化 i18n — 创建 LocaleNotifier 并从 SharedPreferences 恢复语言偏好
   localeNotifier = LocaleNotifier();
@@ -725,6 +730,8 @@ class _FluxDownAppState extends State<FluxDownApp>
       logInfo('FluxDownApp', 'destroying tray...');
       await TrayService.instance.destroy();
 
+      // 便携模式下 KvStore 写入有防抖，退出前强制落盘，避免刚改的设置丢失。
+      await KvStore.instance.flush();
       logInfo('FluxDownApp', 'destroying window...');
       await LogService.instance.dispose();
       await windowManager.destroy();

@@ -1,19 +1,18 @@
 import 'dart:io';
 
 import 'package:flutter/widgets.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import '../services/kv_store.dart';
 import '../services/log_service.dart';
 export 'translations.dart';
 import 'translations.dart';
 
-/// SharedPreferences key
+/// KvStore key
 const _kAppLocale = 'app_locale';
 
 /// 语言偏好值: 'system' | 'zh' | 'en'
 const kLocaleSystem = 'system';
 const kLocaleZh = 'zh';
 const kLocaleEn = 'en';
-const _kPrefsInitTimeout = Duration(seconds: 3);
 
 /// 获取系统语言并决定使用的 locale。
 /// 支持 zh（中文）和 en（英文），其他语言默认使用英文。
@@ -36,7 +35,7 @@ late final LocaleNotifier localeNotifier;
 /// 运行时语言管理器
 ///
 /// 支持三种模式: 跟随系统 / 中文 / 英文。
-/// 持久化到 SharedPreferences，变更时 notifyListeners 触发 UI 重建。
+/// 持久化到 [KvStore]，变更时 notifyListeners 触发 UI 重建。
 class LocaleNotifier extends ChangeNotifier {
   /// 用户选择的语言偏好: 'system', 'zh', 'en'
   String _preference = kLocaleSystem;
@@ -44,14 +43,10 @@ class LocaleNotifier extends ChangeNotifier {
   String get preference => _preference;
   S get s => currentS;
 
-  /// 启动时调用，从 SharedPreferences 恢复语言偏好。
-  /// 读取加 3 秒超时；超时或异常时记录日志并回退系统语言，避免卡住启动。
+  /// 启动时调用，从 [KvStore] 恢复语言偏好（同步读取，已在 main 早期载入）。
   Future<void> init() async {
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(
-        _kPrefsInitTimeout,
-      );
-      final saved = prefs.getString(_kAppLocale);
+      final saved = KvStore.instance.getString(_kAppLocale);
       if (saved != null &&
           (saved == kLocaleSystem ||
               saved == kLocaleZh ||
@@ -84,10 +79,9 @@ class LocaleNotifier extends ChangeNotifier {
     currentS = S.of(currentLocale);
   }
 
-  /// 异步写入 SharedPreferences（fire-and-forget）
+  /// 写入语言偏好（fire-and-forget）
   Future<void> _persist() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kAppLocale, _preference);
+    await KvStore.instance.setString(_kAppLocale, _preference);
   }
 }
 
