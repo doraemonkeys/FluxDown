@@ -19,7 +19,7 @@
   </Overview>
   <Category>Downloaders: Network:Web</Category>
   <WebUI>http://[IP]:[PORT:17800]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/zerx-lab/FluxDown/main/promotion/unraid/fluxdown.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/zerx-lab/unraid-templates/main/FluxDown/fluxdown.xml</TemplateURL>
   <Icon>https://cdn.jsdelivr.net/gh/zerx-lab/FluxDown@main/assets/logo/fluxdown_logo.svg</Icon>
   <ExtraParams/>
   <PostArgs/>
