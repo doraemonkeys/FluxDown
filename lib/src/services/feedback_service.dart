@@ -6,6 +6,9 @@ import 'log_service.dart';
 
 const _tag = 'Feedback';
 
+/// 应用版本（构建时注入，同 update_service）。作为 source=app 反馈的 appVersion 上报。
+const _appVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
+
 /// 反馈类型，对应 website API 的 type 字段。
 enum FeedbackType {
   feature,
@@ -64,6 +67,9 @@ class FeedbackService {
       'type': type.value,
       'title': title,
       'description': description,
+      // 标记来源为桌面应用，服务端据此打 App 标签并套用应用反馈 body 模板。
+      'source': 'app',
+      'appVersion': _appVersion,
     };
     if (contact != null && contact.trim().isNotEmpty) {
       body['contact'] = contact.trim();

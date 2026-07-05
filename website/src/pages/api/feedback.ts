@@ -97,6 +97,8 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     contact?: string;
     pagePath?: string;
     logs?: string;
+    source?: string; // "website"（默认）| "app"，决定来源标签与 body 模板措辞
+    appVersion?: string; // 可选，source=app 时附带的应用版本号
   };
 
   try {
@@ -108,7 +110,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     });
   }
 
-  const { type, title, description, contact, pagePath, logs } = body;
+  const { type, title, description, contact, pagePath, logs, source, appVersion } = body;
 
   // 验证必填字段
   if (!type || !title || !description) {
@@ -162,14 +164,40 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
       ? logs.trim().slice(-30000)
       : undefined;
 
-  // 构造 Issue 内容
+  // 构造 Issue 内容。按 type 生成区分 bug / feature 的结构化标题，按 source
+  // 区分来源（Website 表单 vs 桌面应用内反馈），metadata 尾部保留
+  // **Type:** / **Source:** / **Submitted:** 字面量以兼容 issues API 的 parseFeedbackBody。
   const emoji = TYPE_EMOJI[type] || "\uD83D\uDCAC";
   const label = TYPE_LABELS[type] || "feedback";
+  const isApp = source === "app";
 
-  const issueTitle = `${emoji} [Website Feedback] ${title}`;
+  // 来源标记：标题前缀 + metadata 的 **Source:** 值（后者必须保留供 parser 门禁识别）。
+  const sourceTag = isApp ? "App" : "Website";
+  const sourceMeta = isApp
+    ? `Desktop App${appVersion ? ` (${appVersion})` : ""}`
+    : "Website feedback form";
+
+  // 正文标题：bug / feature / docs / other 各自不同措辞。
+  const heading =
+    type === "feature"
+      ? "Feature Request"
+      : type === "bug"
+        ? "Bug Report"
+        : type === "docs"
+          ? "Documentation Feedback"
+          : "Feedback";
+
+  const issueTitle = `${emoji} [${sourceTag} Feedback] ${title}`;
   const issueBody = [
-    `## ${type === "feature" ? "Feature Request" : type === "bug" ? "Bug Report" : "Feedback"}`,
+    `## ${heading}`,
     "",
+    // bug 与 feature 各自补一个语义化子标题，让内容在详情页分区展示。
+    type === "bug"
+      ? "### 问题描述 / Description"
+      : type === "feature"
+        ? "### 建议内容 / Proposal"
+        : null,
+    type === "bug" || type === "feature" ? "" : null,
     description,
     "",
     "---",
@@ -177,14 +205,14 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     `**Type:** ${type}`,
     safePagePath ? `**页面**: ${safePagePath}` : null,
     contact ? `**Contact:** ${contact}` : null,
-    `**Source:** Website feedback form`,
+    `**Source:** ${sourceMeta}`,
     `**Submitted:** ${new Date().toISOString()}`,
     `**IP:** \`${ip}\``,
     safeLogs
       ? `\n<details>\n<summary>Client Logs</summary>\n\n\`\`\`log\n${safeLogs}\n\`\`\`\n</details>`
       : null,
   ]
-    .filter(Boolean)
+    .filter((line) => line !== null)
     .join("\n");
 
   try {
