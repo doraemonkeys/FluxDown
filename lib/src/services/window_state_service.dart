@@ -21,6 +21,7 @@ const _kWindowY = 'window_state_y';
 const _kWindowWidth = 'window_state_width';
 const _kWindowHeight = 'window_state_height';
 const _kWindowMaximized = 'window_state_maximized';
+const _kPrefsInitTimeout = Duration(seconds: 3);
 
 /// 窗口最小尺寸限制
 const _kMinWidth = 900.0;
@@ -129,7 +130,9 @@ class WindowStateService {
   /// 应在 `windowManager.ensureInitialized()` 之后调用。
   Future<void> loadState() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(
+        _kPrefsInitTimeout,
+      );
       _savedX = prefs.getDouble(_kWindowX);
       _savedY = prefs.getDouble(_kWindowY);
       _savedWidth = prefs.getDouble(_kWindowWidth);
@@ -404,11 +407,9 @@ class WindowStateService {
         if (getMonitorInfoW(monitor, mi) == 0) return true; // 查询失败不阻塞
         final m = mi.ref.rcMonitor;
         final overlapW =
-            math.min(rect.ref.right, m.right) -
-            math.max(rect.ref.left, m.left);
+            math.min(rect.ref.right, m.right) - math.max(rect.ref.left, m.left);
         final overlapH =
-            math.min(rect.ref.bottom, m.bottom) -
-            math.max(rect.ref.top, m.top);
+            math.min(rect.ref.bottom, m.bottom) - math.max(rect.ref.top, m.top);
         return overlapW >= _kMinVisiblePx && overlapH >= _kMinVisiblePx;
       } finally {
         calloc.free(rect);
