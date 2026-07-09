@@ -107,6 +107,8 @@ const en = {
   'sidebar.feedback': 'Feedback',
   'sidebar.logoutTitle': 'Log out',
   'sidebar.logoutMsg': 'Disconnect from the server and clear the token saved on this device; you will need to sign in again next time.',
+  'sidebar.version': 'Version {version}',
+  'sidebar.newVersion': 'New version {version}',
 
   // topbar
   'topbar.searchPlaceholder': 'Search tasks… (Ctrl+F)',
@@ -365,6 +367,9 @@ const en = {
   'set.about.version': 'Server version',
   'set.about.logout': 'Log out',
   'set.about.logoutDesc': 'Clear the server address and token saved locally',
+  'set.about.upToDate': 'Up to date',
+  'set.about.newVersion': 'New version {version} available',
+  'set.about.getUpdate': 'Get update',
   'set.about.tagline': 'No ads · No tracking · No account · Data stays on your server',
 } as const
 
@@ -453,6 +458,8 @@ const zh: Record<I18nKey, string> = {
   'sidebar.feedback': '反馈',
   'sidebar.logoutTitle': '退出登录',
   'sidebar.logoutMsg': '将断开与服务器的连接并清除本设备上保存的令牌，下次访问需重新登录。',
+  'sidebar.version': '版本 {version}',
+  'sidebar.newVersion': '新版本 {version}',
 
   'topbar.searchPlaceholder': '搜索任务名称…（Ctrl+F）',
   'topbar.manage': '批量管理',
@@ -689,6 +696,9 @@ const zh: Record<I18nKey, string> = {
   'set.about.version': '服务器版本',
   'set.about.logout': '退出登录',
   'set.about.logoutDesc': '清除本地保存的服务器地址与令牌',
+  'set.about.upToDate': '已是最新版本',
+  'set.about.newVersion': '发现新版本 {version}',
+  'set.about.getUpdate': '前往下载',
   'set.about.tagline': '零广告 · 零追踪 · 无需账号 · 数据全在你的服务器',
 }
 

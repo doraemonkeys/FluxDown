@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import * as Dialog from '@radix-ui/react-dialog'
-import { Archive, FileText, Image as ImageIcon, LayoutGrid, List, LogOut, Film, Music, MessageCircle, File as FileIcon, Plus, Trash2, X } from 'lucide-react'
+import { Archive, ArrowUpCircle, FileText, Image as ImageIcon, LayoutGrid, List, LogOut, Film, Music, MessageCircle, File as FileIcon, Plus, Trash2, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { api } from '../../lib/api'
 import { clearCredentials, getBase } from '../../lib/auth'
@@ -13,6 +13,7 @@ import { cn } from '../../lib/cn'
 import { fileType, fmtSpeed, typeLabel, TYPE_ORDER, type FileType as FT } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
 import { connStore, disconnectWs, useGlobalSpeed, useStore } from '../../lib/ws'
+import { useUpdateCheck } from '../../lib/update'
 import { confirmDialog } from '../../lib/confirm'
 import { useTasksUi } from './context'
 import { useViewTasks } from './useViewTasks'
@@ -34,6 +35,7 @@ export function Sidebar() {
   const { typeFilter, setTypeFilter, queueFilter, setQueueFilter } = useTasksUi()
   const speed = useGlobalSpeed()
   const conn = useStore(connStore)
+  const update = useUpdateCheck()
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [logoutOpen, setLogoutOpen] = useState(false)
@@ -170,6 +172,16 @@ export function Sidebar() {
           <MessageCircle size={14} />
           {t('sidebar.feedback')}
         </a>
+        {update.hasUpdate && update.releaseUrl ? (
+          <a className="side-feedback" style={{ color: 'var(--accent)' }} href={update.releaseUrl} target="_blank" rel="noreferrer">
+            <ArrowUpCircle size={14} />
+            {t('sidebar.newVersion', { version: `v${update.latest}` })}
+          </a>
+        ) : update.current ? (
+          <span className="side-feedback" style={{ cursor: 'default' }}>
+            {t('sidebar.version', { version: `v${update.current}` })}
+          </span>
+        ) : null}
       </div>
 
       <Dialog.Root open={logoutOpen} onOpenChange={setLogoutOpen}>
