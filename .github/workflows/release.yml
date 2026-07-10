@@ -66,6 +66,7 @@ jobs:
                 native/api/*)        SERVER=true; CLI=true ;;
                 native/engine/*)     APP=true; SERVER=true; MOBILE=true; CLI=true ;;
                 docker/*)            SERVER=true ;;
+                packaging/*)         SERVER=true ;;
                 android/*)           MOBILE=true ;;
                 lib/src/mobile/*)    MOBILE=true ;;
                 # 其余共享 Dart 代码（models/i18n/theme/bindings…）同时影响桌面端与移动端
@@ -861,10 +862,13 @@ jobs:
           echo "COMMIT_COUNT=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
 
       # ── Rust toolchain ──
+      # 预装两个 Apple target：macOS Release 为 universal 构建，Xcode 阶段 hub（Rinf）
+      # 与 super_native_extensions 两个 cargokit 会并发补装缺失 target，rustup 下载
+      # 缓存无跨进程锁会偶发竞态（.partial rename 失败）；预装后 cargokit 直接跳过。
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
