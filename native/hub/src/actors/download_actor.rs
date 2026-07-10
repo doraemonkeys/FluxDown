@@ -393,6 +393,10 @@ pub async fn run(db_dir: PathBuf) {
         {
             engine.manager.set_auto_retry_delay_secs(v);
         }
+        // 下载完成后是否采用服务器 Last-Modified 作为文件修改时间（默认关闭）。
+        if let Some(v) = cfg.get("use_server_time") {
+            engine.manager.set_use_server_time(v == "true");
+        }
     }
 
     if let Some(rx) = engine.manager.take_progress_rx() {
@@ -1456,6 +1460,11 @@ async fn apply_config_key(
                 log_info!("[actor] updating auto_max_connections to {}", v);
                 engine.manager.set_auto_max_connections(v);
             }
+        }
+        "use_server_time" => {
+            let v = value == "true";
+            log_info!("[actor] updating use_server_time to {}", v);
+            engine.manager.set_use_server_time(v);
         }
         "max_auto_retries" => {
             if let Ok(v) = value.parse::<i32>() {

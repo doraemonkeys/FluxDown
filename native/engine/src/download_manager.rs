@@ -592,6 +592,9 @@ pub struct DownloadManager {
     /// Auto 模式最大连接数上限（config `auto_max_connections`）。
     /// <=0 = 不限（罕见，仅显式配置），默认 [`DEFAULT_AUTO_MAX_CONNECTIONS`]。
     auto_max_connections: i32,
+    /// 下载完成后是否把文件修改时间设为服务器提供的 `Last-Modified` 时间
+    /// （config `use_server_time`，默认关闭）。
+    use_server_time: bool,
     /// In-memory cache of named queue settings (queue_id → QueueInfo).
     /// Kept in sync with the DB on every queue CRUD operation.
     queues: HashMap<String, QueueInfo>,
@@ -699,6 +702,7 @@ impl DownloadManager {
             global_user_agent: user_agent,
             global_default_segments: 0,
             auto_max_connections: DEFAULT_AUTO_MAX_CONNECTIONS,
+            use_server_time: false,
             queues: HashMap::new(),
             queue_limiters: HashMap::new(),
             startup_reset_done: false,
@@ -790,6 +794,15 @@ impl DownloadManager {
     /// <=0 = unlimited (advisor value used as-is).
     pub fn set_auto_max_connections(&mut self, v: i32) {
         self.auto_max_connections = v;
+    }
+
+    /// Update whether completed downloads adopt the server-provided
+    /// `Last-Modified` timestamp as the file's modification time
+    /// (config `use_server_time`). Takes effect for downloads started
+    /// after the change; already-running downloads keep the value they
+    /// were spawned with.
+    pub fn set_use_server_time(&mut self, v: bool) {
+        self.use_server_time = v;
     }
 
     /// Update global speed limit (bytes/sec).  Takes effect immediately on
@@ -2227,6 +2240,7 @@ impl DownloadManager {
                 spec,
                 audio_url,
                 auto_max_connections: self.auto_max_connections,
+                use_server_time: self.use_server_time,
             };
 
             tokio::spawn(async move {
@@ -2839,6 +2853,7 @@ impl DownloadManager {
                 ),
                 audio_url,
                 auto_max_connections: self.auto_max_connections,
+                use_server_time: self.use_server_time,
             };
 
             tokio::spawn(async move {

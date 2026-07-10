@@ -149,6 +149,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         engine.manager.set_auto_retry_delay_secs(v);
     }
+    // 下载完成后是否采用服务器 Last-Modified 作为文件修改时间（默认关闭）。
+    if let Some(v) = all_cfg.get("use_server_time") {
+        engine.manager.set_use_server_time(v == "true");
+    }
 
     // 进度上报旁路：progress_rx 独立消费（不 spawn 则无任何进度事件）。
     if let Some(rx) = engine.manager.take_progress_rx() {

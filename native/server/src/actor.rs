@@ -372,6 +372,11 @@ async fn apply_config(engine: &mut Engine, keys: &[String]) {
                     engine.manager.set_auto_max_connections(v);
                 }
             }
+            "use_server_time" => {
+                if let Some(v) = all.get(key) {
+                    engine.manager.set_use_server_time(v == "true");
+                }
+            }
             "domain_conn_caps" => {
                 // 空值 = Web 设置页「清除已学习的服务器策略」
                 if all.get(key).is_some_and(|v| v.is_empty()) {

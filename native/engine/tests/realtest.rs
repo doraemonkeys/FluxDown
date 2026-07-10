@@ -1273,6 +1273,7 @@ async fn run_full(
         extra_headers: std::collections::HashMap::new(),
         spec: RequestSpec::empty_get(),
         audio_url: None,
+        use_server_time: false,
     };
 
     run_download(params).await;
@@ -1303,6 +1304,119 @@ async fn insert_simple_task(
     )
     .await
     .expect("insert_task");
+}
+
+/// 同 run_full 的精简版，额外暴露 `use_server_time` 开关（服务器 Last-Modified
+/// 作为文件修改时间）。固定 4 分段驱动 coordinator 多段路径 + 共享 finalize。
+async fn run_full_server_time(
+    work_dir: &Path,
+    db: &Db,
+    task_id: &str,
+    url: &str,
+    file_name: &str,
+    use_server_time: bool,
+) -> (i32, std::path::PathBuf) {
+    use fluxdown_engine::downloader::{DownloadParams, run_download};
+
+    let client = test_client();
+    let speed_limiter = SpeedLimiter::new(0);
+    let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
+    let last_status = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let ls = last_status.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(u) = rx.recv().await {
+            if u.status >= 3 {
+                ls.store(u.status, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+
+    let params = DownloadParams {
+        auto_max_connections: 0,
+        task_id: task_id.to_string(),
+        url: url.to_string(),
+        save_dir: work_dir.to_string_lossy().to_string(),
+        file_name: file_name.to_string(),
+        segment_count: 4,
+        is_resume: false,
+        range_verified: true,
+        db: db.clone(),
+        client,
+        progress_tx: tx,
+        cancel_token: CancellationToken::new(),
+        speed_limiter,
+        cookies: String::new(),
+        referrer: String::new(),
+        hint_file_size: 0,
+        proxy_config: ProxyConfig::default(),
+        sink: std::sync::Arc::new(NoopTestSink),
+        selector: std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        checksum: String::new(),
+        extra_headers: std::collections::HashMap::new(),
+        spec: RequestSpec::empty_get(),
+        audio_url: None,
+        use_server_time,
+    };
+
+    run_download(params).await;
+    let _ = collector.await;
+    let status = last_status.load(std::sync::atomic::Ordering::SeqCst);
+    (status, work_dir.join(file_name))
+}
+
+// ---------------------------------------------------------------------------
+// use_server_time：完成文件的 mtime 应采用服务器 Last-Modified；关闭时不采用
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn use_server_time_applies_last_modified_to_file_mtime() {
+    let work_dir = unique_dir("servertime");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let body = gen_body(300_000, 777);
+    let st = Arc::new(ServerState::new(Arc::new(body), "etm"));
+    let server = start_server(st).await;
+
+    // 服务器 Last-Modified = "Wed, 21 Oct 2025 07:28:00 GMT"（ServerState 默认值）
+    // → 2025-10-21T07:28:00Z = 1761031680。该头的星期字段与日期不符（实为周二），
+    // 顺带守护 parse_http_date 的「剥离星期」宽松语义在端到端路径上生效。
+    let expected = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_761_031_680);
+
+    let db = Db::open(&work_dir).await.expect("db");
+
+    // 开启：mtime 必须等于服务器时间。
+    let url = server.url("/on.bin");
+    insert_simple_task(&db, &work_dir, "mt-on", &url, "on.bin", 4, 300_000).await;
+    let (status, dest) = run_full_server_time(&work_dir, &db, "mt-on", &url, "on.bin", true).await;
+    assert_eq!(status, 3, "❌ 下载未成功");
+    let mtime = tokio::fs::metadata(&dest)
+        .await
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        mtime, expected,
+        "❌ 开启 use_server_time 后文件 mtime 应等于服务器 Last-Modified"
+    );
+
+    // 关闭：mtime 保持本地完成时间（晚于服务器时间，且不相等）。
+    let url = server.url("/off.bin");
+    insert_simple_task(&db, &work_dir, "mt-off", &url, "off.bin", 4, 300_000).await;
+    let (status, dest) =
+        run_full_server_time(&work_dir, &db, "mt-off", &url, "off.bin", false).await;
+    assert_eq!(status, 3, "❌ 下载未成功");
+    let mtime = tokio::fs::metadata(&dest)
+        .await
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    assert!(
+        mtime > expected,
+        "❌ 关闭 use_server_time 时文件 mtime 应为本地完成时间，而非服务器时间"
+    );
+
+    drop(server);
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,6 +2375,7 @@ async fn resume_of_unverified_hint_task_stays_plain_get() {
         extra_headers: std::collections::HashMap::new(),
         spec: RequestSpec::empty_get(),
         audio_url: None,
+        use_server_time: false,
     };
     run_download(params).await;
     let _ = collector.await;
@@ -2490,6 +2605,7 @@ async fn manual_real_url_hint_download() {
         extra_headers: std::collections::HashMap::new(),
         spec: RequestSpec::empty_get(),
         audio_url: None,
+        use_server_time: false,
     };
     run_download(params).await;
     let _ = collector.await;

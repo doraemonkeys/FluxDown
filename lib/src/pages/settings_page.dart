@@ -245,6 +245,13 @@ List<SettingsSearchItem> get settingsSearchItems {
     ),
     SettingsSearchItem(
       category: SettingsCategory.download,
+      label: s.useServerTime,
+      description: s.useServerTimeDesc,
+      keywords: s.searchKeywordsUseServerTime,
+      icon: LucideIcons.clock,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
       label: s.defaultThreads,
       description: s.defaultThreadsDesc,
       keywords: s.searchKeywordsThreads,
@@ -2382,6 +2389,15 @@ class _DownloadContent extends StatelessWidget {
               child: ShadSwitch(
                 value: settingsProvider.silentDownloadEnabled,
                 onChanged: (v) => settingsProvider.setSilentDownloadEnabled(v),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.useServerTime,
+              description: s.useServerTimeDesc,
+              child: ShadSwitch(
+                value: settingsProvider.useServerTime,
+                onChanged: (v) => settingsProvider.setUseServerTime(v),
               ),
             ),
             const SizedBox(height: 10),

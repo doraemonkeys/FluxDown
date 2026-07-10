@@ -470,6 +470,16 @@ fn to_native_int(s: &str) -> Result<String, String> {
         .map_err(|_| format!("invalid integer: {s}"))
 }
 
+/// aria2 `Boolean` 格式的选项值：仅接受 `true`/`false`，其余视为非法值
+/// 整体拒绝（同 [`to_native_int`] 的净化理由：非法值绝不写进 config 表）。
+fn to_native_bool(s: &str) -> Result<String, String> {
+    match s.trim() {
+        "true" => Ok("true".to_string()),
+        "false" => Ok("false".to_string()),
+        _ => Err(format!("invalid boolean: {s}")),
+    }
+}
+
 /// 契约表：`local://aria2_compat_contract.md` §「aria2 全局选项 ↔ FluxDown
 /// config key 映射」。
 const GLOBAL_OPTION_MAPPINGS: &[GlobalOptionMapping] = &[
@@ -502,6 +512,12 @@ const GLOBAL_OPTION_MAPPINGS: &[GlobalOptionMapping] = &[
         config_key: "global_user_agent",
         to_native: identity,
         default_native: "aria2/1.37.0",
+    },
+    GlobalOptionMapping {
+        aria2_key: "remote-time",
+        config_key: "use_server_time",
+        to_native: to_native_bool,
+        default_native: "false",
     },
 ];
 
@@ -538,7 +554,7 @@ pub(crate) fn map_change_global_options(
     Ok(changes)
 }
 
-/// `getGlobalOption`：映射表 5 键的真实值（缺省时用 aria2 出厂默认兜底）
+/// `getGlobalOption`：映射表各键的真实值（缺省时用 aria2 出厂默认兜底）
 /// + 一组静态合理默认，全部字符串值。
 pub(crate) fn build_global_option(config: &HashMap<String, String>) -> Value {
     let mut obj = Map::new();
@@ -1075,6 +1091,7 @@ mod tests {
             "max-overall-download-limit": "10M",
             "split": "16",
             "user-agent": "UA/9",
+            "remote-time": "true",
             "totally-unknown-option": "ignored",
         });
         let changes = map_change_global_options(options.as_object().unwrap()).unwrap();
@@ -1086,7 +1103,8 @@ mod tests {
         );
         assert_eq!(changes.get("default_segments").unwrap(), "16");
         assert_eq!(changes.get("global_user_agent").unwrap(), "UA/9");
-        assert_eq!(changes.len(), 5);
+        assert_eq!(changes.get("use_server_time").unwrap(), "true");
+        assert_eq!(changes.len(), 6);
     }
 
     #[test]
@@ -1111,6 +1129,12 @@ mod tests {
     #[test]
     fn map_change_global_options_errors_on_invalid_split() {
         let options = json!({ "split": "lots" });
+        assert!(map_change_global_options(options.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn map_change_global_options_errors_on_invalid_remote_time() {
+        let options = json!({ "remote-time": "yes" });
         assert!(map_change_global_options(options.as_object().unwrap()).is_err());
     }
 

@@ -30,6 +30,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _autoCheckUpdate = true; // 默认启动时自动检查更新
   bool _notifyOnComplete = true; // 默认任务完成时弹出通知
   bool _silentDownloadEnabled = false; // 免打扰下载：外部请求不弹确认框直接下载
+  bool _useServerTime = false; // 完成文件的修改时间采用服务器 Last-Modified
   bool _keepAwakeWhileDownloading = false; // 默认不阻止睡眠/息屏
   int _logMaxSizeMb = 10; // 日志总大小上限（MB），超出自动清理
 
@@ -191,6 +192,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get autoCheckUpdate => _autoCheckUpdate;
   bool get notifyOnComplete => _notifyOnComplete;
   bool get silentDownloadEnabled => _silentDownloadEnabled;
+  bool get useServerTime => _useServerTime;
   bool get keepAwakeWhileDownloading => _keepAwakeWhileDownloading;
   int get logMaxSizeMb => _logMaxSizeMb;
 
@@ -519,6 +521,13 @@ class SettingsProvider extends ChangeNotifier {
     _silentDownloadEnabled = value;
     notifyListeners();
     _saveToRust('silent_download_enabled', value.toString());
+  }
+
+  void setUseServerTime(bool value) {
+    if (_useServerTime == value) return;
+    _useServerTime = value;
+    notifyListeners();
+    _saveToRust('use_server_time', value.toString());
   }
 
   void setKeepAwakeWhileDownloading(bool value) {
@@ -1202,6 +1211,8 @@ class SettingsProvider extends ChangeNotifier {
           _notifyOnComplete = entry.value != 'false'; // 默认 true
         case 'silent_download_enabled':
           _silentDownloadEnabled = entry.value == 'true'; // 默认 false
+        case 'use_server_time':
+          _useServerTime = entry.value == 'true'; // 默认 false
         case 'keep_awake_while_downloading':
           _keepAwakeWhileDownloading = entry.value == 'true'; // 默认 false
         case 'floating_ball_enabled':
