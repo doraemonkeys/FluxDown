@@ -55,6 +55,15 @@ export interface ApiInfo {
   version: string
 }
 
+export interface PingInfo {
+  success: boolean
+  app: string
+  version: string
+  message: string
+  /** 服务器默认语言（FLUXDOWN_LANG / config `web_language`），未配置时缺省。 */
+  language?: string
+}
+
 export interface SegmentDetail {
   index: number
   startByte: number

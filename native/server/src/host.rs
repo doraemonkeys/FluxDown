@@ -32,6 +32,9 @@ pub struct ServerApiHost {
     hub: Arc<WsHub>,
     /// 演示模式：`Some(url)` 时仅允许下载该 URL（`FLUXDOWN_DEMO_URL`）。
     demo_url: Option<String>,
+    /// 部署级默认 Web UI 语言（`FLUXDOWN_LANG`）。仅作 [`ApiHost::web_language`]
+    /// 的回退值，不写库——设置页保存过的 `web_language` 永远优先。
+    default_language: Option<String>,
 }
 
 /// 演示模式守卫：`demo_url` 已设置且请求 URL 与之不符（trim 后精确比较）
@@ -52,12 +55,14 @@ impl ServerApiHost {
         cmd_tx: mpsc::Sender<ActorCmd>,
         hub: Arc<WsHub>,
         demo_url: Option<String>,
+        default_language: Option<String>,
     ) -> Self {
         Self {
             db,
             cmd_tx,
             hub,
             demo_url,
+            default_language,
         }
     }
 
@@ -221,6 +226,15 @@ impl ApiHost for ServerApiHost {
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
+    /// Web UI 语言实时求值：设置页保存的 `web_language` 优先，未保存（或空白）
+    /// 时回退 `FLUXDOWN_LANG`。每次请求现读 DB，语言变更无需重启即生效。
+    async fn web_language(&self) -> Option<String> {
+        match self.db.get_config("web_language").await {
+            Ok(Some(v)) if !v.trim().is_empty() => Some(v),
+            _ => self.default_language.clone(),
+        }
+    }
+
     /// aria2 `changeGlobalOption` 兼容入口：逐键持久化后 live-apply 到引擎
     /// （复用既有 `ActorCmd::ApplyConfig`，与 `/api/v1/config` REST 端点
     /// 走同一条路径，行为完全一致）。
@@ -302,6 +316,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_language_prefers_saved_config_over_env_fallback() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let hub = Arc::new(WsHub::new(4));
+        let host = ServerApiHost::new(
+            db.clone(),
+            cmd_tx,
+            Arc::clone(&hub),
+            None,
+            Some("zh".to_string()),
+        );
+
+        // 设置页未保存过语言 → 回退 FLUXDOWN_LANG
+        assert_eq!(host.web_language().await.as_deref(), Some("zh"));
+
+        // 设置页保存后 → 保存值实时优先（无需重启）
+        db.set_config("web_language", "en").await.expect("set");
+        assert_eq!(host.web_language().await.as_deref(), Some("en"));
+
+        // 空白值视为未保存 → 仍回退
+        db.set_config("web_language", "  ").await.expect("set");
+        assert_eq!(host.web_language().await.as_deref(), Some("zh"));
+    }
+
+    #[tokio::test]
     async fn subscribe_task_events_delegates_to_the_shared_ws_hub() {
         use fluxdown_engine::events::{EngineEvent, EventSink};
 
@@ -312,7 +353,7 @@ mod tests {
             .expect("connect mem db");
         let (cmd_tx, _cmd_rx) = mpsc::channel(1);
         let hub = Arc::new(WsHub::new(4));
-        let host = ServerApiHost::new(db, cmd_tx, Arc::clone(&hub), None);
+        let host = ServerApiHost::new(db, cmd_tx, Arc::clone(&hub), None, None);
 
         let mut rx = host
             .subscribe_task_events()

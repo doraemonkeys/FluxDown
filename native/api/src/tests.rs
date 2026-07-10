@@ -222,6 +222,15 @@ impl ApiHost for MockHost {
         Ok(self.inner.lock().unwrap().config.clone())
     }
 
+    async fn web_language(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .config
+            .get("web_language")
+            .cloned()
+    }
+
     async fn apply_config(&self, changes: HashMap<String, String>) -> Result<(), ApiError> {
         self.inner.lock().unwrap().applied_config.push(changes);
         Ok(())
@@ -427,6 +436,20 @@ async fn ping_returns_200_without_auth() {
     assert_eq!(json["app"], "FluxDown");
     assert_eq!(json["version"], "9.9.9-test");
     assert_eq!(json["message"], "pong");
+    // 宿主未提供 Web 语言时省略该字段
+    assert!(json.get("language").is_none());
+}
+
+#[tokio::test]
+async fn ping_includes_web_language_when_host_provides_it() {
+    let host = MockHost::new().with_config(HashMap::from([(
+        "web_language".to_string(),
+        "zh".to_string(),
+    )]));
+    let server = TestServer::start(host, |_| {}).await;
+    let resp = server.send(&request("GET", routes::PING, &[], "")).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["language"], "zh");
 }
 
 // ---------------------------------------------------------------------------

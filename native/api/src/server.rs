@@ -314,21 +314,23 @@ impl IntoResponse for ApiError {
 // 探活
 // ---------------------------------------------------------------------------
 
-/// 探活。返回应用名、版本号与 `pong`。无鉴权。
+/// 探活。返回应用名、版本号与 `pong`；宿主配置了 Web UI 语言时附带 `language`
+/// （无鉴权——登录前的前端靠它决定界面默认语言；经 [`ApiHost::web_language`]
+/// 实时求值，配置变更无需重启）。
 #[utoipa::path(get, path = "/ping", tag = "system",
-    responses((status = 200, description = "应用存活，返回 app/version/message"))
+    responses((status = 200, description = "应用存活，返回 app/version/message；配置了 Web 语言时附带 language"))
 )]
 pub(crate) async fn ping(State(state): State<AppState>) -> Response {
-    (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(json!({
-            "success": true,
-            "app": "FluxDown",
-            "version": state.config.app_version,
-            "message": "pong",
-        })),
-    )
-        .into_response()
+    let mut body = json!({
+        "success": true,
+        "app": "FluxDown",
+        "version": state.config.app_version,
+        "message": "pong",
+    });
+    if let Some(lang) = state.host.web_language().await {
+        body["language"] = json!(lang);
+    }
+    ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -92,6 +92,14 @@ pub trait ApiHost: Send + Sync {
         Ok(HashMap::new())
     }
 
+    /// Web UI 默认语言（`en`/`zh`）。`/ping` 无鉴权透出，供未登录的前端
+    /// 决定界面默认语言；每次请求实时求值，配置变更无需重启即可生效。
+    /// 宿主自行决定配置表与部署环境（如 `FLUXDOWN_LANG`）的优先级。
+    /// 默认实现返回 `None`（无 Web UI 的宿主，`/ping` 响应省略该字段）。
+    async fn web_language(&self) -> Option<String> {
+        None
+    }
+
     /// 写入并 live-apply 一组配置键（FluxDown 原生键名 → 值）。
     ///
     /// 语义：先持久化到 config 表，再按键名热应用到引擎

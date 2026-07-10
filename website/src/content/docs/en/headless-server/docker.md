@@ -48,6 +48,7 @@ services:
       - fluxdown-data:/data
       - ./downloads:/root/Downloads
     # environment:
+    #   FLUXDOWN_LANG: zh
     #   FLUXDOWN_DATABASE_URL: postgres://user:pass@host:5432/fluxdown
 
 volumes:
@@ -59,7 +60,7 @@ docker compose up -d
 docker compose logs fluxdown-server 2>&1 | grep -i token
 ```
 
-All environment variables from [Server Setup](/docs/en/headless-server/setup/) apply — most usefully `FLUXDOWN_DATABASE_URL` to point at an external PostgreSQL instead of the bundled SQLite.
+All environment variables from [Server Setup](/docs/en/headless-server/setup/) apply — most usefully `FLUXDOWN_LANG` (default Web UI language, `en`/`zh`) and `FLUXDOWN_DATABASE_URL` (point at an external PostgreSQL instead of the bundled SQLite).
 
 ## CasaOS / ZimaOS
 

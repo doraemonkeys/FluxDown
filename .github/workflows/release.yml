@@ -1223,7 +1223,10 @@ jobs:
           restore-keys: |
             server-${{ matrix.platform }}-
 
+      # FLUXDOWN_SERVER_VERSION：编译期注入 tag 版本号（/ping、stats、OpenAPI 显示）
       - name: Build server binary
+        env:
+          FLUXDOWN_SERVER_VERSION: ${{ steps.version.outputs.VERSION }}
         run: cargo build --release --locked -p fluxdown_server --target ${{ matrix.target }}
 
       - name: Download webroot artifact
@@ -1479,6 +1482,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FLUXDOWN_SERVER_VERSION=${{ steps.version.outputs.VERSION }}
           cache-from: type=gha,scope=server
           cache-to: type=gha,scope=server,mode=max
 
