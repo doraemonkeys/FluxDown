@@ -18,6 +18,7 @@ services:
       - fluxdown-data:/data # DB / 日志 / 管理 token
       - ./downloads:/root/Downloads # 默认下载目录（容器内 HOME=/root）
     # environment:
+    #   FLUXDOWN_LANG: zh # Web 界面默认语言（en/zh）；用户手动改过语言后以手动选择为准
     #   FLUXDOWN_DEMO: "1" # 演示模式：仅允许下载内置演示文件
     #   FLUXDOWN_DATABASE_URL: postgres://user:pass@host:5432/fluxdown # 外部数据库
 

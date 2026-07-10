@@ -1,12 +1,14 @@
-// 多语言（en 默认 / zh）—— LocaleProvider + useI18n()。
-// - 持久化：localStorage `fluxdown.locale`；设置页切换时同时写穿服务器 config 表
-//   `web_language` 键（PUT /api/v1/config），登录后若本地未显式选择则采用服务器值。
+// 多语言（en / zh）—— LocaleProvider + useI18n()。
+// - 解析顺序：localStorage `fluxdown.locale`（用户显式选择）→ 服务器默认语言
+//   （无鉴权 `/ping` 的 language，实时求值：设置页保存的 `web_language` 优先，
+//   未保存时回退部署环境 FLUXDOWN_LANG；登录页同样生效）→ 浏览器语言 → en。
+// - 持久化：仅设置页的显式切换写 localStorage 并写穿服务器 config `web_language`
+//   （PUT /api/v1/config）；采用服务器/浏览器默认值不落盘，服务器侧变更随时可生效。
 // - 后端返回：wire message 是稳定英文契约（CLI/客户端字符串匹配），不按语言变体；
 //   展示层经 translateBackendMessage() 按当前语言映射。
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
-import { isAuthenticated } from './auth'
 
 export type Locale = 'en' | 'zh'
 
@@ -758,7 +760,12 @@ function readStoredLocale(): Locale | null {
   return v === 'en' || v === 'zh' ? v : null
 }
 
-let currentLocale: Locale = readStoredLocale() ?? 'en'
+/** 浏览器首选语言 → 支持的语言（主语言子标签为 zh 即中文，其余英文）。 */
+function detectBrowserLocale(): Locale {
+  return navigator.language?.toLowerCase().startsWith('zh') ? 'zh' : 'en'
+}
+
+let currentLocale: Locale = readStoredLocale() ?? detectBrowserLocale()
 
 export function getLocale(): Locale {
   return currentLocale
@@ -793,21 +800,34 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     document.title = locale === 'zh' ? 'FluxDown — 下载管理' : 'FluxDown — Download Manager'
   }, [locale])
 
-  const setLocale = useCallback((l: Locale) => {
+  // 切换语言但不落盘：采用服务器/浏览器默认值时用，保持「未显式选择」状态。
+  const applyLocale = useCallback((l: Locale) => {
     currentLocale = l
-    localStorage.setItem(LOCALE_KEY, l)
     setLocaleState(l)
   }, [])
 
-  // 登录会话首次挂载时从服务器 config 采用 web_language；
+  // 用户显式选择（设置页）：落盘 localStorage，此后默认值不再覆盖本浏览器。
+  const setLocale = useCallback(
+    (l: Locale) => {
+      localStorage.setItem(LOCALE_KEY, l)
+      applyLocale(l)
+    },
+    [applyLocale],
+  )
+
+  // 挂载时从 /ping（无鉴权）采用服务器默认语言，登录页同样生效；
   // 本地已显式选择过语言（localStorage 有值）则以本地为准。
   useEffect(() => {
-    if (readStoredLocale() !== null || !isAuthenticated()) return
+    if (readStoredLocale() !== null) return
     api
-      .getConfig()
-      .then((cfg) => adoptServerLocale(cfg, setLocale))
+      .ping()
+      .then(({ language }) => {
+        if ((language === 'zh' || language === 'en') && readStoredLocale() === null) {
+          applyLocale(language)
+        }
+      })
       .catch(() => {})
-  }, [setLocale])
+  }, [applyLocale])
 
   const value = useMemo(() => ({ locale, setLocale, t }), [locale, setLocale])
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
@@ -815,14 +835,4 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
 
 export function useI18n() {
   return useContext(Ctx)
-}
-
-/**
- * 从服务器 config 采用语言（登录后调用一次）。
- * 本地已显式选择过语言时以本地为准，不被服务器覆盖。
- */
-export function adoptServerLocale(config: Record<string, string>, setLocale: (l: Locale) => void) {
-  if (readStoredLocale() !== null) return
-  const v = config[LANGUAGE_CONFIG_KEY]
-  if (v === 'zh' || v === 'en') setLocale(v)
 }

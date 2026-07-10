@@ -51,6 +51,7 @@ bun run build      # 输出到 web/dist
 | `FLUXDOWN_WEBROOT` | 可执行文件同级的 `./web` | Web 界面静态文件(`bun run build` 产物)所在目录;SPA 路由回退到 `index.html`。 |
 | `FLUXDOWN_DEMO` | 未设置(关闭) | 真值(`1`/`true`/`yes`/`on`)开启演示模式:仅允许下载内置生成的 64 MiB 演示文件,适合公开演示。 |
 | `FLUXDOWN_DEMO_URL` | 未设置(关闭) | 用指定 URL 覆盖演示模式的内置生成文件,仅该 URL 可下载。 |
+| `FLUXDOWN_LANG` | 未设置(回退浏览器语言) | Web 界面默认语言(`en`/`zh`,接受 `zh-CN` 等区域变体)。纯回退值:任何用户在设置页保存过语言后,以保存值为服务器侧默认(实时生效,跨重启保留);在浏览器里显式选过语言的用户始终以本人选择为准。 |
 
 未设置 `FLUXDOWN_DATA_DIR` 时,数据目录探测规则与桌面客户端一致:
 

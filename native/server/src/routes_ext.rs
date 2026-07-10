@@ -642,7 +642,7 @@ async fn stats(State(state): State<ServerState>) -> Result<Response, ApiError> {
         title = "FluxDown Server API",
         description = "FluxDown headless 服务器 HTTP API：核心任务管理（复用桌面 API 契约）\
             + 服务器扩展（WebSocket 实时推送 / 配置 / 队列 CRUD / 文件取回 / 目录列举 / 代理测试）。",
-        version = env!("CARGO_PKG_VERSION"),
+        version = crate::SERVER_VERSION,
     ),
     paths(
         ws_handler,

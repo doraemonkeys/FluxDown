@@ -9,6 +9,7 @@ import type {
   CreateTaskRequest,
   CreatedTask,
   FsListResponse,
+  PingInfo,
   ProxyTestRequest,
   ProxyTestResponse,
   QueueDto,
@@ -53,6 +54,13 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 }
 
 export const api = {
+  // 探活（无鉴权）：版本 + 服务器默认语言，登录前也可用
+  ping: async (): Promise<PingInfo> => {
+    const res = await fetch(`${getBase()}/ping`)
+    if (!res.ok) throw new ApiError(res.status, res.statusText)
+    return (await res.json()) as PingInfo
+  },
+
   // 登录校验（带指定凭证探测，不写存储）
   probe: async (base: string, token: string): Promise<ApiInfo> => {
     const res = await fetch(`${base}/api/v1/info`, {

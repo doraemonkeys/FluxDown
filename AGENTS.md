@@ -42,7 +42,7 @@ PG_TEST_URL=postgres://postgres:pw@localhost/postgres cargo test -p fluxdown_eng
 cargo run -p fluxdown_api --example gen_openapi > website/public/openapi.json  # 改动 API 后重新生成 OpenAPI 规范（官网 /api-docs 渲染）
 
 # Web 服务器（headless，native/server）
-cargo run -p fluxdown_server         # 启动服务器（默认 0.0.0.0:17800；环境变量：FLUXDOWN_BIND / FLUXDOWN_DATA_DIR / FLUXDOWN_DATABASE_URL / FLUXDOWN_WEBROOT）
+cargo run -p fluxdown_server         # 启动服务器（默认 0.0.0.0:17800；环境变量：FLUXDOWN_BIND / FLUXDOWN_DATA_DIR / FLUXDOWN_DATABASE_URL / FLUXDOWN_WEBROOT / FLUXDOWN_LANG）
 
 # 命令行客户端（native/cli，二进制名 fluxdown）
 cargo build -p fluxdown_cli          # 构建 CLI（target/debug/fluxdown）

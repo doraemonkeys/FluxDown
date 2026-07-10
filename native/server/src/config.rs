@@ -8,6 +8,7 @@
 //! | `FLUXDOWN_WEBROOT` | SPA 静态资源目录 | 二进制同级 `./web` |
 //! | `FLUXDOWN_DEMO` | 演示模式：仅允许下载内置本地演示文件 | 未设置（关闭） |
 //! | `FLUXDOWN_DEMO_URL` | 演示模式：仅允许下载该 URL（覆盖内置） | 未设置（关闭） |
+//! | `FLUXDOWN_LANG` | Web UI 默认语言（`en`/`zh`），设置页保存过语言后以保存值为准 | 未设置（回退浏览器语言） |
 
 use std::path::PathBuf;
 
@@ -22,6 +23,11 @@ pub struct ServerConfig {
     pub webroot: PathBuf,
     /// 演示模式：`Some(url)` 时新任务仅允许下载该 URL（见 `host::demo_guard`）。
     pub demo_url: Option<String>,
+    /// Web UI 默认语言（`en`/`zh`）。纯回退值，不写库：`/ping` 的 `language`
+    /// 实时求值时，设置页保存的 `web_language` 优先、缺省才用本值——
+    /// 用户手动更改永远优先且跨重启保留；浏览器端显式选过语言的用户
+    /// 则始终以本人选择为准。
+    pub language: Option<String>,
 }
 
 impl ServerConfig {
@@ -39,14 +45,43 @@ impl ServerConfig {
             .as_deref()
             .and_then(parse_demo_url)
             .or_else(|| demo_flag_enabled().then(|| builtin_demo_url(&bind)));
+        let language = match std::env::var("FLUXDOWN_LANG") {
+            Ok(raw) => {
+                let lang = parse_lang(&raw);
+                if lang.is_none() && !raw.trim().is_empty() {
+                    eprintln!("FLUXDOWN_LANG 无法识别（支持 en / zh），已忽略：{raw}");
+                }
+                lang
+            }
+            Err(_) => None,
+        };
         Self {
             bind,
             data_dir_override,
             database_url,
             webroot,
             demo_url,
+            language,
         }
     }
+}
+
+/// 归一化 `FLUXDOWN_LANG`：剥首尾空白与包裹引号后取 BCP 47 主语言子标签
+/// （`zh-CN`/`zh_TW` → `zh`，`en-US` → `en`，忽略大小写），映射到 Web UI
+/// 支持的语言；无法识别视为未设置。
+fn parse_lang(raw: &str) -> Option<String> {
+    let mut s = raw.trim();
+    for quote in ['"', '\''] {
+        if s.len() >= 2 && s.starts_with(quote) && s.ends_with(quote) {
+            s = s[1..s.len() - 1].trim();
+        }
+    }
+    let primary = s
+        .split(['-', '_'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(primary.as_str(), "en" | "zh").then_some(primary)
 }
 
 /// 归一化 `FLUXDOWN_DEMO_URL`：去掉首尾空白与误带的包裹引号
@@ -170,6 +205,28 @@ mod tests {
             parse_demo_url("\"https://e.com/a?q='x'\""),
             Some("https://e.com/a?q='x'".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod lang_tests {
+    use super::parse_lang;
+
+    #[test]
+    fn parse_lang_normalizes_region_case_and_quotes() {
+        for v in ["zh", "zh-CN", "zh_TW", "ZH", " \"zh\" ", "'zh-Hans'"] {
+            assert_eq!(parse_lang(v).as_deref(), Some("zh"), "{v:?}");
+        }
+        for v in ["en", "en-US", "EN_gb"] {
+            assert_eq!(parse_lang(v).as_deref(), Some("en"), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn parse_lang_rejects_unsupported_or_empty() {
+        for v in ["fr", "ja-JP", "", "   ", "\"\"", "-CN"] {
+            assert_eq!(parse_lang(v), None, "{v:?}");
+        }
     }
 }
 

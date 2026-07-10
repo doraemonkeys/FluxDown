@@ -34,6 +34,21 @@ use crate::host::ServerApiHost;
 use crate::routes_ext::{ServerState, extra_router};
 use crate::ws_hub::{EngineEventSink, WsHostSelection, WsHub};
 
+/// 服务器版本。发布流水线在编译期经 `FLUXDOWN_SERVER_VERSION` 注入 git tag
+/// 版本号（crate 版本不随发布演进，直接用会显示错误的 `0.1.0`）；
+/// 未注入或为空（本地开发构建）时退回 crate 版本。
+pub(crate) const SERVER_VERSION: &str = {
+    let injected = match option_env!("FLUXDOWN_SERVER_VERSION") {
+        Some(v) => v,
+        None => "",
+    };
+    if injected.is_empty() {
+        env!("CARGO_PKG_VERSION")
+    } else {
+        injected
+    }
+};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fluxdown_engine::logger::init();
@@ -57,6 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     boot_db.init_default_config(&default_save_dir()).await?;
     let token = ensure_server_config(&boot_db).await?;
+
+    // FLUXDOWN_LANG 是部署级默认语言：不写库，仅作设置页未保存过语言时的
+    // 回退值（ServerApiHost::web_language 实时求值）——手动更改永远优先。
+    if let Some(lang) = &server_cfg.language {
+        log_info!("[server] default web language (FLUXDOWN_LANG): {}", lang);
+    }
 
     let all_cfg = boot_db.get_all_config().await.unwrap_or_default();
     let max_concurrent = all_cfg
@@ -154,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(run_actor(engine, cmd_rx, done_rx, retry_rx));
 
     // 路由：核心（fluxdown_api 复用）+ 扩展（本 crate）+ SPA 静态托管。
-    let api_cfg = ApiServerConfig::from_config_map(&all_cfg, env!("CARGO_PKG_VERSION"));
+    let api_cfg = ApiServerConfig::from_config_map(&all_cfg, SERVER_VERSION);
     let api_cfg = ApiServerConfig {
         token: token.clone(),
         management_enabled: true,
@@ -165,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cmd_tx.clone(),
         hub.clone(),
         server_cfg.demo_url.clone(),
+        server_cfg.language.clone(),
     ));
     if let Some(url) = &server_cfg.demo_url {
         log_info!("[server] demo mode enabled, allowed url: {}", url);
@@ -176,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hub,
         selector: selector_handle,
         token,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: SERVER_VERSION.to_string(),
         demo_url: server_cfg.demo_url.clone(),
     };
     let spa = ServeDir::new(&server_cfg.webroot)

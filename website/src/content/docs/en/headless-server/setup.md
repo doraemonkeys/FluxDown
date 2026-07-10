@@ -50,6 +50,7 @@ All configuration is read once at startup from environment variables. There is n
 | `FLUXDOWN_WEBROOT` | `./web` next to the executable | Directory the Web UI static files (`bun run build` output) are served from; SPA routes fall back to `index.html`. |
 | `FLUXDOWN_DEMO` | unset (off) | Truthy value (`1`/`true`/`yes`/`on`) turns on demo mode: only a built-in, generated 64 MiB file can be downloaded. Useful for public demos. |
 | `FLUXDOWN_DEMO_URL` | unset (off) | Overrides demo mode's allowed URL with a specific one instead of the built-in generated file. |
+| `FLUXDOWN_LANG` | unset (falls back to browser language) | Default Web UI language (`en`/`zh`; regional variants like `zh-CN` accepted). Pure fallback: once any user saves a language in Settings, the saved value becomes the server-side default (applies live, survives restarts); users who explicitly picked a language in their browser always keep their own choice. |
 
 When `FLUXDOWN_DATA_DIR` is not set, the data directory is auto-detected the same way the desktop app does:
 

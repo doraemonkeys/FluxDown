@@ -7,6 +7,8 @@
 # 构建上下文 = 仓库根目录（依赖根 .dockerignore 收窄上下文）：
 #   docker build -f docker/server.Dockerfile -t fluxdown-server .
 #   docker buildx build --platform linux/amd64,linux/arm64 -f docker/server.Dockerfile .
+# 发布构建注入版本号（/ping、/api/v1/stats、OpenAPI 显示；缺省退回 crate 版本）：
+#   docker build -f docker/server.Dockerfile --build-arg FLUXDOWN_SERVER_VERSION=1.2.3 .
 #
 # 运行（首次启动 stderr 会打印管理 token，务必保存）：
 #   docker run -d -p 17800:17800 -v fluxdown-data:/data fluxdown-server
@@ -39,6 +41,9 @@ RUN case "$TARGETARCH" in \
     esac
 COPY Cargo.toml Cargo.lock ./
 COPY native/ native/
+# 编译期版本注入（空值 = 未注入，二进制退回 crate 版本）
+ARG FLUXDOWN_SERVER_VERSION
+ENV FLUXDOWN_SERVER_VERSION=$FLUXDOWN_SERVER_VERSION
 # cache mount：本地重复构建增量编译；registry 缓存避免重复下载
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -53,7 +58,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=server /usr/local/bin/fluxdown-server /app/fluxdown-server
 COPY --from=web /src/web/dist /app/web
-# FLUXDOWN_BIND / FLUXDOWN_DATABASE_URL / FLUXDOWN_DEMO 等见 native/server/src/config.rs
+# FLUXDOWN_BIND / FLUXDOWN_DATABASE_URL / FLUXDOWN_DEMO / FLUXDOWN_LANG 等见 native/server/src/config.rs
 ENV FLUXDOWN_BIND=0.0.0.0:17800 \
     FLUXDOWN_WEBROOT=/app/web \
     FLUXDOWN_DATA_DIR=/data
