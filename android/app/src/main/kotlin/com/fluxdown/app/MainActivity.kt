@@ -297,12 +297,14 @@ class MainActivity : FlutterActivity() {
                 val data = intent.dataString?.trim()?.ifEmpty { null } ?: return null
                 if (data.startsWith("fluxdown://", ignoreCase = true)) {
                     // fluxdown://download?url=<encoded-url>&filename=<name>
-                    // 解析 url 参数提取真实下载地址，忽略 filename（引擎自动推断）
+                    // 解析 url 参数提取真实下载地址，忽略 filename（引擎自动推断）。
+                    // 解析失败/缺 url 参数 → 返回 null 当作普通启动忽略；
+                    // 决不能把 fluxdown:// 原始串交给 Dart，否则会创建必然失败的垃圾任务。
                     try {
                         val uri = Uri.parse(data)
                         uri.getQueryParameter("url")?.trim()?.ifEmpty { null }
                     } catch (_: Exception) {
-                        data // 解析失败时退化为原始串，由 Dart 侧容错
+                        null
                     }
                 } else {
                     data

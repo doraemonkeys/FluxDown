@@ -70,11 +70,14 @@ export interface FluxDownSettings {
   // === 自定义协议 ===
 
   /**
-   * 启用 fluxdown:// 自定义协议下载。
-   * 开启后拦截下载时不再投递 NMH，而是重定向到
-   * fluxdown://download?url=... 协议 URL，由已注册该协议
-   * 的应用（如 Android FluxDown）处理。
-   * 默认关闭，仅适用于已注册协议处理器的环境（主要是 Android）。
+   * 启用 fluxdown:// 自定义协议下载（仅 Android 生效）。
+   * 开启后拦截下载时不再投递 NMH/远端，而是导航到
+   * fluxdown://download?url=... 协议 URL，由系统 VIEW intent 唤起
+   * 已注册该协议的 Android FluxDown 接管。
+   * 限制：不经 NMH，Cookie/Headers/method/body 无法携带；
+   * 音视频分轨（audioUrl）请求会回退浏览器下载。
+   * 桌面浏览器忽略此开关（NMH 链路功能是协议模式的严格超集，
+   * 且桌面 App 启动参数不消费协议 URL 的下载参数）。默认关闭。
    */
   enableFluxdownProtocol: boolean;
 }
