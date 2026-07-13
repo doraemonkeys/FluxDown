@@ -1,5 +1,7 @@
 #include "flutter_window.h"
 
+#include <windowsx.h>
+
 #include <algorithm>
 #include <optional>
 #include <string>
@@ -10,6 +12,99 @@
 
 // Must match kCopyDataId in main.cpp.
 static const ULONG_PTR kCopyDataId = 0x464C5558; // "FLUX"
+
+namespace {
+
+// Property name storing the original WndProc of the Flutter view child
+// window (set when subclassing for edge hit-test forwarding).
+constexpr const wchar_t kChildOriginalProcProp[] = L"FluxDownChildProc";
+
+// SDK 的 VersionHelpers 无 Win11 判定；经 RtlGetVersion 读真实
+// build 号（不受兼容性清单影响），build >= 22000 即 Windows 11。
+bool IsWindows11OrLater() {
+  using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+  static const bool is_win11 = [] {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) {
+      return false;
+    }
+    auto rtl_get_version = reinterpret_cast<RtlGetVersionFn>(
+        GetProcAddress(ntdll, "RtlGetVersion"));
+    if (!rtl_get_version) {
+      return false;
+    }
+    RTL_OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (rtl_get_version(&info) != 0) {
+      return false;
+    }
+    return info.dwMajorVersion > 10 ||
+           (info.dwMajorVersion == 10 && info.dwBuildNumber >= 22000);
+  }();
+  return is_win11;
+}
+
+// Returns true when the borderless (client-covers-whole-window) frame is in
+// effect: the window keeps WS_THICKFRAME for snap/shadow but is neither
+// maximized nor missing its resize frame (fullscreen strips it).
+bool IsBorderlessNormalState(HWND hwnd) {
+  const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+  return (style & WS_THICKFRAME) != 0 && !IsZoomed(hwnd);
+}
+
+// Resize band thickness in physical pixels for |hwnd|'s DPI.
+int ResizeInsetFor(HWND hwnd) {
+  const UINT dpi = GetDpiForWindow(hwnd);
+  return GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) +
+         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+// Hit-tests |screen_pt| against the resize band of top-level window |root|.
+// Returns HTNOWHERE when the point is not on any edge.
+LRESULT HitTestResizeEdge(HWND root, POINT screen_pt) {
+  RECT rc;
+  if (!GetWindowRect(root, &rc)) {
+    return HTNOWHERE;
+  }
+  const int inset = ResizeInsetFor(root);
+  const bool on_left = screen_pt.x < rc.left + inset;
+  const bool on_right = screen_pt.x >= rc.right - inset;
+  const bool on_top = screen_pt.y < rc.top + inset;
+  const bool on_bottom = screen_pt.y >= rc.bottom - inset;
+  if (on_top && on_left) return HTTOPLEFT;
+  if (on_top && on_right) return HTTOPRIGHT;
+  if (on_bottom && on_left) return HTBOTTOMLEFT;
+  if (on_bottom && on_right) return HTBOTTOMRIGHT;
+  if (on_left) return HTLEFT;
+  if (on_right) return HTRIGHT;
+  if (on_top) return HTTOP;
+  if (on_bottom) return HTBOTTOM;
+  return HTNOWHERE;
+}
+
+// Subclass proc for the Flutter view child window: makes the outer resize
+// band mouse-transparent so WM_NCHITTEST reaches the top-level window,
+// which then reports HTLEFT/HTTOP/... to enable native edge resizing.
+LRESULT CALLBACK ChildEdgeForwardProc(HWND hwnd, UINT message, WPARAM wparam,
+                                      LPARAM lparam) {
+  auto original = reinterpret_cast<WNDPROC>(GetProp(hwnd, kChildOriginalProcProp));
+  if (message == WM_NCHITTEST) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (root && IsBorderlessNormalState(root)) {
+      const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (HitTestResizeEdge(root, pt) != HTNOWHERE) {
+        return HTTRANSPARENT;
+      }
+    }
+  }
+  if (message == WM_NCDESTROY) {
+    RemoveProp(hwnd, kChildOriginalProcProp);
+  }
+  return original ? CallWindowProc(original, hwnd, message, wparam, lparam)
+                  : DefWindowProc(hwnd, message, wparam, lparam);
+}
+
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -95,6 +190,16 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger());
 
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+
+  // 无边框方案：子 Flutter 视图边缘 8px 命中带返回 HTTRANSPARENT，
+  // 让 WM_NCHITTEST 冒泡到顶层窗口以恢复四边缩放（见 MessageHandler）。
+  if (HWND view_hwnd = flutter_controller_->view()->GetNativeWindow()) {
+    WNDPROC original = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
+        view_hwnd, GWLP_WNDPROC,
+        reinterpret_cast<LONG_PTR>(ChildEdgeForwardProc)));
+    SetProp(view_hwnd, kChildOriginalProcProp,
+            reinterpret_cast<HANDLE>(original));
+  }
 
   // Check --silentStart before the callback to avoid capturing by reference.
   const std::vector<std::string> cmd_args = GetCommandLineArguments();
@@ -205,6 +310,22 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return 0;
   }
 
+  // 去除 window_manager TitleBarStyle.hidden 保留的左/右/下 8px 原生框架
+  // （呈现为黑边）。必须先于插件的 HandleTopLevelWindowProc 处理：
+  // 非最大化时让客户区铺满整个窗口；最大化/全屏仍交给插件调整
+  // （否则内容会被屏幕边缘裁掉）。保留 WS_THICKFRAME → DWM 阴影、
+  // Aero Snap、圆角均不受影响。
+  if (message == WM_NCCALCSIZE && wparam == TRUE &&
+      IsBorderlessNormalState(hwnd)) {
+    auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+    // Windows 10 下客户区顶到 0 会出现 1px 白线（window_manager 同款
+    // 规避，见插件源码注释）。
+    if (!IsWindows11OrLater()) {
+      params->rgrc[0].top += 1;
+    }
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -219,6 +340,18 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case WM_NCHITTEST: {
+      // 子视图边缘带返回 HTTRANSPARENT 后由此处接管：报告缩放边缘。
+      // 顶边此前因插件不保留 top 框架而无法缩放，此处一并修复。
+      if (IsBorderlessNormalState(hwnd)) {
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        const LRESULT hit = HitTestResizeEdge(hwnd, pt);
+        if (hit != HTNOWHERE) {
+          return hit;
+        }
+      }
+      break;
+    }
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
