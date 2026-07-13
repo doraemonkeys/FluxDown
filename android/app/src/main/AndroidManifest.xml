@@ -47,11 +47,14 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- 接收分享的文本/链接（浏览器"分享"→ FluxDown 快速新建下载） -->
+            <!-- 接收分享的文本/链接（浏览器"分享"→ FluxDown 快速新建下载）。
+                 mimeType 用 */*：Via 5.5.0+ 按「启动器 Activity 声明 SEND/SEND_MULTIPLE + */*」
+                 识别可切换的外部下载器（同 Gopeed #419 的适配方式），text/plain 会漏检。 -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND"/>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
                 <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="text/plain"/>
+                <data android:mimeType="*/*"/>
             </intent-filter>
             <!-- 点击 magnet / 直链（含 .torrent）唤起新建下载 -->
             <intent-filter>

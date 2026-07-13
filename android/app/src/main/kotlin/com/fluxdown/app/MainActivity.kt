@@ -284,15 +284,18 @@ class MainActivity : FlutterActivity() {
 
     /**
      * 从 intent 提取可下载的 URL / magnet。
-     * - ACTION_SEND：取 EXTRA_TEXT（浏览器"分享链接"）
+     * - ACTION_SEND / ACTION_SEND_MULTIPLE：取 EXTRA_TEXT（浏览器"分享链接"、
+     *   Via 等外部下载器切换协议），缺失时回退 ClipData 文本（通配 mimeType
+     *   的分享可能不带 EXTRA_TEXT）
      * - ACTION_VIEW：取 data（magnet: 直链等；fluxdown:// 则解析 url 参数）
      * 返回 null 表示无可用内容（如首页 LAUNCHER 启动）。
      */
     private fun extractShared(intent: Intent?): String? {
         if (intent == null) return null
         return when (intent.action) {
-            Intent.ACTION_SEND ->
+            Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE ->
                 intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.ifEmpty { null }
+                    ?: extractClipText(intent)
             Intent.ACTION_VIEW -> {
                 val data = intent.dataString?.trim()?.ifEmpty { null } ?: return null
                 if (data.startsWith("fluxdown://", ignoreCase = true)) {
@@ -312,6 +315,16 @@ class MainActivity : FlutterActivity() {
             }
             else -> null
         }
+    }
+
+    /** 遍历 ClipData 取首个非空文本项（分享 intent 缺 EXTRA_TEXT 时的兜底）。 */
+    private fun extractClipText(intent: Intent): String? {
+        val clip = intent.clipData ?: return null
+        for (i in 0 until clip.itemCount) {
+            val text = clip.getItemAt(i).text?.toString()?.trim()
+            if (!text.isNullOrEmpty()) return text
+        }
+        return null
     }
 
     companion object {
