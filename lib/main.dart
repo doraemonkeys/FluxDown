@@ -1030,10 +1030,13 @@ class _FluxDownAppState extends State<FluxDownApp>
         label: 'FluxDown',
         menus: [
           // About + Check for Updates
+          // About 不用 PlatformProvidedMenuItemType.about（系统标准 About 面板，
+          // 见 issue #47），改为导航到主窗口「设置 > 关于」页。
           PlatformMenuItemGroup(
             members: [
-              const PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.about,
+              PlatformMenuItem(
+                label: s.menuAbout,
+                onSelected: () => AppMenuCallbacks.openAbout?.call(),
               ),
               PlatformMenuItem(
                 label: s.menuCheckForUpdates,
@@ -1054,7 +1057,8 @@ class _FluxDownAppState extends State<FluxDownApp>
               ),
             ],
           ),
-          // Services
+          // Services（唯一保留的系统提供项：子菜单内容由 macOS 动态填充，
+          // 无法在 Flutter 侧复刻；标题本地化受限于 flutter/flutter#120097）
           const PlatformMenuItemGroup(
             members: [
               PlatformProvidedMenuItem(
@@ -1063,21 +1067,46 @@ class _FluxDownAppState extends State<FluxDownApp>
             ],
           ),
           // Hide / Hide Others / Show All
-          const PlatformMenuItemGroup(
+          // 不用 PlatformProvidedMenuItem：其 label 由 engine 硬编码英文无法
+          // 本地化（flutter/flutter#120097），且 macOS 26 会给标准 selector
+          // 自动配图标，与自定义项混排导致图标/语言不统一。以下经
+          // com.fluxdown/window 通道调用等效 AppKit API。
+          PlatformMenuItemGroup(
             members: [
-              PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.hide),
-              PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.hideOtherApplications,
+              PlatformMenuItem(
+                label: s.menuHide,
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyH,
+                  meta: true,
+                ),
+                onSelected: () => macMenuAction('hide'),
               ),
-              PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.showAllApplications,
+              PlatformMenuItem(
+                label: s.menuHideOthers,
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyH,
+                  meta: true,
+                  alt: true,
+                ),
+                onSelected: () => macMenuAction('hideOthers'),
+              ),
+              PlatformMenuItem(
+                label: s.menuShowAll,
+                onSelected: () => macMenuAction('showAll'),
               ),
             ],
           ),
-          // Quit
-          const PlatformMenuItemGroup(
+          // Quit — 走托盘「退出」同一优雅退出流程（完整清理 + 防重入）
+          PlatformMenuItemGroup(
             members: [
-              PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.quit),
+              PlatformMenuItem(
+                label: s.menuQuit,
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyQ,
+                  meta: true,
+                ),
+                onSelected: () => TrayService.instance.requestExit(),
+              ),
             ],
           ),
         ],
@@ -1149,8 +1178,14 @@ class _FluxDownAppState extends State<FluxDownApp>
       PlatformMenu(
         label: s.menuView,
         menus: [
-          const PlatformProvidedMenuItem(
-            type: PlatformProvidedMenuItemType.toggleFullScreen,
+          PlatformMenuItem(
+            label: s.menuToggleFullScreen,
+            shortcut: const SingleActivator(
+              LogicalKeyboardKey.keyF,
+              meta: true,
+              control: true,
+            ),
+            onSelected: () => macMenuAction('toggleFullScreen'),
           ),
         ],
       ),
@@ -1159,20 +1194,27 @@ class _FluxDownAppState extends State<FluxDownApp>
       PlatformMenu(
         label: s.menuWindow,
         menus: [
-          const PlatformMenuItemGroup(
+          PlatformMenuItemGroup(
             members: [
-              PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.minimizeWindow,
+              PlatformMenuItem(
+                label: s.menuMinimize,
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyM,
+                  meta: true,
+                ),
+                onSelected: () => windowManager.minimize(),
               ),
-              PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.zoomWindow,
+              PlatformMenuItem(
+                label: s.menuZoom,
+                onSelected: () => macMenuAction('zoom'),
               ),
             ],
           ),
-          const PlatformMenuItemGroup(
+          PlatformMenuItemGroup(
             members: [
-              PlatformProvidedMenuItem(
-                type: PlatformProvidedMenuItemType.arrangeWindowsInFront,
+              PlatformMenuItem(
+                label: s.menuBringAllToFront,
+                onSelected: () => macMenuAction('front'),
               ),
             ],
           ),

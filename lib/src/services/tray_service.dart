@@ -37,6 +37,19 @@ Future<void> restoreMainWindow() async {
   await windowManager.focus();
 }
 
+/// macOS 应用菜单原生动作（Hide/Hide Others/Show All/Zoom/前置/全屏）。
+///
+/// Flutter 的 `PlatformMenuItem` 无法绑定 AppKit 标准 selector，
+/// 统一经 `com.fluxdown/window` 通道转发到
+/// macos/Runner/MainFlutterWindow.swift 执行等效原生调用。
+Future<void> macMenuAction(String method) async {
+  try {
+    await _macWindowChannel.invokeMethod<void>(method);
+  } catch (e, stack) {
+    logError(_tag, 'macMenuAction($method) failed', e, stack);
+  }
+}
+
 /// 系统托盘服务 — 管理托盘图标、菜单和事件
 class TrayService with TrayListener {
   TrayService._();
@@ -282,6 +295,10 @@ class TrayService with TrayListener {
         _handleExit();
     }
   }
+
+  /// 请求优雅退出（供 macOS 应用菜单「退出」等外部入口复用，
+  /// 与托盘「退出」走同一完整清理流程，含防重入）。
+  Future<void> requestExit() => _handleExit();
 
   /// 优雅退出 — 通过回调通知上层执行完整清理流程
   Future<void> _handleExit() async {

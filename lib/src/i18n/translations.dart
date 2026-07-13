@@ -1357,6 +1357,15 @@ class S {
   String get menuSettings => _t('设置…', 'Settings…');
   String get menuWebsite => _t('FluxDown 官网', 'FluxDown Website');
   String get menuFeedback => _t('发送反馈…', 'Send Feedback…');
+  String get menuAbout => _t('关于 FluxDown', 'About FluxDown');
+  String get menuHide => _t('隐藏 FluxDown', 'Hide FluxDown');
+  String get menuHideOthers => _t('隐藏其他', 'Hide Others');
+  String get menuShowAll => _t('全部显示', 'Show All');
+  String get menuQuit => _t('退出 FluxDown', 'Quit FluxDown');
+  String get menuToggleFullScreen => _t('切换全屏', 'Toggle Full Screen');
+  String get menuMinimize => _t('最小化', 'Minimize');
+  String get menuZoom => _t('缩放', 'Zoom');
+  String get menuBringAllToFront => _t('前置全部窗口', 'Bring All to Front');
 
   // ─────────────────────────────────────────────
   // DownloadCompleteWindow

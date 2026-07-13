@@ -34,6 +34,7 @@ class AppMenuCallbacks {
 
   static VoidCallback? newDownload;
   static VoidCallback? openSettings;
+  static VoidCallback? openAbout;
   static VoidCallback? find;
   static VoidCallback? selectAll;
 }
@@ -145,6 +146,13 @@ class _HomePageState extends State<HomePage> {
         _showSettings = true;
       });
     };
+    AppMenuCallbacks.openAbout = () {
+      if (!mounted || _showSettings) return;
+      setState(() {
+        _initialSettingsCategory = SettingsCategory.about;
+        _showSettings = true;
+      });
+    };
     AppMenuCallbacks.find = () {
       if (!mounted || _showSettings) return;
       _headerBarKey.currentState?.focusSearch();
@@ -159,6 +167,7 @@ class _HomePageState extends State<HomePage> {
   void _clearMenuCallbacks() {
     AppMenuCallbacks.newDownload = null;
     AppMenuCallbacks.openSettings = null;
+    AppMenuCallbacks.openAbout = null;
     AppMenuCallbacks.find = null;
     AppMenuCallbacks.selectAll = null;
   }
