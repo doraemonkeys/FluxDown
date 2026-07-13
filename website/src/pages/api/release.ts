@@ -26,7 +26,8 @@
  *     version: "0.1.51",
  *     tag: "server-v0.1.51",
  *     assets: { windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64,
- *               openwrt_x64, openwrt_arm64, openwrt_luci, qnap_x64, qnap_arm64 }
+ *               openwrt_x64, openwrt_arm64, openwrt_luci, qnap_x64, qnap_arm64,
+ *               synology_dsm7_x64, synology_dsm7_arm64, synology_dsm6_x64, synology_dsm6_arm64 }
  *   } | null,  // FluxDown Server（headless Web 版），无对应 release 时为 null
  *   cli: { version, tag, assets:{ windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64 } } | null,
  *   mobile: { version, tag, assets:{ android_arm64, android_armv7, android_x64, android_universal } } | null
@@ -258,6 +259,11 @@ export const GET: APIRoute = async () => {
     // QNAP qpkg（命名：FluxDown-Server-<ver>-qnap-<arch>.qpkg）
     const serverQnapX64Asset = findServerAsset("-qnap-x64.qpkg");
     const serverQnapArm64Asset = findServerAsset("-qnap-arm64.qpkg");
+    // 群晖 spk（命名：FluxDown-Server-<ver>-synology-<dsm6|dsm7>-<arch>.spk）
+    const serverSynoDsm7X64Asset = findServerAsset("-synology-dsm7-x64.spk");
+    const serverSynoDsm7Arm64Asset = findServerAsset("-synology-dsm7-arm64.spk");
+    const serverSynoDsm6X64Asset = findServerAsset("-synology-dsm6-x64.spk");
+    const serverSynoDsm6Arm64Asset = findServerAsset("-synology-dsm6-arm64.spk");
     // FluxDown CLI 资产（命名：FluxDown-CLI-<ver>-<os>-<arch>.<ext>）
     const findCliAsset = (suffix: string) =>
       cliRelease?.assets.find(
@@ -373,6 +379,22 @@ export const GET: APIRoute = async () => {
               ),
               qnap_arm64: formatAsset(
                 serverQnapArm64Asset,
+                serverRelease.tag_name,
+              ),
+              synology_dsm7_x64: formatAsset(
+                serverSynoDsm7X64Asset,
+                serverRelease.tag_name,
+              ),
+              synology_dsm7_arm64: formatAsset(
+                serverSynoDsm7Arm64Asset,
+                serverRelease.tag_name,
+              ),
+              synology_dsm6_x64: formatAsset(
+                serverSynoDsm6X64Asset,
+                serverRelease.tag_name,
+              ),
+              synology_dsm6_arm64: formatAsset(
+                serverSynoDsm6Arm64Asset,
                 serverRelease.tag_name,
               ),
             },

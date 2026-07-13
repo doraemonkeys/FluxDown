@@ -1269,13 +1269,15 @@ jobs:
           name: server-bin-${{ matrix.platform }}
           path: release-assets/*
 
-  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk + QNAP qpkg，复用 linux musl 静态产物）──
+  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk + QNAP qpkg + 群晖 spk，复用 linux musl 静态产物）──
   # ipk 纯脚本手打（packaging/openwrt/build_ipk.sh，无需 OpenWrt SDK）；
   # qpkg 用官方 QDK qbuild（packaging/qnap/build_qpkg.sh）。
   # 不跑 InstallToUbuntu.sh（其 apt 依赖列表含 ubuntu 24.04 已不存在的 `python` 包），手动装 QDK。
+  # spk 纯脚本手打（packaging/synology/build_spk.sh，做法同 SynoCommunity spksrc，无需群晖 toolkit）；
+  # DSM 6 / DSM 7 × x86_64 / armv8 共 4 包（DSM 7 强制套件用户运行，DSM 6 root）。
   # 产物名带 server-bin- 前缀 → release-server 的 download pattern 自动收集附到 Server Release。
   build-server-nas-packages:
-    name: Build Server (OpenWrt/QNAP packages)
+    name: Build Server (OpenWrt/QNAP/Synology packages)
     needs: [changes, build-server-binaries]
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
@@ -1333,6 +1335,18 @@ jobs:
             "release-assets/FluxDown-Server-${VERSION}-qnap-x64.qpkg"
           ./packaging/qnap/build_qpkg.sh "$VERSION" arm_64 "$A64/fluxdown-server" "$A64/web" \
             "release-assets/FluxDown-Server-${VERSION}-qnap-arm64.qpkg"
+
+      - name: Build Synology spk
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          X64="extracted/fluxdown-server-${VERSION}-linux-x64"
+          A64="extracted/fluxdown-server-${VERSION}-linux-arm64"
+          for dsm in dsm7 dsm6; do
+            ./packaging/synology/build_spk.sh "$VERSION" "$dsm" x86_64 "$X64/fluxdown-server" "$X64/web" \
+              "release-assets/FluxDown-Server-${VERSION}-synology-${dsm}-x64.spk"
+            ./packaging/synology/build_spk.sh "$VERSION" "$dsm" armv8 "$A64/fluxdown-server" "$A64/web" \
+              "release-assets/FluxDown-Server-${VERSION}-synology-${dsm}-arm64.spk"
+          done
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
@@ -1834,12 +1848,14 @@ jobs:
           | Linux x64 / ARM64（musl 静态链接，任意发行版可用） | \`FluxDown-Server-${VERSION}-linux-{x64,arm64}.tar.gz\` |
           | OpenWrt 软路由（x86_64 / aarch64 各子架构） | \`fluxdown-server_${VERSION}_<arch>.ipk\` + \`luci-app-fluxdown_${VERSION}_all.ipk\` |
           | QNAP NAS（QTS x86_64 / ARM64） | \`FluxDown-Server-${VERSION}-qnap-{x64,arm64}.qpkg\` |
+          | 群晖 NAS（DSM 7 / DSM 6，x86_64 / ARM64） | \`FluxDown-Server-${VERSION}-synology-{dsm7,dsm6}-{x64,arm64}.spk\` |
 
           解压后直接运行 \`fluxdown-server\`（Windows 为 \`fluxdown-server.exe\`），浏览器访问 \`http://127.0.0.1:17800\`。
           首次启动会在终端打印管理 token，务必保存。文件校验见 \`SHA256SUMS.txt\`。
 
           **OpenWrt**：\`opkg install fluxdown-server_*.ipk luci-app-fluxdown_*.ipk\`，LuCI「服务 → FluxDown」页管理，Web 界面在 \`http://路由器IP:17800\`。二进制含完整 Web UI（约 20MB+），需 overlay 空间充足的软路由设备。
           **QNAP**：App Center → 手动安装 \`.qpkg\`（需在设置中允许安装未经验证的应用），装完点应用图标直达 Web 界面。
+          **群晖**：套件中心 → 手动安装 \`.spk\`（需在「设置 → 信任来源」允许任何发行者）。DSM 7.x 装 \`dsm7\` 包（以套件专属用户运行），DSM 6.x 装 \`dsm6\` 包；Intel/AMD 机型选 x64，ARM 机型（rtd1296/rtd1619b 等）选 arm64。装完在套件中心点「打开」直达 Web 界面（端口 17800）。
 
           ## 🐳 Docker（linux/amd64 · linux/arm64）
 

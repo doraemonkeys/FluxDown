@@ -709,6 +709,9 @@ export default function HeroSection() {
                         { key: "linux", label: t("dl.linux") },
                         { key: "docker", label: t("dl.docker") },
                         { key: "web", label: t("dl.web") },
+                        { key: "openwrt", label: "OpenWrt" },
+                        { key: "qnap", label: "QNAP" },
+                        { key: "synology", label: "Synology" },
                         { key: "mobile", label: t("dl.mobile") },
                         { key: "cli", label: t("dl.cli") },
                       ] as const

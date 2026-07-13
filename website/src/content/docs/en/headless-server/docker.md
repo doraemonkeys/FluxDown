@@ -1,6 +1,6 @@
 ---
 title: Docker & NAS
-description: Run the headless FluxDown server from the prebuilt Docker image, with Docker Compose, CasaOS/ZimaOS, and Unraid.
+description: Run the headless FluxDown server from the prebuilt Docker image, with Docker Compose, CasaOS/ZimaOS, Unraid, and native Synology DSM packages.
 section: headless-server
 order: 2
 ---
@@ -77,6 +77,45 @@ Then install **FluxDown** from the store. Store source: [zerx-lab/casaos-appstor
 ## Unraid
 
 An Unraid Community Applications template is available in [zerx-lab/unraid-templates](https://github.com/zerx-lab/unraid-templates). The Web UI is served at `http://[SERVER-IP]:17800/`.
+
+## Synology NAS (native .spk package)
+
+Every Server release ships native DSM packages — no Docker required. Four packages cover both DSM generations and both CPU families:
+
+| Package | DSM version | CPU |
+|---|---|---|
+| `FluxDown-Server-<ver>-synology-dsm7-x64.spk` | DSM 7.0 or later | Intel / AMD (x86_64) |
+| `FluxDown-Server-<ver>-synology-dsm7-arm64.spk` | DSM 7.0 or later | ARM64 (rtd1296, rtd1619b, armada37xx, …) |
+| `FluxDown-Server-<ver>-synology-dsm6-x64.spk` | DSM 6.0 – 6.2 | Intel / AMD (x86_64) |
+| `FluxDown-Server-<ver>-synology-dsm6-arm64.spk` | DSM 6.0 – 6.2 | ARM64 |
+
+Not sure which CPU family your model uses? Check the "Package Arch" column for your model in [Synology's CPU list](https://kb.synology.com/en-us/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have): `x86_64` family → x64 package, `armv8` family → arm64 package. Older `armv7`/`i686` models are not supported.
+
+### Install
+
+1. Open **Package Center → Settings → General** and set **Trust Level** to **Any publisher**. This is required because the packages are unsigned: DSM 7 removed third-party package signing entirely — the only "verified" packages are those distributed through Synology's official Package Center program.
+2. **Package Center → Manual Install**, select the `.spk`, and follow the wizard.
+3. Start the package, then click **Open** in Package Center — it links straight to the Web UI on port `17800` (`http://<NAS-IP>:17800`).
+
+### First-run token
+
+The admin token is printed once on first start, into the package log. Grab it over SSH:
+
+```bash
+sudo grep -i token /var/packages/FluxDown/var/fluxdown-server.log
+```
+
+Use it to sign in to the Web UI. It is persisted in the package's database, so it survives restarts and upgrades.
+
+### Permissions and data locations
+
+- On **DSM 7** the service runs as a dedicated low-privilege package user (a DSM 7 platform requirement — packages may no longer run as root). On **DSM 6** it runs as root.
+- Database, logs, and the token live in `/var/packages/FluxDown/var`; downloads default to the same directory.
+- To download into a shared folder on DSM 7, grant the package user write access first: **Control Panel → Shared Folder → Edit → Permissions**, switch the user dropdown to **System internal user**, and give **FluxDown** Read/Write. DSM 6 needs no grant (root).
+
+### Upgrade and uninstall
+
+Upgrade by manually installing a newer `.spk` over the existing one — the database, token, and settings in `var` are preserved. Uninstalling from Package Center stops the service and removes the package.
 
 ## Exposing it safely
 

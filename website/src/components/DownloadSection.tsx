@@ -19,6 +19,9 @@ import {
   SiLinux,
   SiDocker,
   SiAndroid,
+  SiOpenwrt,
+  SiQnap,
+  SiSynology,
 } from "@icons-pack/react-simple-icons";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
@@ -110,6 +113,10 @@ interface ReleaseInfo {
       openwrt_luci: ReleaseAsset | null;
       qnap_x64: ReleaseAsset | null;
       qnap_arm64: ReleaseAsset | null;
+      synology_dsm7_x64: ReleaseAsset | null;
+      synology_dsm7_arm64: ReleaseAsset | null;
+      synology_dsm6_x64: ReleaseAsset | null;
+      synology_dsm6_arm64: ReleaseAsset | null;
     };
   } | null;
   /** FluxDown CLI（命令行客户端）独立 release，无发布时为 null */
@@ -205,7 +212,7 @@ export default function DownloadSection() {
   // Hero「更多版本」下拉选中平台后跳转到本区并切换面板。
   // 本组件 client:visible 懒水合，事件可能先于监听器发出——挂载时消费挂起值兜底。
   useEffect(() => {
-    const KEYS = ["windows", "macos", "linux", "docker", "web", "mobile", "cli"];
+    const KEYS = ["windows", "macos", "linux", "docker", "web", "openwrt", "qnap", "synology", "mobile", "cli"];
     const apply = (key: unknown) => {
       if (typeof key === "string" && KEYS.includes(key))
         setActivePlatform(key);
@@ -467,25 +474,92 @@ export default function DownloadSection() {
           label: "macOS Intel (tar.gz)",
           asset: serverAssets?.macos_x64 ?? null,
         },
+      ],
+    },
+    {
+      key: "openwrt",
+      name: "OpenWrt",
+      icon: SiOpenwrt,
+      arch: t("dl.openwrtArch"),
+      available: !!(
+        serverAssets?.openwrt_x64 ||
+        serverAssets?.openwrt_arm64 ||
+        serverAssets?.openwrt_luci
+      ),
+      primary: false,
+      badge:
+        serverAssets?.openwrt_x64 || serverAssets?.openwrt_arm64
+          ? t("dl.availableNow")
+          : t("dl.comingSoon"),
+      iconBg: "bg-gradient-to-br from-[#00B5E2] to-[#0082a8]",
+      version: release?.server?.version,
+      setup: serverAssets?.openwrt_x64 ?? null,
+      setupLabel: "x86_64 (ipk)",
+      portable: null,
+      packages: [
         {
-          label: "OpenWrt x86_64 (ipk)",
-          asset: serverAssets?.openwrt_x64 ?? null,
-        },
-        {
-          label: "OpenWrt aarch64 (ipk)",
+          label: "aarch64 (ipk)",
           asset: serverAssets?.openwrt_arm64 ?? null,
         },
         {
-          label: "OpenWrt LuCI (ipk)",
+          label: "LuCI (ipk)",
           asset: serverAssets?.openwrt_luci ?? null,
         },
+      ],
+    },
+    {
+      key: "qnap",
+      name: "QNAP",
+      icon: SiQnap,
+      arch: t("dl.qnapArch"),
+      available: !!(serverAssets?.qnap_x64 || serverAssets?.qnap_arm64),
+      primary: false,
+      badge:
+        serverAssets?.qnap_x64 || serverAssets?.qnap_arm64
+          ? t("dl.availableNow")
+          : t("dl.comingSoon"),
+      iconBg: "bg-gradient-to-br from-[#0056A9] to-[#003d78]",
+      version: release?.server?.version,
+      setup: serverAssets?.qnap_x64 ?? null,
+      setupLabel: "x64 (qpkg)",
+      portable: null,
+      packages: [
         {
-          label: "QNAP x64 (qpkg)",
-          asset: serverAssets?.qnap_x64 ?? null,
+          label: "ARM64 (qpkg)",
+          asset: serverAssets?.qnap_arm64 ?? null,
+        },
+      ],
+    },
+    {
+      key: "synology",
+      name: "Synology",
+      icon: SiSynology,
+      arch: t("dl.synologyArch"),
+      available: !!(
+        serverAssets?.synology_dsm7_x64 || serverAssets?.synology_dsm7_arm64
+      ),
+      primary: false,
+      badge:
+        serverAssets?.synology_dsm7_x64 || serverAssets?.synology_dsm7_arm64
+          ? t("dl.availableNow")
+          : t("dl.comingSoon"),
+      iconBg: "bg-gradient-to-br from-[#B5B5B6] to-[#6e6e70]",
+      version: release?.server?.version,
+      setup: serverAssets?.synology_dsm7_x64 ?? null,
+      setupLabel: "DSM 7 x64 (spk)",
+      portable: null,
+      packages: [
+        {
+          label: "DSM 7 ARM64 (spk)",
+          asset: serverAssets?.synology_dsm7_arm64 ?? null,
         },
         {
-          label: "QNAP ARM64 (qpkg)",
-          asset: serverAssets?.qnap_arm64 ?? null,
+          label: "DSM 6 x64 (spk)",
+          asset: serverAssets?.synology_dsm6_x64 ?? null,
+        },
+        {
+          label: "DSM 6 ARM64 (spk)",
+          asset: serverAssets?.synology_dsm6_arm64 ?? null,
         },
       ],
     },
@@ -925,7 +999,7 @@ export default function DownloadSection() {
                             )}
 
                             {/* Web 版（FluxDown Server）部署指南 */}
-                            {p.key === "web" && (
+                            {["web", "openwrt", "qnap"].includes(p.key) && (
                               <a
                                 href={`/docs/${locale}/headless-server/setup/`}
                                 className="inline-flex items-center gap-1 text-[10px] text-dark-text-muted hover:text-brand-blue underline underline-offset-2 transition-colors self-start"
