@@ -83,6 +83,29 @@ const zhCN: Messages = {
   "vote.loading": "加载中...",
   "vote.loadError": "加载结果失败",
 
+  // Feature Vote
+  "featureVote.badge": "社区路线图",
+  "featureVote.title": "为",
+  "featureVote.titleHighlight": "新功能投票",
+  "featureVote.subtitle":
+    "为你最想要的功能点赞，或者提出你自己的想法。社区共同决定 FluxDown 的路线图 —— 由 GitHub Issues 驱动。",
+  "featureVote.loading": "加载功能列表...",
+  "featureVote.loadError": "加载失败，请刷新重试",
+  "featureVote.empty": "还没有功能提案 —— 来提出第一个吧！",
+  "featureVote.totalVotes": "共 {n} 票",
+  "featureVote.voteSuccess": "投票成功！",
+  "featureVote.unvoteSuccess": "已取消投票",
+  "featureVote.voteError": "投票失败，请重试",
+  "featureVote.rateLimited": "操作太频繁，请稍候",
+  "featureVote.proposeButton": "提出新功能",
+  "featureVote.proposeTitlePlaceholder": "功能标题（必填，最多 80 字）",
+  "featureVote.proposeDescPlaceholder": "描述这个功能以及它为什么重要（可选）",
+  "featureVote.proposeCancel": "取消",
+  "featureVote.proposeSubmit": "提交",
+  "featureVote.proposing": "提交中...",
+  "featureVote.proposeSuccess": "提案已提交！现在可以开始投票了。",
+  "featureVote.proposeError": "提交失败，请重试",
+
   // Logo Vote
   "logoVote.badge": "社区投票",
   "logoVote.endedBadge": "投票已结束",
@@ -141,6 +164,7 @@ const zhCN: Messages = {
   "nav.docs": "文档",
   "nav.community": "社区",
   "nav.announcements": "公告",
+  "nav.featureVote": "功能投票",
   "nav.feedback": "反馈",
   "nav.sponsor": "赞助",
   "nav.github": "GitHub 仓库",

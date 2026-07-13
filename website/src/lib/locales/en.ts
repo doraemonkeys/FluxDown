@@ -89,6 +89,29 @@ const en = {
   "vote.loading": "Loading results...",
   "vote.loadError": "Failed to load results",
 
+  // Feature Vote
+  "featureVote.badge": "Community Roadmap",
+  "featureVote.title": "Vote for ",
+  "featureVote.titleHighlight": "upcoming features",
+  "featureVote.subtitle":
+    "Upvote the features you want most, or propose your own idea. The community shapes FluxDown's roadmap — powered by GitHub Issues.",
+  "featureVote.loading": "Loading features...",
+  "featureVote.loadError": "Failed to load features, please refresh",
+  "featureVote.empty": "No feature proposals yet — be the first to propose one!",
+  "featureVote.totalVotes": "{n} votes in total",
+  "featureVote.voteSuccess": "Voted!",
+  "featureVote.unvoteSuccess": "Vote removed",
+  "featureVote.voteError": "Vote failed, please try again",
+  "featureVote.rateLimited": "Too many requests, please wait",
+  "featureVote.proposeButton": "Propose a feature",
+  "featureVote.proposeTitlePlaceholder": "Feature title (required, max 80 chars)",
+  "featureVote.proposeDescPlaceholder": "Describe the feature and why it matters (optional)",
+  "featureVote.proposeCancel": "Cancel",
+  "featureVote.proposeSubmit": "Submit",
+  "featureVote.proposing": "Submitting...",
+  "featureVote.proposeSuccess": "Proposal submitted! It's now open for voting.",
+  "featureVote.proposeError": "Submission failed, please try again",
+
   // Logo Vote
   "logoVote.badge": "Community Vote",
   "logoVote.endedBadge": "Voting Ended",
@@ -140,6 +163,7 @@ const en = {
   "nav.download": "Download",
   "nav.demo": "Live Demo",
   "nav.announcements": "Announcements",
+  "nav.featureVote": "Feature Vote",
   "nav.feedback": "Feedback",
   "nav.changelog": "Changelog",
   "nav.themeBuilder": "Theme Builder",
