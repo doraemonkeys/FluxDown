@@ -423,6 +423,11 @@ class _HighlightScope extends InheritedWidget {
 class _SettingsPageState extends State<SettingsPage> {
   late SettingsCategory _selected;
 
+  // 侧边栏宽度（可拖拽调整，会话级，不持久化）
+  double _sidebarWidth = 180;
+  static const double _sidebarMinWidth = 160;
+  static const double _sidebarMaxWidth = 320;
+
   SettingsHighlightRequest? _highlight;
   int _highlightSeq = 0;
 
@@ -568,12 +573,23 @@ class _SettingsPageState extends State<SettingsPage> {
             children: [
               // 左侧导航栏
               _SettingsSidebar(
+                width: _sidebarWidth,
                 selected: _selected,
                 onSelect: (cat) => setState(() => _selected = cat),
                 onSearchSelect: _onSearchSelect,
               ),
-              // 分隔线
-              Container(width: 1, color: c.border),
+              // 可拖拽分隔线（7px 命中区，中央 1px 线）
+              _SidebarResizeHandle(
+                color: c.border,
+                onDrag: (dx) {
+                  setState(() {
+                    _sidebarWidth = (_sidebarWidth + dx).clamp(
+                      _sidebarMinWidth,
+                      _sidebarMaxWidth,
+                    );
+                  });
+                },
+              ),
               // 右侧内容区
               Expanded(
                 child: _HighlightScope(
@@ -595,16 +611,45 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
+/// 可拖拽的分隔线：1px 视觉线居中 + 7px 透明命中区，便于鼠标悬浮命中
+class _SidebarResizeHandle extends StatelessWidget {
+  final Color color;
+  final ValueChanged<double> onDrag;
+
+  /// 命中区厚度（视觉线居中，两侧透明可命中）
+  static const double hitSize = 7;
+
+  const _SidebarResizeHandle({required this.color, required this.onDrag});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: SizedBox(
+          width: hitSize,
+          height: double.infinity,
+          child: Center(child: Container(width: 1, color: color)),
+        ),
+      ),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────
 // 设置侧边栏导航
 // ─────────────────────────────────────────────
 
 class _SettingsSidebar extends StatefulWidget {
+  final double width;
   final SettingsCategory selected;
   final ValueChanged<SettingsCategory> onSelect;
   final ValueChanged<SettingsSearchItem> onSearchSelect;
 
   const _SettingsSidebar({
+    required this.width,
     required this.selected,
     required this.onSelect,
     required this.onSearchSelect,
@@ -674,7 +719,7 @@ class _SettingsSidebarState extends State<_SettingsSidebar> {
     final results = _results;
 
     return Container(
-      width: 180,
+      width: widget.width,
       color: c.surface1,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
       child: Column(
