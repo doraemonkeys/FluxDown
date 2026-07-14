@@ -12,6 +12,7 @@ export const SECTIONS = [
   { id: "browser-extension", en: "Browser Extension", zh: "浏览器扩展" },
   { id: "headless-server", en: "Headless Server", zh: "Headless 服务器" },
   { id: "api", en: "API", zh: "API" },
+  { id: "plugins", en: "Plugin Development", zh: "插件开发" },
   { id: "contributing", en: "Contributing", zh: "参与贡献" },
 ] as const;
 

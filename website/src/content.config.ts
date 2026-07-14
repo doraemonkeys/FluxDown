@@ -19,6 +19,7 @@ const docs = defineCollection({
       "browser-extension",
       "headless-server",
       "api",
+      "plugins",
       "contributing",
     ]),
     order: z.number().default(999),
