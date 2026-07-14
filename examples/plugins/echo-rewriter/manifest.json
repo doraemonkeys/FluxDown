@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "FluxDown 插件系统示例：演示 resolver 惰性解析、通知钩子、7 种设置控件与 flux.* 桥接 API。classic-script + globalThis 入口范式。",
   "homepage": "https://fluxdown.zerx.dev",
-  "minAppVersion": "0.2.0",
+  "minAppVersion": "0.1.60",
   "resolvers": [
     {
       "match": { "urls": ["*://echo.example/*"] },

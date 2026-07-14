@@ -663,6 +663,66 @@ struct NextWork {
     split_parent: Option<i32>,
 }
 
+/// 子范围下载的任务级上报映射（轨对等「一任务多资源」场景）。
+///
+/// coordinator 内部【始终】以本资源相对坐标工作——段行、Range 头、扩容、
+/// 完整性校验全部不变；仅在两个发射边界（`ProgressUpdate`、`SegmentSplit`）
+/// 把坐标平移进任务空间，并按 `owns_task_total` 抑制任务级 `tasks.total_bytes`
+/// 写入（子范围时由宿主统一校准）。HTTP 整任务路径用
+/// [`ReportScope::whole_task`]，行为逐字节不变。
+#[derive(Clone, Copy)]
+pub struct ReportScope {
+    /// 任务坐标偏移（= 前序资源已占字节）。ProgressUpdate.downloaded_bytes
+    /// 与快照/拆分事件的字节区间都加上它。
+    pub base: i64,
+    /// ProgressUpdate.total_bytes 的覆盖值（>0 生效；0 = 报 planned_total）。
+    pub total_override: i64,
+    /// 是否允许写 tasks.total_bytes（整任务 true；子范围 false，防止单资源
+    /// 长度覆盖任务级总量）。
+    pub owns_task_total: bool,
+    /// 本资源 `total_bytes` 为权威值（来自 206 Content-Range 分母等强证据）：
+    /// resume 漂移吸附与 Content-Range 扩容检查采【零容差】。防止段行被
+    /// 「另一轨/另一画质」的近长残留在 1%/1MiB 容差窗口内错认——那会静默
+    /// 截断尾部或错拼两种版本的字节。整任务 probe 路径保持既有容差。
+    pub strict_total: bool,
+}
+
+impl ReportScope {
+    /// 整任务下载（HTTP 单资源路径）：零偏移、不覆盖总量、拥有任务级写入。
+    #[must_use]
+    pub fn whole_task() -> Self {
+        Self {
+            base: 0,
+            total_override: 0,
+            owns_task_total: true,
+            strict_total: false,
+        }
+    }
+
+    /// 把本资源相对的分段快照映射进任务坐标：区间 +base；base>0 时前插一个
+    /// 覆盖 [0, base) 的 100% 前缀段（index=-1 哨兵；真实段索引不动，保持
+    /// SegmentSplit 事件与快照的索引精确关联）。
+    fn map_snapshot(&self, mut snapshot: Vec<SegmentProgressInfo>) -> Vec<SegmentProgressInfo> {
+        if self.base <= 0 {
+            return snapshot;
+        }
+        for s in &mut snapshot {
+            s.start_byte += self.base;
+            s.end_byte += self.base;
+        }
+        snapshot.insert(
+            0,
+            SegmentProgressInfo {
+                index: -1,
+                start_byte: 0,
+                end_byte: self.base - 1,
+                downloaded_bytes: self.base,
+            },
+        );
+        snapshot
+    }
+}
+
 /// spawn_worker 所需共享句柄的集合，支持事件循环中途（ramp-up 扩容）动态增开
 /// worker——启动时与扩容时走完全相同的 spawn 路径，避免两处参数漂移。
 ///
@@ -692,6 +752,8 @@ struct WorkerSpawnCtx {
     etag: String,
     last_modified: String,
     sync_gate: FileSyncGate,
+    scope: ReportScope,
+    spawn_gen: i64,
 }
 
 impl WorkerSpawnCtx {
@@ -725,6 +787,8 @@ impl WorkerSpawnCtx {
             self.etag.clone(),
             self.last_modified.clone(),
             self.sync_gate.clone(),
+            self.scope,
+            self.spawn_gen,
         );
         (assign_tx, handle)
     }
@@ -739,6 +803,9 @@ impl WorkerSpawnCtx {
 /// `Content-Range` 分母自报真实大小 > 规划，见 [`DownloadError::TrueSizeLarger`]）
 /// 或 resume 漂移吸附时，可能不同于入参 `total_bytes`——调用方
 /// （`run_download_inner`）须以返回值校准完整性检查与完成信号。
+///
+/// `scope`：子范围下载的任务级上报映射（见 [`ReportScope`]）；整任务路径
+/// 传 [`ReportScope::whole_task`]。
 ///
 ///
 /// This replaces the old "spawn N tasks and join" logic in
@@ -763,6 +830,8 @@ pub async fn run_coordinated_download(
     sink: &dyn EventSink,
     etag: &str,
     last_modified: &str,
+    scope: ReportScope,
+    spawn_gen: i64,
 ) -> Result<i64, DownloadError> {
     // ----- 0. Defensive checks ------------------------------------------------
     if total_bytes <= 0 {
@@ -787,6 +856,20 @@ pub async fn run_coordinated_download(
     } else {
         initial_segment_count
     };
+
+    // ----- 0.5 夺取段行布局属主权 --------------------------------------------
+    // 必须先于 load_segments/建行：从这一刻起，旧 spawn 迟到的段进度写入
+    // （update_segment_progress_bounded 的 epoch 存在性守卫）全类失效——
+    // 不存在"重建后、夺权前"的空窗。写失败仅降级为旧的 start_byte 单守卫
+    // 行为（迟到写至多被钳制，见 db 层文档），不阻断下载。
+    if let Err(e) = db.set_segments_epoch(task_id, spawn_gen).await {
+        log_info!(
+            "[coordinator] task {} set_segments_epoch({}) failed: {}（迟到写防护降级）",
+            task_id,
+            spawn_gen,
+            e
+        );
+    }
 
     // ----- 1. Build initial segment map from DB or fresh calculation ---------
     let existing = db.load_segments(task_id).await?;
@@ -897,7 +980,13 @@ pub async fn run_coordinated_download(
         } else if db_total < total_bytes {
             // Server reports a larger file than what the DB segments cover.
             // Decide whether this is CDN drift or a genuine file growth.
-            let threshold: i64 = (db_total / 100).clamp(1, 1_048_576);
+            let threshold: i64 = if scope.strict_total {
+                // 权威 total（轨对 scope）：任何不等即换轨/换画质/真变化，
+                // 一律重建，绝不吸附。
+                0
+            } else {
+                (db_total / 100).clamp(1, 1_048_576)
+            };
             let delta = total_bytes - db_total;
 
             if delta <= threshold {
@@ -913,7 +1002,9 @@ pub async fn run_coordinated_download(
                     delta,
                     threshold
                 );
-                let _ = db.update_task_total_bytes(task_id, db_total).await;
+                if scope.owns_task_total {
+                    let _ = db.update_task_total_bytes(task_id, db_total).await;
+                }
                 db_total
             } else {
                 // Genuine file growth — the tail bytes are real and must be
@@ -934,7 +1025,11 @@ pub async fn run_coordinated_download(
                 segments = fresh;
                 db.insert_segments(task_id, &db_segs).await?;
                 next_index = initial_segment_count;
-                let _ = db.update_task_total_bytes(task_id, total_bytes).await;
+                let _ = if scope.owns_task_total {
+                    db.update_task_total_bytes(task_id, total_bytes).await
+                } else {
+                    Ok(())
+                };
                 // Return early — segments are already valid, skip validate_coverage.
                 // Re-run pre-allocation and workers with total_bytes.
                 total_bytes
@@ -974,7 +1069,9 @@ pub async fn run_coordinated_download(
         // update_task_total_bytes may have set tasks.total_bytes to db_total earlier
         // (db_total <= total_bytes path).  After a fresh reset the canonical size is
         // total_bytes (from probe), so re-sync.
-        let _ = db.update_task_total_bytes(task_id, total_bytes).await;
+        if scope.owns_task_total {
+            let _ = db.update_task_total_bytes(task_id, total_bytes).await;
+        }
     }
 
     // Integrity check for resumed files: verify the file on disk is intact.
@@ -1173,6 +1270,8 @@ pub async fn run_coordinated_download(
         etag: etag.to_string(),
         last_modified: last_modified.to_string(),
         sync_gate: sync_gate.clone(),
+        scope,
+        spawn_gen,
     };
 
     // 开放式首段跟踪：当前仍由某 worker 持有开放式响应流的段索引；
@@ -1318,7 +1417,7 @@ pub async fn run_coordinated_download(
                                 db, task_id, &segments, child_idx, Some(seg_index),
                             ).await;
                             send_split_event(
-                                sink, task_id, seg_index, child_idx, &segments, false,
+                                sink, task_id, seg_index, child_idx, &segments, false, scope,
                             );
                             rebuild_seg_states(&segments, &seg_states);
                         }
@@ -1386,7 +1485,7 @@ pub async fn run_coordinated_download(
                             if let Some(parent_idx) = next.split_parent {
                                 send_split_event(
                                     sink, task_id, parent_idx, new_seg_idx,
-                                    &segments, false,
+                                    &segments, false, scope,
                                 );
                             }
 
@@ -1500,9 +1599,11 @@ pub async fn run_coordinated_download(
                                 persist_segment_change(
                                     db, task_id, &segments, tail_idx, None,
                                 ).await;
-                                let _ = db
-                                    .update_task_total_bytes(task_id, reported_total)
-                                    .await;
+                                if scope.owns_task_total {
+                                    let _ = db
+                                        .update_task_total_bytes(task_id, reported_total)
+                                        .await;
+                                }
                                 rebuild_seg_states(&segments, &seg_states);
                                 log_info!(
                                     "[coordinator] task {} 就地扩容（第 {}/{} 次）：规划 {} -> 服务器自报 \
@@ -1582,7 +1683,7 @@ pub async fn run_coordinated_download(
                                 if let Some(parent_idx) = next.split_parent {
                                     send_split_event(
                                         sink, task_id, parent_idx, new_seg_idx,
-                                        &segments, false,
+                                        &segments, false, scope,
                                     );
                                 }
                                 rebuild_seg_states(&segments, &seg_states);
@@ -1888,7 +1989,7 @@ pub async fn run_coordinated_download(
                         if let Some(parent_idx) = next.split_parent {
                             send_split_event(
                                 sink, task_id, parent_idx, new_seg_idx,
-                                &segments, true,
+                                &segments, true, scope,
                             );
                         }
                         rebuild_seg_states(&segments, &seg_states);
@@ -2059,7 +2160,7 @@ pub async fn run_coordinated_download(
                         if let Some(parent_idx) = next.split_parent {
                             send_split_event(
                                 sink, task_id, parent_idx, new_seg_idx,
-                                &segments, false,
+                                &segments, false, scope,
                             );
                         }
                         rebuild_seg_states(&segments, &seg_states);
@@ -2930,6 +3031,8 @@ async fn persist_segment_change(
 // ---------------------------------------------------------------------------
 
 /// Emit an `EngineEvent::SegmentSplit` so the host can animate the split.
+/// 字节区间经 `scope` 平移进任务坐标（索引不动），与 ProgressUpdate 快照的
+/// 映射保持一致。
 fn send_split_event(
     sink: &dyn EventSink,
     task_id: &str,
@@ -2937,6 +3040,7 @@ fn send_split_event(
     child_idx: i32,
     segments: &BTreeMap<i32, LiveSegment>,
     is_proactive: bool,
+    scope: ReportScope,
 ) {
     let Some(parent) = segments.get(&parent_idx) else {
         return;
@@ -2948,10 +3052,10 @@ fn send_split_event(
     sink.emit(EngineEvent::SegmentSplit {
         task_id: task_id.to_string(),
         parent_index: parent_idx,
-        parent_new_end: parent.end_byte,
+        parent_new_end: parent.end_byte + scope.base,
         child_index: child_idx,
-        child_start: child.start_byte,
-        child_end: child.end_byte,
+        child_start: child.start_byte + scope.base,
+        child_end: child.end_byte + scope.base,
         is_proactive,
         total_segments: segments.len() as i32,
     });
@@ -3001,6 +3105,8 @@ fn spawn_worker(
     etag: String,
     last_modified: String,
     sync_gate: FileSyncGate,
+    scope: ReportScope,
+    spawn_gen: i64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Worker loop: keep accepting assignments until the channel closes.
@@ -3037,6 +3143,8 @@ fn spawn_worker(
                 &etag,
                 &last_modified,
                 &sync_gate,
+                scope,
+                spawn_gen,
             )
             .await;
 
@@ -3126,6 +3234,8 @@ async fn do_segment_with_retry(
     expected_etag: &str,
     expected_last_modified: &str,
     sync_gate: &FileSyncGate,
+    scope: ReportScope,
+    spawn_gen: i64,
 ) -> Result<i64, DownloadError> {
     let mut attempts = 0u32;
 
@@ -3158,6 +3268,8 @@ async fn do_segment_with_retry(
             expected_etag,
             expected_last_modified,
             sync_gate,
+            scope,
+            spawn_gen,
         )
         .await
         {
@@ -3299,6 +3411,8 @@ async fn do_segment(
     expected_etag: &str,
     expected_last_modified: &str,
     sync_gate: &FileSyncGate,
+    scope: ReportScope,
+    spawn_gen: i64,
 ) -> Result<i64, DownloadError> {
     if actual_start > seg_end {
         // Already complete.
@@ -3621,7 +3735,7 @@ async fn do_segment(
         });
     if let Some(true_total) = reported_total {
         let planned = planned_total.load(Ordering::Relaxed);
-        let drift_tolerance = if size_is_estimate {
+        let drift_tolerance = if size_is_estimate || scope.strict_total {
             0
         } else {
             (planned / 100).clamp(1, 1_048_576)
@@ -3725,7 +3839,11 @@ async fn do_segment(
                 // 后页缓存丢失会致空洞。失败不掩盖 Cancelled（见 BUG-COORD-FSYNC）。
                 let _ = file.get_ref().sync_data().await;
                 update_seg_state(seg_states, seg_idx, seg_downloaded);
-                let _ = db.update_segment_progress(task_id, seg_idx, seg_downloaded).await;
+                let _ = db
+                    .update_segment_progress_bounded(
+                        task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                    )
+                    .await;
                 return Err(DownloadError::Cancelled);
             }
             result = tokio::time::timeout(
@@ -3748,9 +3866,11 @@ async fn do_segment(
                         file.flush().await?;
                         let _ = file.get_ref().sync_data().await;
                         update_seg_state(seg_states, seg_idx, seg_downloaded);
-                        let _ = db.update_segment_progress(
-                            task_id, seg_idx, seg_downloaded,
-                        ).await;
+                        let _ = db
+                            .update_segment_progress_bounded(
+                                task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                            )
+                            .await;
                         let stall_secs = if reconnect_hostile.load(Ordering::Relaxed) {
                             CHUNK_STALL_TIMEOUT_HOSTILE.as_secs()
                         } else {
@@ -3806,9 +3926,11 @@ async fn do_segment(
                         if write_len < bytes.len() {
                             boundary_reached = true;
                             file.flush().await?;
-                            let _ = db.update_segment_progress(
-                                task_id, seg_idx, seg_downloaded,
-                            ).await;
+                            let _ = db
+                                .update_segment_progress_bounded(
+                                    task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                                )
+                                .await;
                             break;
                         }
 
@@ -3819,15 +3941,20 @@ async fn do_segment(
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .clone();
+                            let report_total = if scope.total_override > 0 {
+                                scope.total_override
+                            } else {
+                                planned_total.load(Ordering::Relaxed)
+                            };
                             let _ = progress_tx
                                 .send(ProgressUpdate {
                                     task_id: task_id.to_string(),
-                                    downloaded_bytes: current_total,
-                                    total_bytes: planned_total.load(Ordering::Relaxed),
+                                    downloaded_bytes: current_total + scope.base,
+                                    total_bytes: report_total,
                                     status: 1,
                                     error_message: String::new(),
                                     file_name: String::new(),
-                                    segment_details: Some(snapshot),
+                                    segment_details: Some(scope.map_snapshot(snapshot)),
                                     ..Default::default()
                                 })
                                 .await;
@@ -3865,7 +3992,9 @@ async fn do_segment(
                                 pending_snap = Some((snap, snap_t));
                             }
                             let _ = db
-                                .update_segment_progress(task_id, seg_idx, durable_offset)
+                                .update_segment_progress_bounded(
+                                    task_id, seg_idx, durable_offset, seg_start, spawn_gen,
+                                )
                                 .await;
                             last_db_save = Instant::now();
                         }
@@ -3875,7 +4004,9 @@ async fn do_segment(
                         let _ = file.get_ref().sync_data().await;
                         update_seg_state(seg_states, seg_idx, seg_downloaded);
                         let _ = db
-                            .update_segment_progress(task_id, seg_idx, seg_downloaded)
+                            .update_segment_progress_bounded(
+                                task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                            )
                             .await;
                         return Err(DownloadError::Request(e));
                     }
@@ -3915,7 +4046,13 @@ async fn do_segment(
             // 而非从头重下，也不污染 total_downloaded 计数。
             update_seg_state(seg_states, seg_idx, seg_downloaded);
             let _ = db
-                .update_segment_progress(task_id, seg_idx, seg_downloaded)
+                .update_segment_progress_bounded(
+                    task_id,
+                    seg_idx,
+                    seg_downloaded,
+                    seg_start,
+                    spawn_gen,
+                )
                 .await;
             return Err(DownloadError::Other(format!(
                 "segment {} truncated: received {} bytes, expected {} (server closed stream early)",
@@ -3946,7 +4083,7 @@ async fn do_segment(
 
     update_seg_state(seg_states, seg_idx, seg_downloaded);
     let _ = db
-        .update_segment_progress(task_id, seg_idx, seg_downloaded)
+        .update_segment_progress_bounded(task_id, seg_idx, seg_downloaded, seg_start, spawn_gen)
         .await;
 
     Ok(seg_downloaded)

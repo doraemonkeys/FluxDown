@@ -199,11 +199,14 @@ pub struct DownloadParams {
     /// When > 0, the probe phase (HEAD + Range:0-0) is skipped entirely.
     /// This prevents one-time CDN URLs from being "consumed" by probe requests.
     pub hint_file_size: i64,
-    /// 该任务的 Range 能力是否已被验证（probe 确认过、或此前任一 206/
-    /// Accept-Ranges 证据，持久化于 tasks.range_verified）。
-    /// fresh 任务恒 true（hint 与否由 hint_file_size 表达）；resume 时由
-    /// download_manager 从 DB 读取——`false` 表示该任务源自 hint 且从未拿到
-    /// Range 支持证据，resume 须延续「首连接 plain GET」保守启动，绝不发
+    /// 该任务的 Range 能力是否已被验证（probe 确认过、resolver 插件担保
+    /// `rangeSupported`、或此前任一 206/Accept-Ranges 证据，持久化于
+    /// tasks.range_verified）。
+    /// 非 hint 的 fresh 任务恒 true（probe 会实测）；hint 任务（hint_file_size
+    /// != 0）fresh 时由 manager 决定：浏览器扩展 hint → false（保守），插件
+    /// rangeSupported 担保 → true（直接多段）。resume 时由 download_manager
+    /// 从 DB 读取——`false` 表示该任务源自 hint 且从未拿到 Range 支持证据，
+    /// resume 须延续「首连接 plain GET」保守启动，绝不发
     /// bounded Range（配额型端点会被作废 token）。
     pub range_verified: bool,
     /// Proxy configuration — used by FTP downloader for SOCKS/HTTP CONNECT tunneling.
@@ -241,6 +244,11 @@ pub struct DownloadParams {
     /// （config `use_server_time`）。服务器未提供该头、解析失败或写入失败时
     /// 保留本地完成时间，绝不影响下载结果。
     pub use_server_time: bool,
+    /// 段行布局属主令牌（= manager 的 spawn generation）。多段路径起飞时
+    /// 写入 `tasks.segments_epoch`，worker 段进度写入以它作存在性守卫——
+    /// 快速 pause→resume 后旧 spawn 迟到的写入全类失效（含段 0），杜绝
+    /// "迟到写落到重建后段行"的静默空洞。单流路径不使用。
+    pub spawn_gen: i64,
 }
 
 /// 将浏览器扩展捕获的额外 HTTP 头应用到请求构建器上。
@@ -2339,15 +2347,19 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     //          skip probe to preserve one-time tokens
     //    0   — no hint, run normal probe
     let info = if p.hint_file_size != 0 {
-        // fresh hint 任务：Range 能力未经验证，持久化标记（coordinator 首响应
-        // 证实支持后置回 1）。resume 据此延续「首连接 plain GET」保守启动。
+        // fresh hint 任务：持久化 Range 验证状态。浏览器扩展 hint → 0（未验证，
+        // coordinator 首响应证实支持后置回 1；resume 据此延续「首连接 plain GET」
+        // 保守启动）；插件 rangeSupported 担保 → 1（resume 照常按已验证多段）。
         // 写失败仅降级（resume 落回 probe 路径，即改动前行为），不阻断下载。
         if !p.is_resume
-            && let Err(e) = p.db.set_task_range_verified(&p.task_id, false).await
+            && let Err(e) =
+                p.db.set_task_range_verified(&p.task_id, p.range_verified)
+                    .await
         {
             log_info!(
-                "[download] task {} 持久化 range_verified=0 失败：{:?}（resume 保守启动可能退化）",
+                "[download] task {} 持久化 range_verified={} 失败：{:?}（resume 保守启动可能退化）",
                 p.task_id,
+                p.range_verified,
                 e
             );
         }
@@ -2613,16 +2625,18 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     // Chrome-style: write to a temporary file during download, rename on success.
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
 
-    // `size_is_estimate`：本次规划的 total 是否为【未经 probe 验证的估计值】。
-    // 两种情形为 true：
-    //   • fresh 的 hint 模式——total 直接取自浏览器扩展 hint（可能偏小的猜测），
+    // `size_is_estimate`：本次规划的 total 是否为【未经验证的估计值】，统一由
+    // range_verified 门控（fresh 由 manager 决定，resume 读 DB）。true 的情形：
+    //   • fresh 的浏览器扩展 hint——total 取自扩展 hint（可能偏小的猜测），
     //     服务器在 206 `Content-Range` 分母里自报的真实大小才是权威值，
     //     coordinator 的扩容检查须采【零容差】（见 segment_coordinator::do_segment）；
+    //     且 range_verdict 以 UNKNOWN 起步、零进度首段以 plain GET 起飞（保守启动）。
     //   • resume 一个【从未验证过 Range 能力】的 hint 任务（range_verified==false，
-    //     download_manager 以 DB total 作 hint 传入）——延续保守启动语义：
-    //     coordinator 的 range_verdict 以 UNKNOWN 起步、零进度首段以 plain GET 起飞。
-    // probe 路径与已验证任务的 resume：total 已被校准，保留 CDN 漂移容差。
-    let size_is_estimate = p.hint_file_size > 0 && (!p.is_resume || !p.range_verified);
+    //     download_manager 以 DB total 作 hint 传入）——延续保守启动语义。
+    // false 的情形：probe 路径、已验证任务的 resume、以及 resolver 插件担保
+    // rangeSupported 的 hint 任务（大小来自平台 API，Range 能力有插件背书）——
+    // 按 SUPPORTED 起步、正常多段规划，保留 CDN 漂移容差。
+    let size_is_estimate = p.hint_file_size > 0 && !p.range_verified;
 
     // Dynamic segment calculation when user chose "auto" (segment_count <= 0).
     let segments = if p.segment_count <= 0 {
@@ -2716,6 +2730,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             p.sink.as_ref(),
             &resume_etag,
             &resume_last_modified,
+            p.spawn_gen,
         )
         .await;
 
@@ -3608,6 +3623,7 @@ async fn download_multi_segment(
     sink: &dyn EventSink,
     etag: &str,
     last_modified: &str,
+    spawn_gen: i64,
 ) -> Result<i64, DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -3642,6 +3658,8 @@ async fn download_multi_segment(
         sink,
         etag,
         last_modified,
+        crate::segment_coordinator::ReportScope::whole_task(),
+        spawn_gen,
     )
     .await
 }

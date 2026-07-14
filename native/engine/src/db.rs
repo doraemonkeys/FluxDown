@@ -330,6 +330,13 @@ impl Db {
         // 插件惰性解析：仅存 resolver 插件 ID（不存解析结果，见 plugin 系统设计）。
         self.add_column_if_missing("tasks", "resolver_plugin_id", "TEXT NOT NULL DEFAULT ''")
             .await?;
+        // 段行布局属主令牌（spawn generation）：每次多段下载 spawn 起飞时先写入
+        // 自己的 generation，worker 段进度写入以它作存在性守卫——快速
+        // pause→resume 后旧 spawn 迟到的写入（含 start_byte 恒 0 的段 0）全类
+        // 失效，彻底关闭"迟到写落到重建后段行"的静默空洞窗口。进程内单调
+        // （DownloadManager.generation），跨进程无需单调（旧进程已死）。
+        self.add_column_if_missing("tasks", "segments_epoch", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
         Ok(())
     }
 
@@ -977,6 +984,54 @@ impl Db {
         .bind(downloaded_bytes)
         .bind(task_id)
         .bind(segment_index)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 写入当前 spawn 的段行布局属主令牌。多段下载 spawn 起飞时【先于】任何
+    /// 段行加载/建行调用（顺序即正确性：先夺主权，旧 spawn 的迟到写从这一刻
+    /// 起全部失效，不存在"重建后、夺权前"的空窗）。
+    pub async fn set_segments_epoch(&self, task_id: &str, epoch: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET segments_epoch = $1 WHERE id = $2")
+            .bind(epoch)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// worker 侧的段进度写入：spawn 属主令牌 + `start_byte` 匹配双守卫 + 段长钳制。
+    ///
+    /// 防三类竞态污染：
+    /// (1) 快速 pause→resume 后，旧 spawn 迟到的写入落到新布局的段行——
+    ///     `segments_epoch` 存在性守卫使其 0 行受影响（含 start_byte 恒为 0、
+    ///     单靠边界匹配无法区分的段 0），该类静默空洞窗口彻底关闭；
+    /// (2) 同 spawn 内布局漂移的防御性兜底——`start_byte` 匹配；
+    /// (3) 写入值超过当前段长——CASE 钳制。
+    /// coordinator 侧的权威写入（`persist_split`/`flush_segments_progress`）
+    /// 在事件循环内串行执行、无跨 spawn 竞态，不经此守卫。
+    pub async fn update_segment_progress_bounded(
+        &self,
+        task_id: &str,
+        segment_index: i32,
+        downloaded_bytes: i64,
+        start_byte: i64,
+        epoch: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE task_segments SET downloaded_bytes = CASE
+                 WHEN $1 > end_byte - start_byte + 1 THEN end_byte - start_byte + 1
+                 ELSE $1 END
+             WHERE task_id = $2 AND segment_index = $3 AND start_byte = $4
+               AND EXISTS (SELECT 1 FROM tasks WHERE id = $5 AND segments_epoch = $6)",
+        )
+        .bind(downloaded_bytes)
+        .bind(task_id)
+        .bind(segment_index)
+        .bind(start_byte)
+        .bind(task_id)
+        .bind(epoch)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -2742,6 +2797,53 @@ mod tests {
         assert_eq!(
             audio_url, None,
             "clearing the audio track must fall back to the default state"
+        );
+
+        close_test_db(&db, dir).await;
+    }
+
+    /// 段行布局属主令牌守卫：持有旧 epoch 的迟到写入必须 0 行生效（含
+    /// start_byte 恒为 0 的段 0——单靠边界匹配无法拦截的那一类），持有
+    /// 当前 epoch 的写入正常生效且被钳制到段长。
+    #[tokio::test]
+    async fn stale_epoch_segment_write_is_dropped() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "epoch1").await;
+        db.insert_segments("epoch1", &[(0, 0, 999), (1, 1000, 1999)])
+            .await
+            .expect("insert segments");
+
+        // 新 spawn 夺权（epoch=2）。
+        db.set_segments_epoch("epoch1", 2).await.expect("set epoch");
+
+        // 旧 spawn（epoch=1）迟到写段 0：必须被丢弃。
+        db.update_segment_progress_bounded("epoch1", 0, 5000, 0, 1)
+            .await
+            .expect("stale write");
+        let segs = db.load_segments("epoch1").await.expect("load");
+        assert_eq!(
+            segs[0].downloaded_bytes, 0,
+            "stale-epoch write on segment 0 must affect zero rows"
+        );
+
+        // 当前 spawn（epoch=2）写入：生效且钳制到段长（1000）。
+        db.update_segment_progress_bounded("epoch1", 0, 5000, 0, 2)
+            .await
+            .expect("current write");
+        let segs = db.load_segments("epoch1").await.expect("load");
+        assert_eq!(
+            segs[0].downloaded_bytes, 1000,
+            "current-epoch write must land, clamped to the segment span"
+        );
+
+        // 边界不匹配（start_byte 错位）在同 epoch 下仍被拒。
+        db.update_segment_progress_bounded("epoch1", 1, 500, 999, 2)
+            .await
+            .expect("mismatched-start write");
+        let segs = db.load_segments("epoch1").await.expect("load");
+        assert_eq!(
+            segs[1].downloaded_bytes, 0,
+            "start_byte-mismatched write must affect zero rows"
         );
 
         close_test_db(&db, dir).await;

@@ -1,0 +1,62 @@
+{
+  "identity": "fluxdown@youtube",
+  "name": "YouTube 视频解析",
+  "version": "1.1.0",
+  "description": "解析 YouTube 视频页为可下载直链（Innertube 多客户端回退链 ANDROID_VR→IOS→ANDROID，无需签名解密；遇 bot 风控自动补 visitorData 重试）。支持画质选择与音视频分离合并（DASH），签名直链自动按一次性 URL 处理。",
+  "homepage": "https://fluxdown.zerx.dev",
+  "minAppVersion": "0.1.60",
+  "resolvers": [
+    {
+      "match": {
+        "urls": [
+          "*://www.youtube.com/watch*",
+          "*://youtube.com/watch*",
+          "*://m.youtube.com/watch*",
+          "*://music.youtube.com/watch*",
+          "*://www.youtube.com/shorts/*",
+          "*://youtube.com/shorts/*",
+          "*://www.youtube.com/live/*",
+          "*://www.youtube.com/embed/*",
+          "*://youtu.be/*"
+        ]
+      },
+      "entry": "resolve.js",
+      "timeoutMs": 20000
+    }
+  ],
+  "settings": [
+    {
+      "key": "quality",
+      "title": "画质偏好",
+      "description": "best 取可用最高画质；audio 仅下载音频（m4a）",
+      "type": "string",
+      "widget": "select",
+      "options": [
+        { "value": "best", "label": "最佳画质" },
+        { "value": "2160p", "label": "2160p (4K)" },
+        { "value": "1440p", "label": "1440p (2K)" },
+        { "value": "1080p", "label": "1080p" },
+        { "value": "720p", "label": "720p" },
+        { "value": "480p", "label": "480p" },
+        { "value": "360p", "label": "360p" },
+        { "value": "audio", "label": "仅音频" }
+      ],
+      "default": "best"
+    },
+    {
+      "key": "preferMp4",
+      "title": "优先 MP4 容器",
+      "description": "开启时优先 H.264/AV1 MP4；关闭时允许 VP9 WebM（同画质体积更小）",
+      "type": "boolean",
+      "widget": "toggle",
+      "default": "true"
+    },
+    {
+      "key": "verbose",
+      "title": "详细日志",
+      "type": "boolean",
+      "widget": "toggle",
+      "default": "false"
+    }
+  ]
+}

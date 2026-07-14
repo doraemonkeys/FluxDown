@@ -69,6 +69,11 @@ pub struct ResolveResult {
     /// 直链为一次性/防探测签名 URL 时置 true → 跳过 probe（牺牲 If-Range）；
     /// 默认 false → 正常 probe 取 ETag，保 resume 一致性。
     pub ephemeral: bool,
+    /// 插件担保该直链所在服务支持 HTTP Range（如 googlevideo）。与 `ephemeral`
+    /// 正交：`ephemeral` 表达"probe 会作废直链"，本字段表达"Range 请求安全"。
+    /// 置 true 时引擎跳过 probe 的同时仍按已验证 Range 规划多段并发下载，
+    /// 不落入配额型端点（fnOS）的保守单流启动。默认 false（保守）。
+    pub range_supported: bool,
 }
 
 /// 通知事件。每个变体都带 `url`（= source_url），供 `notify()` 的 `match.urls` 过滤。
@@ -94,6 +99,11 @@ pub enum PluginEvent {
         task_id: String,
         url: String,
         file_path: String,
+        /// 轨对任务 mux 失败降级时，独立音频 sidecar 的绝对路径
+        /// （`<stem>.audio.m4a`）；单文件产物（含 mux 成功）为 `None`。
+        audio_path: Option<String>,
+        /// 轨对任务（视频+音频离散轨）是否成功 mux 为单文件；非轨对任务恒 `false`。
+        muxed: bool,
     },
     MetaProbed {
         task_id: String,
@@ -286,10 +296,15 @@ mod tests {
             task_id: "t1".into(),
             url: "http://x/".into(),
             file_path: "/tmp/a.bin".into(),
+            audio_path: Some("/tmp/a.audio.m4a".into()),
+            muxed: false,
         };
         let v: serde_json::Value = serde_json::to_value(&done).expect("serialize");
         assert_eq!(v["taskId"], "t1");
         assert_eq!(v["filePath"], "/tmp/a.bin");
+        assert_eq!(v["audioPath"], "/tmp/a.audio.m4a");
+        assert_eq!(v["muxed"], false);
+        assert!(v.get("audio_path").is_none());
         assert!(
             v.get("task_id").is_none(),
             "must not emit snake_case task_id"

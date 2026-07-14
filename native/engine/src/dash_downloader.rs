@@ -42,6 +42,10 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const QUALITY_SELECTION_TIMEOUT_SECS: u64 = 60;
 const MAX_SEGMENTS: usize = 100_000;
+/// 轨对模式：单轨超过该大小且探测到全长（= Range 能力有 206 实证）时，
+/// 走 segment_coordinator 多段并发下载；否则保持单流。与 advisor 的
+/// SINGLE_SEGMENT_THRESHOLD 对齐（2MB 以下拆分无收益）。
+const MULTI_SEGMENT_TRACK_THRESHOLD: i64 = 2 * 1024 * 1024;
 
 pub fn is_dash_url(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url);
@@ -58,6 +62,8 @@ struct DashSegment {
 
 struct ProgressState {
     downloaded_bytes: i64,
+    /// 已知总大小（0 = 未知）。track-pair 模式下为两轨 Content-Length 之和。
+    total_bytes: i64,
     last_report: std::time::Instant,
     last_db_save: std::time::Instant,
 }
@@ -72,6 +78,10 @@ struct SegmentDownloadContext<'a> {
     extra_headers: &'a std::collections::HashMap<String, String>,
     /// 浏览器扩展捕获的页面 Referer（B站等 CDN 强制要求，缺失即 403）
     referrer: &'a str,
+    /// 块级进度上报通道（200ms 节流，见 download_segment_streaming）。
+    progress_tx: &'a tokio::sync::mpsc::Sender<ProgressUpdate>,
+    /// 块级 DB 进度持久化（5s 节流，单调写入防进度回退）。
+    db: &'a crate::db::Db,
 }
 
 pub async fn run_dash_download(params: DownloadParams) {
@@ -365,6 +375,7 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
 
     let mut progress_state = ProgressState {
         downloaded_bytes: 0,
+        total_bytes: 0,
         last_report: std::time::Instant::now(),
         last_db_save: std::time::Instant::now(),
     };
@@ -475,6 +486,192 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     Ok(total)
 }
 
+/// 用 `Range: bytes=0-0` 探测轨道全长（解析 `Content-Range: bytes 0-0/N` 的 N）。
+/// 单次尝试、失败返回 `None`（调用方退化为未知大小），绝不阻塞下载主流程。
+async fn probe_content_length(p: &DownloadParams, url: &str) -> Option<i64> {
+    let mut req = p.client.get(url).header("Range", "bytes=0-0");
+    if crate::downloader::is_valid_referrer(&p.referrer) {
+        req = req.header(reqwest::header::REFERER, &p.referrer);
+    }
+    req = crate::downloader::apply_extra_headers(req, &p.extra_headers);
+    let resp = tokio::select! {
+        _ = p.cancel_token.cancelled() => return None,
+        r = req.send() => r.ok()?,
+    };
+    let header = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    // 形如 "bytes 0-0/240334643"；"*" 表示服务器未知全长。
+    let total = header.rsplit('/').next()?;
+    total.parse::<i64>().ok().filter(|n| *n > 0)
+}
+
+/// 轨对模式的单轨下载调度：优先多段并发，条件不满足或多段被服务器拒绝时
+/// 回退单流（既有 `download_track` 路径），保持既往行为为兜底。
+///
+/// 多段前提（全部满足）：
+///   • `track_len = Some(n)`——`probe_content_length` 拿到全长即服务器已用
+///     206 + Content-Range 履行过 Range 请求，Range 能力有实证；
+///   • n 超过 [`MULTI_SEGMENT_TRACK_THRESHOLD`]（小轨拆分无收益）；
+///   • 原始请求是 GET 族（POST + Range 未定义，禁多段）。
+#[allow(clippy::too_many_arguments)]
+async fn download_track_best_effort(
+    p: &DownloadParams,
+    url: &str,
+    single_segs: &[DashSegment],
+    dest_path: &Path,
+    track_len: Option<i64>,
+    progress_base: i64,
+    pair_total: i64,
+    progress_state: &mut ProgressState,
+) -> Result<i64, DownloadError> {
+    if let Some(len) = track_len
+        && len > MULTI_SEGMENT_TRACK_THRESHOLD
+        && p.spec.is_get_like()
+    {
+        match download_track_coordinated(p, url, dest_path, len, progress_base, pair_total).await {
+            Ok(n) => return Ok(n),
+            // 与 HTTP 路径相同的三类"多段不可行"错误 → 清理多段残留（段行 +
+            // 预分配临时文件）后回退单流；其余错误（取消/IO/磁盘满等）原样上抛
+            // ——取消时段行与临时文件由 coordinated 路径【保留】以支持真续传。
+            Err(DownloadError::RangeNotSupported(status))
+            | Err(DownloadError::VersionChanged(status))
+            | Err(DownloadError::RangeMisaligned(status)) => {
+                log_info!(
+                    "[dash-download] task {} track multi-segment aborted ({}) — \
+                     falling back to single-stream",
+                    p.task_id,
+                    status
+                );
+                let _ = p.db.delete_segments(&p.task_id).await;
+                let temp = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
+                let _ = tokio::fs::remove_file(&temp).await;
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        // C1 防线：cancel 与「探测失败」在 probe_content_length 里同为 None。
+        // 暂停绝不能落进破坏性单流回退（清行 + File::create 截断 temp），
+        // 先显式甄别取消。
+        if p.cancel_token.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        // 本轨存在跨暂停保留的多段进度、而本次探测拿不到全长（直链过期 403/
+        // 瞬时网络错）：单流回退会清行 + 截断 temp，GB 级进度全灭。fail-loud
+        // 保现场——置错误态等自动重试/下次 resume 重新 resolve 拿新直链。
+        // 探测成功但低于阈值/非 GET 时（track_len=Some 分支未命中）说明有
+        // 权威新信息，残留行确属陈旧，清掉走单流是安全的。
+        if track_len.is_none() {
+            let existing = p.db.load_segments(&p.task_id).await.unwrap_or_default();
+            if !existing.is_empty() {
+                return Err(DownloadError::Other(format!(
+                    "track probe failed with {} resumable segment row(s) retained; \
+                     refusing single-stream fallback that would destroy resume state",
+                    existing.len()
+                )));
+            }
+        }
+        // 单流路径不消费段行：清掉可能残留的多段行（探测成功但低于阈值/
+        // 非 GET 的画质切换残留），防止暂停/重启时渲染陈旧分布。
+        let _ = p.db.delete_segments(&p.task_id).await;
+    }
+    download_track(p, url, &None, single_segs, dest_path, progress_state).await
+}
+
+/// 用 segment_coordinator 多段并发下载一条完整轨道（IDM 式动态分段 + 分布图）。
+///
+/// coordinator 以【本轨相对坐标】工作（段行/Range/扩容），任务级映射经
+/// [`ReportScope`] 在其发射边界完成：进度 +`progress_base`、总量覆盖为两轨
+/// 合计 `pair_total`、快照/拆分事件平移并合成前序轨 100% 前缀段；
+/// `owns_task_total=false` 抑制 tasks.total_bytes 被单轨长度覆盖。
+///
+/// 段行生命周期（真续传）：
+///   • 起飞【不】清行——coordinator 的 resume-from-rows 直接续传上次暂停的
+///     本轨进度（行归属由其 coverage/漂移校验兜底：若行实为另一轨/另一画质
+///     的残留，尺寸不符会触发自动重建，绝不错拼字节）；
+///   • 成功后清行 + rename 临时文件；
+///   • 取消（暂停）【保留】行与临时文件，resume 续传；
+///   • 其余错误保留现场（fail-loud + 数据保留，与 HTTP 路径一致）。
+async fn download_track_coordinated(
+    p: &DownloadParams,
+    url: &str,
+    dest_path: &Path,
+    track_len: i64,
+    progress_base: i64,
+    pair_total: i64,
+) -> Result<i64, DownloadError> {
+    let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
+
+    let seg_count = if p.segment_count > 0 {
+        p.segment_count
+    } else {
+        let advice = crate::segment_advisor::advise_static(&crate::segment_advisor::AdvisorInput {
+            total_bytes: track_len,
+            supports_range: true,
+        });
+        if p.auto_max_connections > 0 {
+            advice.segments.min(p.auto_max_connections)
+        } else {
+            advice.segments
+        }
+    };
+    log_info!(
+        "[dash-download] task {} track multi-segment: len={}, segments={}, base={}",
+        p.task_id,
+        track_len,
+        seg_count,
+        progress_base
+    );
+
+    let scope = crate::segment_coordinator::ReportScope {
+        base: progress_base,
+        // 总量取「两轨探测合计」与「前序轨实际 + 本轨」的较大者：
+        //   • 单侧 probe 失败（pair_total=0）→ 用后者作下界；
+        //   • 前序轨实际字节 > 其探测值（重定向/就地扩容）→ 同样不越界。
+        // 恒保证 downloaded ≤ total、快照前缀段不出界（绝不让 UI 超 100%）。
+        total_override: pair_total.max(progress_base + track_len),
+        owns_task_total: false,
+        // track_len 来自本轨 206 Content-Range 分母，权威值：resume 漂移
+        // 吸附与扩容检查零容差，防近长跨轨/跨画质残留行被错认（C2）。
+        strict_total: true,
+    };
+    let result = crate::segment_coordinator::run_coordinated_download(
+        &p.task_id,
+        url,
+        &temp_path,
+        track_len,
+        false, // 全长来自 206 Content-Range 分母，权威值
+        seg_count,
+        &p.client,
+        &p.db,
+        &p.progress_tx,
+        &p.cancel_token,
+        &p.speed_limiter,
+        &p.spec,
+        p.sink.as_ref(),
+        "",
+        "",
+        scope,
+        p.spawn_gen,
+    )
+    .await;
+
+    match result {
+        Ok(final_total) => {
+            // 本轨完成：段行使命结束，清掉（下一轨/完成态不再引用）。
+            let _ = p.db.delete_segments(&p.task_id).await;
+            tokio::fs::rename(&temp_path, dest_path).await?;
+            Ok(final_total)
+        }
+        // 取消 = 暂停：保留段行 + 临时文件，resume 经 coordinator
+        // resume-from-rows 真续传（ephemeral 直链过期无妨——resume 重新
+        // resolve 拿新 URL，字节区间对同一内容仍有效）。
+        Err(e) => Err(e),
+    }
+}
+
 /// 离散音视频轨对下载旁路：`p.url` 为视频轨、`audio_url` 为音频轨，两条均为
 /// 可直接 GET 的完整轨道直链（如 DASH 分离的 m4s）。分别下载后用 ffmpeg mux
 /// 合并为单 mp4。与 MPD manifest 解析路径共用 `download_track` / `mux_audio_video`
@@ -486,6 +683,18 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
         p.url,
         audio_url
     );
+
+    // 持久化音频轨标记：插件惰性 resolve 产生的轨对在 create_task 时 audio_url
+    // 为空，DB 无记录 → 删除路径的 sidecar 门控（load_audio_url().is_some()）
+    // 永远不命中，音频文件成孤儿。此处在下载起点兜底落库（幂等 UPDATE；
+    // ephemeral 链接过期无妨——删除门控只看 is_some，resume 会重新 resolve）。
+    if let Err(e) = p.db.save_audio_url(&p.task_id, audio_url).await {
+        log_info!(
+            "[dash-download] task {} save_audio_url failed: {}（删除任务时 sidecar 清理可能失效）",
+            p.task_id,
+            e
+        );
+    }
 
     // 输出文件名：轨对合并产物统一为 .mp4（视频轨常见扩展名 .m4s 不适合最终容器）。
     let auto_name = if p.file_name.is_empty() {
@@ -501,8 +710,10 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     let save_dir = PathBuf::from(&p.save_dir);
     let dest_path = save_dir.join(&auto_name);
 
-    p.db.update_task_file_info(&p.task_id, &auto_name, 0)
-        .await?;
+    // 只更新文件名，不触碰 total_bytes：resume 再入时 total 已是有意义的
+    // 轨对合计，若像旧代码那样 update_task_file_info(name, 0) 会在任一
+    // re-probe 失败时把总量永久归零（C5），拖垮暂停/重启后的分布图比例尺。
+    p.db.update_task_file_name(&p.task_id, &auto_name).await?;
 
     if p.cancel_token.is_cancelled() {
         return Err(DownloadError::Cancelled);
@@ -523,13 +734,30 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
         })
         .await;
 
+    // 两轨大小：Range 0-0 探测 Content-Range 全长（googlevideo 等 CDN 通用；
+    // 失败 → None = 未知，UI 退化为只显示已下载字节，不阻塞下载）。
+    // 探测成功本身就是服务器履行 Range 请求（206 + Content-Range）的硬证据，
+    // 下方据此决定该轨能否走多段并发；失败（配额型端点等）自动保持单流。
+    let video_len = probe_content_length(p, &p.url).await;
+    let audio_len = probe_content_length(p, audio_url).await;
+    let total_bytes = match (video_len, audio_len) {
+        (Some(v), Some(a)) => v + a,
+        _ => 0,
+    };
+    if total_bytes > 0 {
+        let _ =
+            p.db.update_task_file_info(&p.task_id, &auto_name, total_bytes)
+                .await;
+    }
+
     let mut progress_state = ProgressState {
         downloaded_bytes: 0,
+        total_bytes,
         last_report: std::time::Instant::now(),
         last_db_save: std::time::Instant::now(),
     };
 
-    // 每条轨道即一个完整媒体流 → 单分段、无 init、无 range。
+    // 每条轨道即一个完整媒体流 → 单分段、无 init、无 range（单流回退路径用）。
     let video_seg = [DashSegment {
         url: p.url.clone(),
         range: None,
@@ -539,26 +767,133 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
         range: None,
     }];
 
-    let video_bytes = download_track(
-        p,
-        &p.url,
-        &None,
-        &video_seg,
-        &dest_path,
-        &mut progress_state,
-    )
-    .await?;
+    // 轨级真续传：视频轨完成判定（文件系统真值）。dest 只在整轨成功后才由
+    // rename 产生（单流/多段皆然），且 mux 只在两轨齐备后发生——因此
+    // 「dest 存在 + 无 .fdownloading 临时文件 + 大小与本次探测精确相等」
+    // 即视频轨已完成，跳过重下（暂停在音频阶段的任务 resume 不再重下 1GB
+    // 视频轨）。探测失败（video_len 未知）绝不跳过——无法与 mux 产物/旧画质
+    // 残留区分，宁可重下不可错拼。
+    let video_temp = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
+    let video_done = match video_len {
+        Some(v) => {
+            !tokio::fs::try_exists(&video_temp).await.unwrap_or(false)
+                && tokio::fs::metadata(&dest_path)
+                    .await
+                    .map(|m| m.len() as i64 == v)
+                    .unwrap_or(false)
+        }
+        None => false,
+    };
+
+    let video_bytes = if video_done {
+        let v = video_len.unwrap_or(0);
+        log_info!(
+            "[dash-download] task {} video track already complete ({} bytes) — skipping",
+            p.task_id,
+            v
+        );
+        // 立即上报一帧，让 UI 恢复后马上显示视频轨部分的进度与分布前缀。
+        let _ = p
+            .progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: v,
+                total_bytes,
+                status: 1,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: Some(vec![crate::downloader::SegmentProgressInfo {
+                    index: -1,
+                    start_byte: 0,
+                    end_byte: v - 1,
+                    downloaded_bytes: v,
+                }]),
+                ..Default::default()
+            })
+            .await;
+        v
+    } else {
+        download_track_best_effort(
+            p,
+            &p.url,
+            &video_seg,
+            &dest_path,
+            video_len,
+            0,
+            total_bytes,
+            &mut progress_state,
+        )
+        .await?
+    };
+    // 多段/跳过路径不经 progress_state 累计（coordinator 自行上报），此处校准
+    // 基线，保证音频轨阶段的单流进度上报包含视频轨已下字节。
+    progress_state.downloaded_bytes = progress_state.downloaded_bytes.max(video_bytes);
 
     let audio_path = build_audio_path(&dest_path);
-    let audio_bytes = download_track(
-        p,
-        audio_url,
-        &None,
-        &audio_seg,
-        &audio_path,
-        &mut progress_state,
-    )
-    .await?;
+    // 音频轨 FS 真值跳过（与视频轨对称）：mux 阶段取消的任务 resume 时，
+    // 音频轨已 rename 就位（段行已清），缺此判定会整轨重下（C4/D3）。
+    let audio_temp = PathBuf::from(format!("{}{}", audio_path.display(), TEMP_EXT));
+    let audio_done = match audio_len {
+        Some(a) => {
+            !tokio::fs::try_exists(&audio_temp).await.unwrap_or(false)
+                && tokio::fs::metadata(&audio_path)
+                    .await
+                    .map(|m| m.len() as i64 == a)
+                    .unwrap_or(false)
+        }
+        None => false,
+    };
+    let audio_bytes = if audio_done {
+        let a = audio_len.unwrap_or(0);
+        log_info!(
+            "[dash-download] task {} audio track already complete ({} bytes) — skipping",
+            p.task_id,
+            a
+        );
+        a
+    } else {
+        download_track_best_effort(
+            p,
+            audio_url,
+            &audio_seg,
+            &audio_path,
+            audio_len,
+            video_bytes,
+            total_bytes,
+            &mut progress_state,
+        )
+        .await?
+    };
+    // 终态校准：任务级总大小 = 两轨实际字节合计。coordinator 的任务级写入已被
+    // owns_task_total=false 门控，此处是唯一权威落点——同时兜住「探测失败、
+    // 前面从未写过 total」的路径（此时 DB 里还是旧值/0）。
+    let _ =
+        p.db.update_task_total_bytes(&p.task_id, video_bytes + audio_bytes)
+            .await;
+    // 终帧分布快照：把两轨合成为一个 100% 全覆盖段。音频轨走单流时不产生
+    // 分段快照，Dart 端缓存的最后一帧仍是视频轨阶段的（只覆盖 [0, 视频轨长)），
+    // 完成后分布图尾部会留灰——此帧以任务级坐标系覆盖全量，消除残留。
+    let pair_actual = video_bytes + audio_bytes;
+    if pair_actual > 0 {
+        let _ = p
+            .progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: pair_actual,
+                total_bytes: pair_actual,
+                status: 1,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: Some(vec![crate::downloader::SegmentProgressInfo {
+                    index: 0,
+                    start_byte: 0,
+                    end_byte: pair_actual - 1,
+                    downloaded_bytes: pair_actual,
+                }]),
+                ..Default::default()
+            })
+            .await;
+    }
 
     // 合并两轨；ffmpeg 缺失/失败时保留双文件（与 manifest 路径一致的优雅降级）。
     let mut mux_succeeded = true;
@@ -1373,6 +1708,8 @@ async fn download_track_inner(
         task_id: &p.task_id,
         extra_headers: &p.extra_headers,
         referrer: &p.referrer,
+        progress_tx: &p.progress_tx,
+        db: &p.db,
     };
 
     let segment_iter = init_seg.iter().chain(media_segs.iter());
@@ -1395,6 +1732,7 @@ async fn download_track_inner(
             idx,
             &mut file,
             &p.speed_limiter,
+            progress_state,
         )
         .await
         {
@@ -1409,8 +1747,9 @@ async fn download_track_inner(
             }
         };
 
+        // 块内已由 download_segment_streaming 逐 chunk 累加 progress_state，
+        // 此处只累计轨道字节数，避免重复计数。
         total_track += seg_bytes;
-        progress_state.downloaded_bytes += seg_bytes;
 
         if progress_state.last_report.elapsed().as_millis() >= 200 {
             let _ = p
@@ -1418,7 +1757,7 @@ async fn download_track_inner(
                 .send(ProgressUpdate {
                     task_id: p.task_id.clone(),
                     downloaded_bytes: progress_state.downloaded_bytes,
-                    total_bytes: 0,
+                    total_bytes: progress_state.total_bytes,
                     status: 1,
                     error_message: String::new(),
                     file_name: String::new(),
@@ -1457,6 +1796,7 @@ async fn download_track_inner(
     Ok(total_track)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_segment_with_retry(
     ctx: &SegmentDownloadContext<'_>,
     url: &str,
@@ -1464,6 +1804,7 @@ async fn download_segment_with_retry(
     seg_idx: usize,
     file: &mut File,
     speed_limiter: &crate::speed_limiter::SpeedLimiter,
+    progress_state: &mut ProgressState,
 ) -> Result<i64, DownloadError> {
     let mut attempts = 0u32;
     loop {
@@ -1471,13 +1812,17 @@ async fn download_segment_with_retry(
             .stream_position()
             .await
             .map_err(|e| DownloadError::Other(format!("failed to get file position: {e}")))?;
+        // 快照进度：失败重试会 set_len 回退本段已写字节，进度须同步回滚。
+        let progress_snapshot = progress_state.downloaded_bytes;
 
-        match download_segment_streaming(ctx, url, range, file, speed_limiter).await {
+        match download_segment_streaming(ctx, url, range, file, speed_limiter, progress_state).await
+        {
             Ok(written) => return Ok(written),
             Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
             Err(e) => {
                 file.set_len(start_pos).await?;
                 file.seek(std::io::SeekFrom::Start(start_pos)).await?;
+                progress_state.downloaded_bytes = progress_snapshot;
 
                 attempts += 1;
                 if attempts >= MAX_RETRIES {
@@ -1512,6 +1857,7 @@ async fn download_segment_streaming(
     range: Option<&str>,
     file: &mut File,
     speed_limiter: &crate::speed_limiter::SpeedLimiter,
+    progress_state: &mut ProgressState,
 ) -> Result<i64, DownloadError> {
     let safe_cookies = cookies_for_url(ctx.reference_url, url, ctx.cookies);
     let mut req = ctx.client.get(url);
@@ -1600,6 +1946,34 @@ async fn download_segment_streaming(
             offset = end;
         }
         written += chunk_len as i64;
+        progress_state.downloaded_bytes += chunk_len as i64;
+
+        // 块级进度上报（200ms 节流）：track-pair 模式整轨即单 segment，若只在
+        // segment 完成后上报，UI 将全程无进度（BUG：YouTube 240MB 轨 0% 挂满全场）。
+        if progress_state.last_report.elapsed().as_millis() >= 200 {
+            let _ = ctx
+                .progress_tx
+                .send(ProgressUpdate {
+                    task_id: ctx.task_id.to_string(),
+                    downloaded_bytes: progress_state.downloaded_bytes,
+                    total_bytes: progress_state.total_bytes,
+                    status: 1,
+                    error_message: String::new(),
+                    file_name: String::new(),
+                    segment_details: None,
+                    ..Default::default()
+                })
+                .await;
+            progress_state.last_report = std::time::Instant::now();
+        }
+        // 块级 DB 持久化（5s 节流，单调写入防进度回退）。
+        if progress_state.last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+            let _ = ctx
+                .db
+                .update_task_progress_monotonic(ctx.task_id, progress_state.downloaded_bytes)
+                .await;
+            progress_state.last_db_save = std::time::Instant::now();
+        }
     }
 
     // 提前 EOF 截断检测（F032）：流正常结束（stream.next() 返回 None）可能源自

@@ -818,6 +818,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             &p.cancel_token,
             &p.speed_limiter,
             &p.proxy_config,
+            p.spawn_gen,
         )
         .await?;
     } else {
@@ -1257,9 +1258,21 @@ async fn ftp_download_multi_segment(
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
     proxy_config: &ProxyConfig,
+    spawn_gen: i64,
 ) -> Result<(), DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
+    }
+
+    // 夺取段行布局属主权：先于 load_segments/建行（顺序即正确性，见
+    // db::set_segments_epoch 文档）。旧 spawn 迟到的段进度写从此全类失效。
+    if let Err(e) = db.set_segments_epoch(task_id, spawn_gen).await {
+        log_info!(
+            "[ftp-download] task {} set_segments_epoch({}) failed: {}（迟到写防护降级）",
+            task_id,
+            spawn_gen,
+            e
+        );
     }
 
     // Load or create segment definitions
@@ -1404,6 +1417,7 @@ async fn ftp_download_multi_segment(
                 &seg_states,
                 &limiter,
                 &proxy,
+                spawn_gen,
             )
             .await
         });
@@ -1462,6 +1476,7 @@ async fn ftp_do_segment_with_retry(
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
     proxy_config: &ProxyConfig,
+    spawn_gen: i64,
 ) -> Result<(), DownloadError> {
     let mut attempts = 0u32;
 
@@ -1482,6 +1497,7 @@ async fn ftp_do_segment_with_retry(
             seg_states,
             speed_limiter,
             proxy_config,
+            spawn_gen,
         )
         .await
         {
@@ -1533,6 +1549,7 @@ async fn ftp_do_segment(
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
     proxy_config: &ProxyConfig,
+    spawn_gen: i64,
 ) -> Result<(), DownloadError> {
     let bytes_needed = (seg_end - actual_start + 1) as u64;
 
@@ -1695,7 +1712,11 @@ async fn ftp_do_segment(
                     && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx) {
                         s.downloaded_bytes = seg_downloaded;
                     }
-                let _ = db.update_segment_progress(task_id, seg_idx, seg_downloaded).await;
+                let _ = db
+                    .update_segment_progress_bounded(
+                        task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                    )
+                    .await;
                 cancel_watcher.abort();
                 // close() 唤醒可能因 channel 满而阻塞在 blocking_send 的 reader,
                 // 避免 ftp_reader.await 死锁(与写错误分支一致)。
@@ -1734,7 +1755,9 @@ async fn ftp_do_segment(
                                     s.downloaded_bytes = seg_downloaded;
                                 }
                             let _ = db
-                                .update_segment_progress(task_id, seg_idx, seg_downloaded)
+                                .update_segment_progress_bounded(
+                                    task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                                )
                                 .await;
                             cancelled_writer.store(true, Ordering::SeqCst);
                             cancel_watcher.abort();
@@ -1787,7 +1810,9 @@ async fn ftp_do_segment(
                                 && file.get_ref().sync_data().await.is_ok();
                             if sync_ok {
                                 let _ = db
-                                    .update_segment_progress(task_id, seg_idx, seg_downloaded)
+                                    .update_segment_progress_bounded(
+                                        task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                                    )
                                     .await;
                             }
                             last_db_save = std::time::Instant::now();
@@ -1807,7 +1832,7 @@ async fn ftp_do_segment(
         s.downloaded_bytes = seg_downloaded;
     }
     let _ = db
-        .update_segment_progress(task_id, seg_idx, seg_downloaded)
+        .update_segment_progress_bounded(task_id, seg_idx, seg_downloaded, seg_start, spawn_gen)
         .await;
     cancel_watcher.abort();
 

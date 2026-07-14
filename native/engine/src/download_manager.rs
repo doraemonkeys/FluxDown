@@ -140,6 +140,10 @@ fn is_retriable_error(msg: &str) -> bool {
         // BT 完成前逐 piece 校验失败（BUG-BT-PHANTOM-PIECES）：重试会重新
         // add_torrent，触发 librqbit 全量校验并只补齐损坏的 piece。
         || lower.contains("piece verification failed")
+        // 轨对 resume 时的轨长探测失败（dash_downloader::download_track_best_effort
+        // 的 fail-loud 保留段行路径）：多为 ephemeral 直链过期/瞬时网络错，自动
+        // 重试会重新 resolve 拿新直链后自愈——不重试就只能等用户手动恢复。
+        || lower.contains("track probe failed")
 }
 
 /// Determine if a URL uses the FTP protocol (case-insensitive).
@@ -352,7 +356,14 @@ async fn deferred_file_cleanup(
                 e
             );
         }
+        // DASH/轨对 audio sidecar（<stem>.audio.m4a）及其临时文件：无条件
+        // best-effort 清理——非轨对任务该路径不存在，remove 静默失败即可，
+        // 免去在此异步上下文里查 DB 判定任务类型。
+        let audio_path = dash_downloader::build_audio_path(&path);
+        let audio_temp = PathBuf::from(format!("{}{}", audio_path.display(), downloader::TEMP_EXT));
+        let _ = tokio::fs::remove_file(&audio_temp).await;
         if delete_files && is_safe_file_name(&file_name) {
+            let _ = tokio::fs::remove_file(&audio_path).await;
             let _ = tokio::fs::remove_file(&path).await;
         }
     }
@@ -526,6 +537,9 @@ struct QueuedTask {
     /// 是否已完成惰性解析（off-actor resolve 回流后置 true，避免重复解析）。
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     resolved: bool,
+    /// resolver 插件担保直链支持 Range（`rangeSupported: true`）：跳过 probe 的
+    /// 同时按已验证 Range 规划多段，不落入配额型端点式的保守单流启动。
+    range_supported: bool,
 }
 
 /// All state associated with a single actively-running download task.
@@ -599,8 +613,9 @@ impl PendingResolve {
 }
 
 /// 把 resolve 结果应用到 QueuedTask（再入前）。非 ephemeral 保持 hint_file_size=0
-/// 以正常 probe 取 ETag（保 resume If-Range 一致性）；ephemeral 且知大小才走
-/// skip-probe hint 路径。
+/// 以正常 probe 取 ETag（保 resume If-Range 一致性）；ephemeral 走 skip-probe
+/// hint 路径：知大小用 total_bytes，不知大小用 -1（跳 probe + 大小未知，与
+/// resume 路径语义对称——绝不为 ephemeral 直链发出 probe 请求）。
 #[cfg(feature = "plugins")]
 fn apply_resolve_to_queued(queued: &mut QueuedTask, res: crate::plugin::ResolveResult) {
     if !res.url.is_empty() {
@@ -617,12 +632,17 @@ fn apply_resolve_to_queued(queued: &mut QueuedTask, res: crate::plugin::ResolveR
     if res.audio_url.is_some() {
         queued.audio_url = res.audio_url;
     }
-    // ephemeral（一次性/签名直链）→ 用 total_bytes 走 skip-probe；否则正常 probe。
+    // ephemeral（一次性/签名直链）→ 跳过 probe：知大小走 hint，未知走 -1；
+    // 否则正常 probe。
     queued.hint_file_size = if res.ephemeral {
-        res.total_bytes.unwrap_or(0)
+        match res.total_bytes {
+            Some(n) if n > 0 => n,
+            _ => -1,
+        }
     } else {
         0
     };
+    queued.range_supported = res.range_supported;
 }
 pub struct DownloadManager {
     db: Db,
@@ -1698,10 +1718,31 @@ impl DownloadManager {
             if let Some(pm) = &self.plugin_manager {
                 if task.status == 3 {
                     let file_path = format!("{}/{}", task.save_dir, task.file_name);
+                    // 轨对任务补充音频 sidecar 信息：mux 成功 → sidecar 已删，
+                    // muxed=true；mux 失败降级 → sidecar 独立存在，audio_path=Some。
+                    // 非轨对任务两者取默认（None/false）。以磁盘实况为准，不依赖
+                    // dash 下载器回传状态。
+                    let is_track_pair = matches!(
+                        self.db.load_audio_url(task_id).await,
+                        Ok(Some(ref a)) if !a.is_empty()
+                    );
+                    let (audio_path, muxed) = if is_track_pair {
+                        let sidecar =
+                            dash_downloader::build_audio_path(std::path::Path::new(&file_path));
+                        if tokio::fs::try_exists(&sidecar).await.unwrap_or(false) {
+                            (Some(sidecar.to_string_lossy().into_owned()), false)
+                        } else {
+                            (None, true)
+                        }
+                    } else {
+                        (None, false)
+                    };
                     pm.notify(crate::plugin::PluginEvent::Done {
                         task_id: task_id.to_string(),
                         url: task.url.clone(),
                         file_path,
+                        audio_path,
+                        muxed,
                     })
                     .await;
                 } else if task.status == 4 {
@@ -2079,25 +2120,67 @@ impl DownloadManager {
     /// Load segment records from DB and emit a `SegmentProgress` event.
     /// Used when pausing and on app startup to restore the download distribution
     /// visualization without requiring an active download.
+    ///
+    /// 轨对任务（DASH 音视频分离）的段行是【当前轨相对坐标】：音频轨阶段须
+    /// 平移 +视频轨大小并合成 100% 前缀段（index=-1，与 coordinator 发射边界
+    /// 的 ReportScope 映射一致），否则暂停/重启后分布图会把音频段画到文件头。
     async fn send_segments_from_db(&self, task_id: &str, total_bytes: i64) {
         if let Ok(db_segs) = self.db.load_segments(task_id).await
             && !db_segs.is_empty()
         {
+            let base = self.track_pair_segment_base(task_id).await;
+            let mut segments: Vec<SegmentDetail> = db_segs
+                .iter()
+                .map(|s| SegmentDetail {
+                    index: s.index,
+                    start_byte: s.start_byte + base,
+                    end_byte: s.end_byte + base,
+                    downloaded_bytes: s.downloaded_bytes,
+                })
+                .collect();
+            if base > 0 {
+                segments.insert(
+                    0,
+                    SegmentDetail {
+                        index: -1,
+                        start_byte: 0,
+                        end_byte: base - 1,
+                        downloaded_bytes: base,
+                    },
+                );
+            }
             self.sink.emit(EngineEvent::SegmentProgress {
                 task_id: task_id.to_string(),
                 total_bytes,
-                segment_count: db_segs.len() as i32,
-                segments: db_segs
-                    .iter()
-                    .map(|s| SegmentDetail {
-                        index: s.index,
-                        start_byte: s.start_byte,
-                        end_byte: s.end_byte,
-                        downloaded_bytes: s.downloaded_bytes,
-                    })
-                    .collect(),
+                segment_count: segments.len() as i32,
+                segments,
             });
         }
+    }
+
+    /// 轨对任务段行的任务坐标偏移：`audio_url` 标记存在且视频轨产物已就位
+    /// （最终文件存在、无 `.fdownloading` 临时文件）→ 段行属音频轨，偏移 =
+    /// 视频轨文件大小；其余情况 0（视频轨段行本就从任务坐标 0 起）。
+    async fn track_pair_segment_base(&self, task_id: &str) -> i64 {
+        match self.db.load_audio_url(task_id).await {
+            Ok(Some(audio)) if !audio.is_empty() => {}
+            _ => return 0,
+        }
+        let Ok(Some(t)) = self.db.load_task_by_id(task_id).await else {
+            return 0;
+        };
+        if t.file_name.is_empty() {
+            return 0;
+        }
+        let dest = std::path::Path::new(&t.save_dir).join(&t.file_name);
+        let temp = PathBuf::from(format!("{}{}", dest.display(), downloader::TEMP_EXT));
+        if tokio::fs::try_exists(&temp).await.unwrap_or(false) {
+            return 0;
+        }
+        tokio::fs::metadata(&dest)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0)
     }
 
     /// 创建下载任务，返回新任务 ID；仅在 DB 插入失败时返回 `None`。
@@ -2247,6 +2330,7 @@ impl DownloadManager {
             audio_url,
             resolver_plugin_id,
             resolved: false,
+            range_supported: false,
         };
         if is_bt || (self.has_capacity() && self.has_queue_capacity(&queued.queue_id)) {
             self.do_start_task(queued).await;
@@ -2357,6 +2441,7 @@ impl DownloadManager {
             audio_url,
             resolver_plugin_id: _,
             resolved: _,
+            range_supported,
         } = queued;
 
         // Four-tier segment count priority:
@@ -2734,7 +2819,10 @@ impl DownloadManager {
                 file_name,
                 segment_count: segments,
                 is_resume: false,
-                range_verified: true,
+                // hint 任务（插件 ephemeral / 浏览器扩展 fileSize）默认 Range 未
+                // 验证 → 保守单流启动；resolver 插件显式担保（rangeSupported）
+                // 时按已验证多段起飞。非 hint 任务照常 probe，此值不参与判定。
+                range_verified: hint_file_size == 0 || range_supported,
                 db: self.db.clone(),
                 client: task_client,
                 progress_tx: self.progress_tx.clone(),
@@ -2752,6 +2840,9 @@ impl DownloadManager {
                 audio_url,
                 auto_max_connections: self.auto_max_connections,
                 use_server_time: self.use_server_time,
+                // 段行布局属主令牌：本次 spawn 的 generation。多段路径起飞时
+                // 落 tasks.segments_epoch，旧 spawn 迟到的段进度写全类失效。
+                spawn_gen: spawn_gen as i64,
             };
 
             tokio::spawn(async move {
@@ -3001,6 +3092,7 @@ impl DownloadManager {
                     audio_url: None,
                     resolver_plugin_id: String::new(),
                     resolved: false,
+                    range_supported: false,
                 });
                 // 入队后立即广播最新队列位置(与 create_task 一致),否则要等后续
                 // drain_queue 才广播,期间 UI 显示过时的排队位置。
@@ -3061,25 +3153,33 @@ impl DownloadManager {
         // apply_resolve_to_queued 对称（缺一即 DASH 轨对丢音轨/鉴权直链丢头/
         // 一次性直链被 probe 作废）。
         #[cfg(feature = "plugins")]
-        let (plugin_extra_headers, plugin_audio_url, plugin_ephemeral, plugin_total_bytes) =
-            if let Some(res) = plugin_applied {
-                if !res.url.is_empty() {
-                    task.url = res.url;
-                }
-                if let Some(name) = res.file_name
-                    && !name.is_empty()
-                {
-                    task.file_name = name;
-                }
-                (
-                    res.extra_headers,
-                    res.audio_url.filter(|a| !a.is_empty()),
-                    res.ephemeral,
-                    res.total_bytes.unwrap_or(0),
-                )
-            } else {
-                (None, None, false, 0)
-            };
+        let plugin_resolved = plugin_applied.is_some();
+        #[cfg(feature = "plugins")]
+        let (
+            plugin_extra_headers,
+            plugin_audio_url,
+            plugin_ephemeral,
+            plugin_total_bytes,
+            plugin_range_supported,
+        ) = if let Some(res) = plugin_applied {
+            if !res.url.is_empty() {
+                task.url = res.url;
+            }
+            if let Some(name) = res.file_name
+                && !name.is_empty()
+            {
+                task.file_name = name;
+            }
+            (
+                res.extra_headers,
+                res.audio_url.filter(|a| !a.is_empty()),
+                res.ephemeral,
+                res.total_bytes.unwrap_or(0),
+                res.range_supported,
+            )
+        } else {
+            (None, None, false, 0, false)
+        };
 
         // 恢复持久化的浏览器请求上下文：鉴权站点（cookie+token 双因子的 fnOS、
         // 带 Authorization 的私有服务）缺它们 resume 必然 4xx。
@@ -3149,10 +3249,16 @@ impl DownloadManager {
         let use_hls = hls_downloader::is_hls_url(&task.url);
         // 轨对任务：从 DB 读回音频轨 URL，重建轨对下载（与 .mpd 后缀正交）。
         let audio_url = self.db.load_audio_url(task_id).await.unwrap_or_default();
-        // resolve 的新鲜 audio_url 优先（DASH 分离直链随每次 resolve 轮换；
-        // resolver 输出不落 DB）。
+        // 插件任务：本次 resolve 的输出是权威值（含"无音轨"）。DB 里的 audio_url
+        // 对插件任务只是 sidecar 删除标记（run_track_pair_inner 兜底落库），其
+        // ephemeral 直链早已过期，且插件设置可能已改为无音轨模式——绝不回退。
+        // 非插件任务（浏览器轨对/重启恢复）照旧读 DB 重建。
         #[cfg(feature = "plugins")]
-        let audio_url = plugin_audio_url.or(audio_url);
+        let audio_url = if plugin_resolved {
+            plugin_audio_url
+        } else {
+            audio_url
+        };
         let use_dash = dash_downloader::is_dash_url(&task.url) || audio_url.is_some();
         let use_bt = is_bt_url(&task.url);
         let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
@@ -3385,6 +3491,10 @@ impl DownloadManager {
             // ——落回默认 probe 会对配额型端点（fnOS multiple-download）重新
             // 发 HEAD/Range 并作废 token。已验证任务/旧库任务：照常 probe。
             let range_verified = self.db.get_task_range_verified(&tid).await.unwrap_or(true);
+            // resolver 插件本次 resolve 担保 Range 支持 → 视为已验证：配合下方
+            // ephemeral hint，跳过 probe 且按多段起飞（不落保守单流启动）。
+            #[cfg(feature = "plugins")]
+            let range_verified = range_verified || plugin_range_supported;
             let resume_hint = if range_verified {
                 0 // no hint on resume; use probe to get current size
             } else if task.total_bytes > 0 {
@@ -3442,6 +3552,7 @@ impl DownloadManager {
                 audio_url,
                 auto_max_connections: self.auto_max_connections,
                 use_server_time: self.use_server_time,
+                spawn_gen: spawn_gen as i64,
             };
 
             tokio::spawn(async move {
@@ -4188,6 +4299,7 @@ impl DownloadManager {
                 audio_url: None,
                 resolver_plugin_id: String::new(),
                 resolved: false,
+                range_supported: false,
             });
             // 入队后立即广播最新队列位置(覆盖单个 resume 与 batch_resume 批量入队;
             // broadcast_queue_positions 为只读信号,多次调用无副作用)。
@@ -4855,6 +4967,110 @@ pub async fn progress_reporter(
 mod tests {
     use super::*;
 
+    /// resolver 插件 resolve 结果 → QueuedTask 的应用语义（hint / Range 担保）。
+    #[cfg(feature = "plugins")]
+    mod resolve_apply {
+        use super::*;
+        use crate::plugin::ResolveResult;
+
+        fn queued() -> QueuedTask {
+            QueuedTask {
+                task_id: "t1".into(),
+                url: "https://example.com/source".into(),
+                save_dir: "/tmp".into(),
+                file_name: String::new(),
+                segments: 0,
+                is_resume: false,
+                cookies: String::new(),
+                referrer: String::new(),
+                hint_file_size: 0,
+                torrent_file_bytes: Vec::new(),
+                proxy_url: String::new(),
+                user_agent: String::new(),
+                queue_id: String::new(),
+                checksum: String::new(),
+                extra_headers: std::collections::HashMap::new(),
+                selected_file_indices: Vec::new(),
+                method: None,
+                body: None,
+                audio_url: None,
+                resolver_plugin_id: "yt@flux".into(),
+                resolved: false,
+                range_supported: false,
+            }
+        }
+
+        /// ephemeral + 已知大小 → hint = totalBytes（跳过 probe，大小可信）。
+        #[test]
+        fn ephemeral_with_size_uses_total_as_hint() {
+            let mut q = queued();
+            apply_resolve_to_queued(
+                &mut q,
+                ResolveResult {
+                    url: "https://cdn.example.com/direct".into(),
+                    total_bytes: Some(42_000_000),
+                    ephemeral: true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(q.hint_file_size, 42_000_000);
+            assert_eq!(q.url, "https://cdn.example.com/direct");
+            assert!(!q.range_supported);
+        }
+
+        /// 回归：ephemeral 但大小未知 → hint = -1（跳过 probe、大小未知）。
+        /// 旧实现落 0 会照常 probe，把一次性签名直链打废。
+        #[test]
+        fn ephemeral_without_size_skips_probe_with_minus_one() {
+            let mut q = queued();
+            apply_resolve_to_queued(
+                &mut q,
+                ResolveResult {
+                    url: "https://cdn.example.com/direct".into(),
+                    total_bytes: None,
+                    ephemeral: true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(q.hint_file_size, -1);
+        }
+
+        /// 非 ephemeral → hint 归零（正常 probe 取 ETag，保 resume 一致性），
+        /// 即使浏览器扩展曾给过 hint。
+        #[test]
+        fn non_ephemeral_resets_hint_for_probe() {
+            let mut q = queued();
+            q.hint_file_size = 123;
+            apply_resolve_to_queued(
+                &mut q,
+                ResolveResult {
+                    url: "https://cdn.example.com/direct".into(),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(q.hint_file_size, 0);
+        }
+
+        /// rangeSupported 担保透传：与 ephemeral hint 组合时，do_start_task 据此
+        /// 传 range_verified=true → 跳 probe 且按已验证 Range 多段规划。
+        #[test]
+        fn range_supported_flag_is_plumbed() {
+            let mut q = queued();
+            apply_resolve_to_queued(
+                &mut q,
+                ResolveResult {
+                    url: "https://cdn.example.com/direct".into(),
+                    total_bytes: Some(1_000_000_000),
+                    ephemeral: true,
+                    range_supported: true,
+                    ..Default::default()
+                },
+            );
+            assert!(q.range_supported);
+            assert_eq!(q.hint_file_size, 1_000_000_000);
+        }
+    }
+
     /// F042 回归：`is_safe_file_name` 必须拒绝所有会使
     /// `save_dir.join(name)` 退化为 `save_dir` 本身或逃逸出 `save_dir` 的输入。
     /// 尤其是 `"."`（CurDir），历史上被漏判为安全，可导致 BT 删除路径
@@ -4913,6 +5129,17 @@ mod tests {
     fn bt_piece_verification_failure_is_retriable() {
         assert!(is_retriable_error(
             "BT piece verification failed: 36 bad piece(s) — data will be re-checked and re-downloaded"
+        ));
+    }
+
+    /// R2-1 回归：轨对 resume 时轨长探测失败（dash 的 fail-loud 保留段行
+    /// 路径）必须可自动重试——重试会重新 resolve 拿新直链自愈；不命中
+    /// 白名单则任务卡 error 态等人工恢复，违背该路径的设计注释。
+    #[test]
+    fn track_probe_failure_is_retriable() {
+        assert!(is_retriable_error(
+            "track probe failed with 4 resumable segment row(s) retained; \
+             refusing single-stream fallback that would destroy resume state"
         ));
     }
 
