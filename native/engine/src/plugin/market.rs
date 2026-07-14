@@ -43,6 +43,8 @@ pub enum MarketError {
     SequenceRollback { seen: u64, watermark: u64 },
     #[error("插件包超过体积上限")]
     TooLarge,
+    #[error("索引响应超过体积上限")]
+    IndexTooLarge,
     #[error("未找到插件条目: {0}")]
     NotFound(String),
     #[error("插件包被 yanked（{0}），需显式确认安装")]
@@ -113,6 +115,9 @@ pub struct MarketIndex {
 
 /// 插件包体积上限（10MB，与 hub/server 安装上限一致）。
 const MAX_FXPLUG_BYTES: usize = 10 * 1024 * 1024;
+/// 索引 JSON 体积上限（流式截断防 OOM；真实索引远小于此，被投毒/损坏的源
+/// 可能返回任意大响应，`.text()` 全量缓冲会被撑爆）。
+const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
 
 /// 市场客户端。持有插件管理器（安装）与 Db（高水位持久化）。
 pub struct MarketClient {
@@ -126,7 +131,10 @@ impl MarketClient {
     /// 构造。`sources` 为空时用 [`DEFAULT_INDEX_SOURCES`]。
     pub fn new(manager: std::sync::Arc<PluginManager>, db: Db, sources: Vec<String>) -> Self {
         let sources = if sources.is_empty() {
-            DEFAULT_INDEX_SOURCES.iter().map(|s| s.to_string()).collect()
+            DEFAULT_INDEX_SOURCES
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             sources
         };
@@ -158,17 +166,28 @@ impl MarketClient {
     }
 
     async fn fetch_index_from(&self, url: &str) -> Result<MarketIndex, MarketError> {
-        let resp = self
+        let mut resp = self
             .client
             .get(url)
             .send()
             .await
             .map_err(|e| MarketError::Network(e.to_string()))?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| MarketError::Network(e.to_string()))?;
-        serde_json::from_str::<MarketIndex>(&text).map_err(|e| MarketError::IndexParse(e.to_string()))
+        // 流式读取 + 体积上限（与 download_one 对称，防恶意源 OOM）。
+        let mut buf = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    if buf.len() + chunk.len() > MAX_INDEX_BYTES {
+                        return Err(MarketError::IndexTooLarge);
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(MarketError::Network(e.to_string())),
+            }
+        }
+        serde_json::from_slice::<MarketIndex>(&buf)
+            .map_err(|e| MarketError::IndexParse(e.to_string()))
     }
 
     /// per-index_id 高水位防回滚：索引 sequence 不得低于本地已见最高值。
@@ -195,7 +214,11 @@ impl MarketClient {
     }
 
     /// 找到某 plugin_id 的最新非 yanked 版本条目。
-    pub fn latest_entry<'a>(&self, idx: &'a MarketIndex, plugin_id: &str) -> Option<&'a MarketEntry> {
+    pub fn latest_entry<'a>(
+        &self,
+        idx: &'a MarketIndex,
+        plugin_id: &str,
+    ) -> Option<&'a MarketEntry> {
         idx.entries
             .iter()
             .filter(|e| e.plugin_id == plugin_id && e.yanked == "none")
@@ -234,8 +257,11 @@ impl MarketClient {
             )));
         }
         for url in &entry.mirrors {
-            // https 白名单（拒 http/IP 直连等，防降级）。
-            if !url.starts_with("https://") {
+            // 镜像白名单：https-only（防降级）+ 字面量 IP 必须可全局路由（联邦
+            // 索引的镜像 URL 不可全信，挡「把环回/内网地址伪装成镜像」的 SSRF
+            // 探测；hostname 级过滤不做——自托管 LAN 索引经 hostname 仍可用，
+            // 记录在案的 v1 取舍，完整性由 content_hash 钉住兜底）。
+            if !mirror_url_allowed(url) {
                 continue;
             }
             match self.download_one(url).await {
@@ -317,9 +343,48 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// 镜像 URL 白名单：https-only + 字面量 IP host 必须可全局路由。
+///
+/// hostname 不做 DNS 级过滤（自托管 LAN 索引经 hostname 仍可用，v1 取舍）；
+/// 完整性由 content_hash 钉住兜底，此守卫只挡最直接的内网探测形态。
+fn mirror_url_allowed(url: &str) -> bool {
+    if !url.starts_with("https://") {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if let Some(host) = parsed.host_str() {
+        let trimmed = host.trim_matches(|c| c == '[' || c == ']');
+        if let Ok(ip) = trimmed.parse::<std::net::IpAddr>()
+            && !super::bridge::is_globally_routable_unicast(ip)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{sha256_hex, MarketEntry, MarketIndex};
+    use super::{MarketEntry, MarketIndex, mirror_url_allowed, sha256_hex};
+
+    #[test]
+    fn mirror_whitelist_rejects_http_and_nonroutable_ip() {
+        // https-only。
+        assert!(!mirror_url_allowed("http://cdn.example.com/a.fxplug"));
+        assert!(!mirror_url_allowed("ftp://cdn.example.com/a.fxplug"));
+        // 字面量非公网 IP 拒绝（环回/私网/元数据/v6 环回）。
+        assert!(!mirror_url_allowed("https://127.0.0.1/a.fxplug"));
+        assert!(!mirror_url_allowed("https://192.168.1.10:8443/a.fxplug"));
+        assert!(!mirror_url_allowed("https://169.254.169.254/a.fxplug"));
+        assert!(!mirror_url_allowed("https://[::1]/a.fxplug"));
+        // 公网字面量 IP 与 hostname 放行。
+        assert!(mirror_url_allowed("https://93.184.216.34/a.fxplug"));
+        assert!(mirror_url_allowed("https://cdn.jsdelivr.net/gh/x/y.fxplug"));
+        assert!(mirror_url_allowed("https://lan-index.internal/a.fxplug"));
+    }
 
     #[test]
     fn sha256_known_vector() {

@@ -17,6 +17,8 @@
 //! **判停条件**：若 (4) 跑不通则降级为「同步 JS API + Rust 侧阻塞桥接在专用线程执行」
 //! （trait 形状不变）；(2)/(3) 即便 interrupt 不生效，外层 timeout + 线程隔离兜底已覆盖。
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[cfg(not(feature = "plugins"))]
 fn main() {
     eprintln!("需 --features plugins 运行本 spike");
@@ -43,15 +45,17 @@ async fn main() {
         let res: Result<(), rquickjs::Error> = ctx
             .async_with(async |ctx| {
                 // 尝试分配远超 2MB 的字符串。
-                ctx.eval::<rquickjs::Value, _>(
-                    "let s='x'; for(let i=0;i<30;i++){ s+=s; } s.length",
-                )
-                .map(|_| ())
+                ctx.eval::<rquickjs::Value, _>("let s='x'; for(let i=0;i<30;i++){ s+=s; } s.length")
+                    .map(|_| ())
             })
             .await;
         println!(
             "(1) 内存上限：eval 大分配结果 = {} —— {}",
-            if res.is_err() { "Err(如期)" } else { "Ok(未触发!)" },
+            if res.is_err() {
+                "Err(如期)"
+            } else {
+                "Ok(未触发!)"
+            },
             match &res {
                 Err(e) => format!("{e:?}"),
                 Ok(()) => "内存限制可能未生效，需复核 feature 组合".to_string(),
@@ -76,7 +80,11 @@ async fn main() {
         println!(
             "(2) interrupt 死循环：{:?} 后返回 {} —— {:?}",
             elapsed,
-            if res.is_err() { "Err(被中断)" } else { "Ok(!)" },
+            if res.is_err() {
+                "Err(被中断)"
+            } else {
+                "Ok(!)"
+            },
             res.err()
         );
     }

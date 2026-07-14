@@ -425,7 +425,6 @@ class _ManageToggleButtonState extends State<_ManageToggleButton> {
 
     return ShadTooltip(
       waitDuration: const Duration(milliseconds: 500),
-      showDuration: Duration.zero,
       effects: const [],
       anchor: const ShadAnchor(
         childAlignment: Alignment.topCenter,

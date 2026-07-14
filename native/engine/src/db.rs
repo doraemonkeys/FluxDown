@@ -1535,7 +1535,11 @@ impl Db {
 
     /// 设置任务的 resolver 插件 ID（空串 = 清除，供「忽略插件重试」逃生舱）。
     /// 仅存 ID、不存解析结果 —— 每次 start/resume 重新 resolve 是惰性防直链过期。
-    pub async fn set_task_resolver(&self, id: &str, resolver_plugin_id: &str) -> Result<(), DbError> {
+    pub async fn set_task_resolver(
+        &self,
+        id: &str,
+        resolver_plugin_id: &str,
+    ) -> Result<(), DbError> {
         sqlx::query("UPDATE tasks SET resolver_plugin_id = $1 WHERE id = $2")
             .bind(resolver_plugin_id)
             .bind(id)
@@ -1551,8 +1555,25 @@ impl Db {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row
-            .map(|r| r.try_get::<String, _>("resolver_plugin_id").unwrap_or_default())
+            .map(|r| {
+                r.try_get::<String, _>("resolver_plugin_id")
+                    .unwrap_or_default()
+            })
             .unwrap_or_default())
+    }
+
+    /// 清除所有绑定到指定 resolver 插件的任务绑定（插件卸载时调用）。
+    ///
+    /// 不清则留下 orphaned 绑定：resume 时 resolver 已不存在，任务会以
+    /// fail-closed 报错卡住。卸载即等价于对受影响任务批量应用「忽略插件、
+    /// 按原始链接重跑」逃生舱。返回受影响任务数。
+    pub async fn clear_tasks_resolver(&self, resolver_plugin_id: &str) -> Result<u64, DbError> {
+        let r =
+            sqlx::query("UPDATE tasks SET resolver_plugin_id = '' WHERE resolver_plugin_id = $1")
+                .bind(resolver_plugin_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(r.rows_affected())
     }
 
     /// Manually run a WAL checkpoint to merge the write-ahead log back into the

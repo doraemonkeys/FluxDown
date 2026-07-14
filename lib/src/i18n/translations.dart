@@ -1040,6 +1040,21 @@ class S {
   String get marketInstalledButton => _r('marketInstalledButton');
   String get marketInstallingButton => _r('marketInstallingButton');
   String get marketYankedDeprecated => _r('marketYankedDeprecated');
+  String get marketSearchPlaceholder => _r('marketSearchPlaceholder');
+  String get marketSearchNoResult => _r('marketSearchNoResult');
+  String marketShowMore(int count) =>
+      _r('marketShowMore', {'count': '$count'});
+  String get pluginDetailIdentity => _r('pluginDetailIdentity');
+  String get pluginDetailAuthor => _r('pluginDetailAuthor');
+  String get pluginDetailPublishTime => _r('pluginDetailPublishTime');
+  String get pluginDetailMinAppVersion => _r('pluginDetailMinAppVersion');
+  String get pluginDetailSettings => _r('pluginDetailSettings');
+  String pluginDetailSettingsCount(int count) =>
+      _r('pluginDetailSettingsCount', {'count': '$count'});
+  String get pluginDetailHomepage => _r('pluginDetailHomepage');
+  String get pluginDetailDescription => _r('pluginDetailDescription');
+  String get pluginDetailUsage => _r('pluginDetailUsage');
+  String get pluginDetailUsageBody => _r('pluginDetailUsageBody');
   String get marketYankedVulnerable => _r('marketYankedVulnerable');
   String get marketYankedMalicious => _r('marketYankedMalicious');
   String get marketRefreshTooltip => _r('marketRefreshTooltip');

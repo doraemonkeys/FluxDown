@@ -18,10 +18,10 @@ pub mod hls_downloader;
 pub mod logger;
 pub mod meta_prober;
 pub mod model;
-pub mod proxy_config;
 /// 插件系统（可选、可失败的下载中间层）。仅 `plugins` feature 下编译。
 #[cfg(feature = "plugins")]
 pub mod plugin;
+pub mod proxy_config;
 pub mod segment_advisor;
 pub mod segment_coordinator;
 pub mod selection;

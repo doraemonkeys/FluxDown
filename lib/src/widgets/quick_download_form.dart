@@ -653,7 +653,6 @@ class _QuickDownloadFormState extends State<QuickDownloadForm> {
                 const SizedBox(width: 4),
                 ShadTooltip(
                   waitDuration: const Duration(milliseconds: 200),
-                  showDuration: Duration.zero,
                   builder: (_) => Text(
                     s.taskProxyFormatHint,
                     style: const TextStyle(fontSize: 12, height: 1.5),

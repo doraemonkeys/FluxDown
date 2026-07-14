@@ -24,14 +24,14 @@
 pub mod bridge;
 pub mod install;
 pub mod manager;
-pub mod market;
 pub mod manifest;
+pub mod market;
 pub mod quickjs;
 pub mod runtime;
 pub mod semver;
 pub use manager::{DisabledReason, LoadedPlugin, PluginInfo, PluginManager};
-pub use market::{MarketClient, MarketEntry, MarketError, MarketIndex};
 pub use manifest::{PluginManifest, SettingField, SettingType, SettingWidget};
+pub use market::{MarketClient, MarketEntry, MarketError, MarketIndex};
 pub use runtime::{
     ExecutionBudget, PluginBridge, PluginError, PluginEvent, PluginLogLevel, ResolveRequest,
     ResolveResult, ScriptRuntime,

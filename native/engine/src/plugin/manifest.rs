@@ -405,7 +405,10 @@ fn is_valid_identity(s: &str) -> bool {
     if name.contains('@') {
         return false;
     }
-    let ok = |seg: &str| seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    let ok = |seg: &str| {
+        seg.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    };
     ok(author) && ok(name)
 }
 
@@ -492,6 +495,7 @@ fn glob_segments(pattern: &str, text: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::PluginManifest;
 
@@ -640,6 +644,9 @@ mod tests {
 
     #[test]
     fn glob_case_insensitive() {
-        assert!(url_glob_match("*://WWW.YouTube.com/*", "https://www.youtube.com/x"));
+        assert!(url_glob_match(
+            "*://WWW.YouTube.com/*",
+            "https://www.youtube.com/x"
+        ));
     }
 }

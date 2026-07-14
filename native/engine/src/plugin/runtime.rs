@@ -75,7 +75,11 @@ pub struct ResolveResult {
 #[derive(Debug, Clone, Serialize)]
 // `rename_all` 只重命名变体名；变体内字段须 `rename_all_fields` 才 camelCase 化
 // （否则 JS 侧 ctx.task_id 而非 ctx.taskId，与 ResolveRequest 结构体不一致）。
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "event")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "event"
+)]
 pub enum PluginEvent {
     Start {
         task_id: String,
@@ -270,6 +274,7 @@ pub trait PluginBridge: Send + Sync {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{PluginEvent, ResolveRequest};
     use std::collections::HashMap;
@@ -285,7 +290,10 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&done).expect("serialize");
         assert_eq!(v["taskId"], "t1");
         assert_eq!(v["filePath"], "/tmp/a.bin");
-        assert!(v.get("task_id").is_none(), "must not emit snake_case task_id");
+        assert!(
+            v.get("task_id").is_none(),
+            "must not emit snake_case task_id"
+        );
         assert!(v.get("file_path").is_none());
 
         let meta = PluginEvent::MetaProbed {

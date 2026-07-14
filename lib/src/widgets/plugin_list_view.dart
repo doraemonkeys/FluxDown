@@ -15,6 +15,7 @@ import '../services/file_picker_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_metrics.dart';
 import 'dir_picker_field.dart';
+import 'plugin_detail_dialog.dart';
 import 'plugin_setting_form.dart';
 
 class PluginListView extends StatefulWidget {
@@ -32,6 +33,10 @@ class _PluginListViewState extends State<PluginListView> {
   bool _installingDir = false;
   bool _devMode = true;
   String _devDirPath = '';
+  String _marketQuery = '';
+  int _marketLimit = _marketPageSize;
+
+  static const int _marketPageSize = 50;
 
   @override
   void initState() {
@@ -172,13 +177,28 @@ class _PluginListViewState extends State<PluginListView> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          s.pluginsSectionTitle,
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            color: c.textPrimary,
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                s.pluginsSectionTitle,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: c.textPrimary,
+                ),
+              ),
+            ),
+            Text(
+              s.pluginDevModeSwitch,
+              style: TextStyle(fontSize: 12, color: c.textSecondary),
+            ),
+            const SizedBox(width: 6),
+            ShadSwitch(
+              value: _devMode,
+              onChanged: (v) => setState(() => _devMode = v),
+            ),
+          ],
         ),
         const SizedBox(height: 10),
         _buildInstallArea(context),
@@ -191,7 +211,7 @@ class _PluginListViewState extends State<PluginListView> {
         else
           for (final p in provider.plugins)
             Padding(
-              padding: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.only(bottom: 6),
               child: _PluginCard(
                 plugin: p,
                 provider: provider,
@@ -223,14 +243,13 @@ class _PluginListViewState extends State<PluginListView> {
     final c = AppColors.of(context);
     final m = AppMetrics.of(context);
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: c.surface1,
         borderRadius: m.brDialog,
         border: Border.all(color: c.border, width: 1),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
           ShadButton.outline(
             onPressed: _installingZip ? null : _pickZip,
@@ -243,15 +262,12 @@ class _PluginListViewState extends State<PluginListView> {
               ],
             ),
           ),
-          const SizedBox(height: 14),
-          Text(
-            s.pluginInstallDirLabel,
-            style: TextStyle(fontSize: 12, color: c.textSecondary),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
+          if (_devMode) ...[
+            const SizedBox(width: 10),
+            Expanded(
+              child: ShadTooltip(
+                waitDuration: const Duration(milliseconds: 300),
+                builder: (_) => Text(s.pluginInstallDirLabel),
                 child: DirPickerField(
                   path: _devDirPath,
                   placeholder: s.pluginInstallDirPlaceholder,
@@ -259,23 +275,14 @@ class _PluginListViewState extends State<PluginListView> {
                   onTap: _pickDevDir,
                 ),
               ),
-              const SizedBox(width: 10),
-              ShadSwitch(
-                value: _devMode,
-                onChanged: (v) => setState(() => _devMode = v),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                s.pluginDevModeSwitch,
-                style: TextStyle(fontSize: 12, color: c.textSecondary),
-              ),
-              const SizedBox(width: 10),
-              ShadButton(
-                onPressed: _devDirPath.isEmpty ? null : _installDevDir,
-                child: Text(s.pluginInstallDirButton),
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            ShadButton(
+              onPressed: _devDirPath.isEmpty ? null : _installDevDir,
+              child: Text(s.pluginInstallDirButton),
+            ),
+          ] else
+            const Spacer(),
         ],
       ),
     );
@@ -297,23 +304,63 @@ class _PluginListViewState extends State<PluginListView> {
         style: TextStyle(fontSize: 12.5, color: c.statusError),
       );
     }
-    if (provider.marketEntries.isEmpty) {
-      return Text(
-        s.marketEmpty,
-        style: TextStyle(fontSize: 12.5, color: c.textMuted),
-      );
-    }
+    final query = _marketQuery.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? provider.marketEntries
+        : provider.marketEntries.where((e) {
+            bool hit(String v) => v.toLowerCase().contains(query);
+            return hit(e.name) ||
+                hit(e.pluginId) ||
+                hit(e.description) ||
+                hit(e.author) ||
+                e.tags.any(hit);
+          }).toList();
+    final visible = filtered.length > _marketLimit
+        ? filtered.sublist(0, _marketLimit)
+        : filtered;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final entry in provider.marketEntries)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _MarketCard(
-              entry: entry,
-              installed: installedIds.contains(entry.pluginId),
-              provider: provider,
-            ),
+        if (provider.marketEntries.length > 8 || query.isNotEmpty) ...[
+          ShadInput(
+            placeholder: Text(s.marketSearchPlaceholder),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            onChanged: (v) => setState(() {
+              _marketQuery = v;
+              _marketLimit = _marketPageSize;
+            }),
           ),
+          const SizedBox(height: 8),
+        ],
+        if (provider.marketEntries.isEmpty)
+          Text(
+            s.marketEmpty,
+            style: TextStyle(fontSize: 12.5, color: c.textMuted),
+          )
+        else if (filtered.isEmpty)
+          Text(
+            s.marketSearchNoResult,
+            style: TextStyle(fontSize: 12.5, color: c.textMuted),
+          )
+        else ...[
+          for (final entry in visible)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: _MarketCard(
+                entry: entry,
+                installed: installedIds.contains(entry.pluginId),
+                provider: provider,
+              ),
+            ),
+          if (filtered.length > _marketLimit)
+            ShadButton.ghost(
+              onPressed: () => setState(() => _marketLimit += _marketPageSize),
+              child: Text(
+                s.marketShowMore(filtered.length - _marketLimit),
+                style: TextStyle(fontSize: 12, color: c.accent),
+              ),
+            ),
+        ],
       ],
     );
   }
@@ -340,97 +387,111 @@ class _PluginCard extends StatelessWidget {
     final c = AppColors.of(context);
     final m = AppMetrics.of(context);
 
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: c.surface1,
-        borderRadius: m.brDialog,
-        border: Border.all(color: c.border, width: 1),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showPluginDetailDialog(
+        context,
+        name: plugin.name,
+        version: plugin.version,
+        identity: plugin.identity,
+        description: plugin.description,
+        homepage: plugin.homepage,
+        settingsCount: plugin.settings.length,
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  runSpacing: 4,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: c.surface1,
+            borderRadius: m.brDialog,
+            border: Border.all(color: c.border, width: 1),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      plugin.name,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                        color: c.textPrimary,
-                      ),
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        Text(
+                          plugin.name,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                        Text(
+                          'v${plugin.version}',
+                          style: TextStyle(fontSize: 11, color: c.textMuted),
+                        ),
+                        if (plugin.homepage.isNotEmpty)
+                          GestureDetector(
+                            onTap: () => launchUrl(Uri.parse(plugin.homepage)),
+                            child: Text(
+                              plugin.homepage,
+                              style: TextStyle(fontSize: 11, color: c.accent),
+                            ),
+                          ),
+                        if (plugin.devMode)
+                          _Badge(
+                            text: s.pluginDevModeBadge,
+                            color: c.accent,
+                            bg: m.subtle(c.accent),
+                          ),
+                        if (plugin.disabledReason == 'Manual')
+                          _Badge(
+                            text: s.pluginDisabledManual,
+                            color: c.textSecondary,
+                            bg: c.surface2,
+                          ),
+                        if (plugin.disabledReason == 'CircuitBreaker')
+                          _Badge(
+                            text: s.pluginDisabledCircuitBreaker,
+                            color: AppColors.red,
+                            bg: m.subtle(AppColors.red),
+                          ),
+                      ],
                     ),
-                    Text(
-                      'v${plugin.version}',
-                      style: TextStyle(fontSize: 11, color: c.textMuted),
-                    ),
-                    if (plugin.devMode)
-                      _Badge(
-                        text: s.pluginDevModeBadge,
-                        color: c.accent,
-                        bg: m.subtle(c.accent),
-                      ),
-                    if (plugin.disabledReason == 'Manual')
-                      _Badge(
-                        text: s.pluginDisabledManual,
-                        color: c.textSecondary,
-                        bg: c.surface2,
-                      ),
-                    if (plugin.disabledReason == 'CircuitBreaker')
-                      _Badge(
-                        text: s.pluginDisabledCircuitBreaker,
-                        color: AppColors.red,
-                        bg: m.subtle(AppColors.red),
-                      ),
+                    if (plugin.description.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      _HoverDescription(text: plugin.description),
+                    ],
                   ],
                 ),
-                if (plugin.description.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    plugin.description,
-                    style: TextStyle(fontSize: 12, color: c.textSecondary),
-                  ),
-                ],
-                if (plugin.homepage.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  GestureDetector(
-                    onTap: () => launchUrl(Uri.parse(plugin.homepage)),
-                    child: Text(
-                      plugin.homepage,
-                      style: TextStyle(fontSize: 11.5, color: c.accent),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          ShadSwitch(
-            value: plugin.enabled,
-            onChanged: (v) => provider.setEnabled(plugin.identity, v),
-          ),
-          const SizedBox(width: 4),
-          if (plugin.settings.isNotEmpty)
-            ShadIconButton.ghost(
-              icon: Icon(LucideIcons.settings2, size: 16, color: c.textSecondary),
-              onPressed: () => showPluginSettingsDialog(
-                context,
-                plugin: plugin,
-                provider: provider,
               ),
-            ),
-          ShadIconButton.ghost(
-            icon: Icon(LucideIcons.trash2, size: 16, color: AppColors.red),
-            onPressed: onUninstall,
+              const SizedBox(width: 12),
+              ShadSwitch(
+                value: plugin.enabled,
+                onChanged: (v) => provider.setEnabled(plugin.identity, v),
+              ),
+              const SizedBox(width: 4),
+              if (plugin.settings.isNotEmpty)
+                ShadIconButton.ghost(
+                  icon: Icon(
+                    LucideIcons.settings2,
+                    size: 16,
+                    color: c.textSecondary,
+                  ),
+                  onPressed: () => showPluginSettingsDialog(
+                    context,
+                    plugin: plugin,
+                    provider: provider,
+                  ),
+                ),
+              ShadIconButton.ghost(
+                icon: Icon(LucideIcons.trash2, size: 16, color: AppColors.red),
+                onPressed: onUninstall,
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -497,82 +558,124 @@ class _MarketCardState extends State<_MarketCard> {
       _ => null,
     };
 
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: c.surface1,
-        borderRadius: m.brDialog,
-        border: Border.all(color: c.border, width: 1),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showPluginDetailDialog(
+        context,
+        name: entry.name,
+        version: entry.version,
+        identity: entry.pluginId,
+        description: entry.description,
+        homepage: entry.homepage,
+        author: entry.author,
+        tags: entry.tags,
+        publishTime: entry.publishTime,
+        minAppVersion: entry.minAppVersion,
+        yankedLabel: yankedLabel,
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  runSpacing: 4,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: c.surface1,
+            borderRadius: m.brDialog,
+            border: Border.all(color: c.border, width: 1),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      entry.name.isNotEmpty ? entry.name : entry.pluginId,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                        color: c.textPrimary,
-                      ),
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        Text(
+                          entry.name.isNotEmpty ? entry.name : entry.pluginId,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                        Text(
+                          'v${entry.version}',
+                          style: TextStyle(fontSize: 11, color: c.textMuted),
+                        ),
+                        if (entry.author.isNotEmpty)
+                          Text(
+                            entry.author,
+                            style: TextStyle(fontSize: 11, color: c.textMuted),
+                          ),
+                        if (entry.homepage.isNotEmpty)
+                          GestureDetector(
+                            onTap: () => launchUrl(Uri.parse(entry.homepage)),
+                            child: Text(
+                              entry.homepage,
+                              style: TextStyle(fontSize: 11, color: c.accent),
+                            ),
+                          ),
+                        if (yankedLabel != null)
+                          _Badge(
+                            text: yankedLabel,
+                            color: AppColors.red,
+                            bg: m.subtle(AppColors.red),
+                          ),
+                      ],
                     ),
-                    Text(
-                      'v${entry.version}',
-                      style: TextStyle(fontSize: 11, color: c.textMuted),
-                    ),
-                    if (entry.author.isNotEmpty)
-                      Text(
-                        entry.author,
-                        style: TextStyle(fontSize: 11, color: c.textMuted),
-                      ),
-                    if (yankedLabel != null)
-                      _Badge(
-                        text: yankedLabel,
-                        color: AppColors.red,
-                        bg: m.subtle(AppColors.red),
-                      ),
+                    if (entry.description.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      _HoverDescription(text: entry.description),
+                    ],
                   ],
                 ),
-                if (entry.description.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    entry.description,
-                    style: TextStyle(fontSize: 12, color: c.textSecondary),
-                  ),
-                ],
-                if (entry.homepage.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  GestureDetector(
-                    onTap: () => launchUrl(Uri.parse(entry.homepage)),
-                    child: Text(
-                      entry.homepage,
-                      style: TextStyle(fontSize: 11.5, color: c.accent),
-                    ),
-                  ),
-                ],
-              ],
-            ),
+              ),
+              const SizedBox(width: 12),
+              ShadButton.outline(
+                onPressed: (widget.installed || busy) ? null : _install,
+                child: Text(
+                  widget.installed
+                      ? s.marketInstalledButton
+                      : busy
+                      ? s.marketInstallingButton
+                      : s.marketInstallButton,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          ShadButton.outline(
-            onPressed: (widget.installed || busy) ? null : _install,
-            child: Text(
-              widget.installed
-                  ? s.marketInstalledButton
-                  : busy
-                  ? s.marketInstallingButton
-                  : s.marketInstallButton,
-            ),
-          ),
-        ],
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 单行省略描述：鼠标悬浮 tooltip 显示全文
+// =============================================================================
+
+class _HoverDescription extends StatelessWidget {
+  final String text;
+
+  const _HoverDescription({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return ShadTooltip(
+      waitDuration: const Duration(milliseconds: 300),
+      builder: (_) => ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Text(text),
+      ),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, color: c.textSecondary),
       ),
     );
   }

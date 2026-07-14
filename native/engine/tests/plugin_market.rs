@@ -5,6 +5,7 @@
 //! market 单测（sha256/解析）+ 线上 E2E（真实索引 hash 吻合）共同覆盖。
 
 #![cfg(feature = "plugins")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write as _;
 use std::net::TcpListener;
@@ -92,7 +93,13 @@ async fn fetch_index_parses_and_enforces_watermark() {
     let url2 = format!("http://127.0.0.1:{port2}/index.json");
     let mc2 = MarketClient::new(pm, engine.db.clone(), vec![url2]);
     let err = mc2.fetch_index().await.expect_err("rollback rejected");
-    assert!(matches!(err, MarketError::SequenceRollback { seen: 3, watermark: 5 }));
+    assert!(matches!(
+        err,
+        MarketError::SequenceRollback {
+            seen: 3,
+            watermark: 5
+        }
+    ));
 
     let _ = tokio::fs::remove_dir_all(&work).await;
 }
@@ -110,8 +117,33 @@ async fn http_mirror_rejected_https_only() {
     let mc = MarketClient::new(pm, engine.db.clone(), vec![url]);
     let idx = mc.fetch_index().await.expect("fetch ok");
     let entry = idx.entries[0].clone();
-    let err = mc.install_entry(&entry, false).await.expect_err("http mirror rejected");
+    let err = mc
+        .install_entry(&entry, false)
+        .await
+        .expect_err("http mirror rejected");
     assert!(matches!(err, MarketError::AllMirrorsFailed));
+
+    let _ = tokio::fs::remove_dir_all(&work).await;
+}
+
+/// 回归（Bug：索引拉取无体积上限）：被投毒/损坏的源返回超大响应时必须流式
+/// 截断报 `IndexTooLarge`，而非 `.text()` 全量缓冲撑爆内存。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_index_rejected() {
+    let work = std::env::temp_dir().join(format!("fluxdown-market-big-{}", uniq()));
+    tokio::fs::create_dir_all(&work).await.expect("mkdir");
+    let engine = make_engine(&work).await;
+    let pm = engine.manager.plugin_manager().expect("pm");
+
+    // 5MB 垃圾响应（> 4MB 上限）。
+    let (port, _s) = spawn_index_server("x".repeat(5 * 1024 * 1024));
+    let url = format!("http://127.0.0.1:{port}/index.json");
+    let mc = MarketClient::new(pm, engine.db.clone(), vec![url]);
+    let err = mc
+        .fetch_index()
+        .await
+        .expect_err("oversized index must be rejected");
+    assert!(matches!(err, MarketError::IndexTooLarge), "got: {err:?}");
 
     let _ = tokio::fs::remove_dir_all(&work).await;
 }

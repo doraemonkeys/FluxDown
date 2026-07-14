@@ -959,7 +959,6 @@ class _ToolButtonState extends State<_ToolButton> {
     if (widget.tooltip != null) {
       button = ShadTooltip(
         waitDuration: const Duration(milliseconds: 400),
-        showDuration: Duration.zero,
         builder: (_) => Text(widget.tooltip!),
         child: button,
       );

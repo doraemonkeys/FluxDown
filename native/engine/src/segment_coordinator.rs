@@ -347,6 +347,53 @@ const RANGE_FAMILY_DISCARD_MAX: i64 = 8 * 1024 * 1024;
 /// 否则冻结（新增连接没有带来净收益，继续加只会触发服务器风控）。
 const RAMP_IMPROVE_FACTOR: f64 = 1.05;
 
+/// 扩容崩塌判据：扩容后窗口吞吐 < 扩容前吞吐 × 此系数，说明服务器对新增
+/// 连接施加了惩罚性限速（按连接均分带宽并压低单连接速率）。此时仅冻结是
+/// 不够的——被惩罚的规模会一直跑到任务结束。处置：回滚到扩容前规模（多余
+/// worker 完成当前段后自然退休，进行中的连接绝不取消），并把回滚后的规模
+/// 记入域名连接上限缓存，同域名后续任务直接以该值起步。
+/// 0.5 的余量足够宽：正常网络抖动极少让 2s 窗口吞吐腰斩，而惩罚型限速的
+/// 跌幅通常是数量级级别（实测 59 MB/s -> 2 MB/s）。
+const RAMP_COLLAPSE_FACTOR: f64 = 0.5;
+
+/// 冻结/到顶后的持续劣化收缩：以任务内观察到的峰值窗口吞吐为参照，连续
+/// 此数量的评估窗口吞吐 < 峰值 × [`RAMP_COLLAPSE_FACTOR`] 时，把连接额度
+/// 乘性减半（下限 1）。覆盖「起步规模就已触发服务器惩罚」的场景——此时
+/// 从未发生过扩容评估，崩塌回滚判据不可达。收缩只在额度被用满
+/// （alive >= allowed）时计数，下载尾声 worker 自然退休导致的吞吐下降
+/// 不会误触发。
+const RAMP_SHRINK_STRIKES: u32 = 2;
+
+/// 峰值吞吐参照的每窗口衰减系数：约 70 个窗口（2 分钟出头）半衰。
+/// 让持续劣化收缩的参照系跟随近期真实速度，而非被启动瞬间的突发窗口
+/// （页缓存命中、链路 burst）永久钉死；对 2 窗口（4s）内完成的惩罚检测
+/// 影响 < 2%。
+const RAMP_PEAK_DECAY: f64 = 0.99;
+
+/// 扩容评估结论：扩容后的窗口吞吐相对扩容前的三档判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RampVerdict {
+    /// 有净增益（> 扩容前 × [`RAMP_IMPROVE_FACTOR`]），可继续扩容。
+    Improved,
+    /// 无净增益，冻结在当前规模。
+    Freeze,
+    /// 崩塌（< 扩容前 × [`RAMP_COLLAPSE_FACTOR`]），回滚到扩容前规模。
+    Collapse,
+}
+
+/// 三档判定本体。边界语义：吞吐前后同为 0（服务器停滞）落入 Freeze——
+/// 绝不因"没有变差"而对停滞服务器继续打满并发；恰在崩塌线上（等于
+/// 扩容前 × 崩塌系数）判 Freeze 而非 Collapse，回滚只留给明确的惩罚信号。
+fn ramp_verdict(pre_grow_bps: f64, current_bps: f64) -> RampVerdict {
+    if current_bps > pre_grow_bps * RAMP_IMPROVE_FACTOR {
+        RampVerdict::Improved
+    } else if current_bps < pre_grow_bps * RAMP_COLLAPSE_FACTOR {
+        RampVerdict::Collapse
+    } else {
+        RampVerdict::Freeze
+    }
+}
+
 /// 尾部微拆分阈值：当正常拆分（`dynamic_min_split_bytes` 计算的阈值）失败时，
 /// 用此极低阈值重试，避免下载尾部空闲 worker 干等最后一个慢段。
 ///
@@ -1196,6 +1243,13 @@ pub async fn run_coordinated_download(
     // 上个 ramp tick 刚扩容，本 tick 用窗口吞吐评估扩容效果。
     let mut awaiting_ramp_eval = false;
     let mut pre_grow_throughput = 0.0_f64;
+    // 扩容前的连接额度：评估判定崩塌时回滚到此规模。
+    let mut pre_grow_workers = allowed_workers;
+    // 任务内观察到的峰值窗口吞吐（持续劣化收缩的参照基准）。
+    let mut peak_throughput = 0.0_f64;
+    // 持续劣化计数：连续 RAMP_SHRINK_STRIKES 个窗口跌破峰值 × RAMP_COLLAPSE_FACTOR
+    // 时乘性收缩。吞吐恢复即清零。
+    let mut shrink_strikes: u32 = 0;
     // ramp 独立采样窗口（与上方 min_split 采样解耦，互不污染窗口边界）。
     let mut ramp_last_bytes = total_downloaded.load(Ordering::Relaxed);
     let mut ramp_last_time = Instant::now();
@@ -1876,23 +1930,91 @@ pub async fn run_coordinated_download(
                 let range_ok =
                     range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_SUPPORTED;
                 if !serial_mode && !all_done(&segments) && range_ok {
-                    // 2. 评估上一次扩容的效果：吞吐无足够增益 → 冻结在当前规模
-                    //   （已找到服务器/链路的实际并发甜点，继续加只有风控风险）。
+                    // 2. 评估上一次扩容的效果：
+                    //    - 崩塌（跌破扩容前 × RAMP_COLLAPSE_FACTOR）→ 回滚到
+                    //      扩容前规模并学习域名连接上限——服务器在按连接惩罚，
+                    //      停留在被惩罚的规模等于全程慢速。
+                    //    - 无增益（未达扩容前 × RAMP_IMPROVE_FACTOR）→ 冻结在
+                    //      当前规模（已找到并发甜点，继续加只有风控风险）。
                     if awaiting_ramp_eval {
                         awaiting_ramp_eval = false;
-                        // `<=` 而非 `<`：扩容前后吞吐同为 0（服务器停滞）也判
-                        // 定为无增益并冻结，避免对停滞服务器反而打满并发。
-                        if throughput <= pre_grow_throughput * RAMP_IMPROVE_FACTOR {
-                            ramp_frozen = true;
+                        match ramp_verdict(pre_grow_throughput, throughput) {
+                            RampVerdict::Improved => {}
+                            RampVerdict::Collapse => {
+                                ramp_frozen = true;
+                                let old = allowed_workers;
+                                allowed_workers = pre_grow_workers.max(1);
+                                // 多余 worker 完成当前段后经 Done 派工的额度检查
+                                // 自然退休；进行中的连接与已下数据零丢弃。
+                                record_domain_conn_cap_persist(
+                                    url,
+                                    allowed_workers as i32,
+                                    db,
+                                );
+                                log_info!(
+                                    "[adaptive] task {} ramp collapse rollback: {} -> {} \
+                                     conns, throughput {:.0} -> {:.0} B/s（回滚并记入域名上限）",
+                                    task_id,
+                                    old,
+                                    allowed_workers,
+                                    pre_grow_throughput,
+                                    throughput
+                                );
+                            }
+                            RampVerdict::Freeze => {
+                                ramp_frozen = true;
+                                log_info!(
+                                    "[adaptive] task {} ramp freeze at {} conns: throughput \
+                                     {:.0} -> {:.0} B/s (no gain)",
+                                    task_id,
+                                    allowed_workers,
+                                    pre_grow_throughput,
+                                    throughput
+                                );
+                            }
+                        }
+                    }
+
+                    // 2b. 持续劣化收缩：以峰值窗口吞吐为参照。仅在非扩容评估期
+                    //     （冻结后或额度已到顶——起步即被惩罚时扩容评估从未发生）
+                    //     且存活数恰等于额度时计数：alive < allowed 是下载尾声
+                    //     （worker 自然退休），alive > allowed 是回滚/收缩后的
+                    //     过渡期（多余连接尚未退光、惩罚尚未解除），两者的低吞吐
+                    //     都不是当前额度的责任。收缩不写域名缓存——单窗口证据
+                    //     弱于扩容前后的直接对照，误学习会让同域名 24h 内全部降速。
+                    //
+                    //     峰值随时间衰减：启动瞬间的突发窗口（页缓存/链路 burst）
+                    //     不该永久钉死参照系。每 tick 乘 RAMP_PEAK_DECAY，惩罚
+                    //     检测只需 2 个窗口（4s），衰减对灵敏度无感。
+                    peak_throughput *= RAMP_PEAK_DECAY;
+                    if throughput > peak_throughput {
+                        peak_throughput = throughput;
+                        shrink_strikes = 0;
+                    } else if !awaiting_ramp_eval
+                        && (ramp_frozen || allowed_workers >= worker_cap)
+                        && allowed_workers > 1
+                        && alive == allowed_workers
+                        && peak_throughput > 0.0
+                        && throughput < peak_throughput * RAMP_COLLAPSE_FACTOR
+                    {
+                        shrink_strikes += 1;
+                        if shrink_strikes >= RAMP_SHRINK_STRIKES {
+                            shrink_strikes = 0;
+                            let old = allowed_workers;
+                            allowed_workers = (allowed_workers / 2).max(1);
                             log_info!(
-                                "[adaptive] task {} ramp freeze at {} conns: throughput \
-                                 {:.0} -> {:.0} B/s (no gain)",
+                                "[adaptive] task {} sustained degradation shrink: {} -> {} \
+                                 conns, throughput {:.0} B/s < peak {:.0} × {:.2}",
                                 task_id,
+                                old,
                                 allowed_workers,
-                                pre_grow_throughput,
-                                throughput
+                                throughput,
+                                peak_throughput,
+                                RAMP_COLLAPSE_FACTOR
                             );
                         }
+                    } else {
+                        shrink_strikes = 0;
                     }
 
                     // 3. 扩容决策：未冻结、无连接敏感信号、当前额度已用满、未达上限。
@@ -1902,6 +2024,7 @@ pub async fn run_coordinated_download(
                         && allowed_workers < worker_cap
                     {
                         pre_grow_throughput = throughput;
+                        pre_grow_workers = allowed_workers;
                         awaiting_ramp_eval = true;
                         let old = allowed_workers;
                         allowed_workers = (allowed_workers * 2).min(worker_cap);
@@ -3223,7 +3346,14 @@ async fn do_segment(
             req = req.header("If-Range", v);
         }
     }
-    let resp = req.send().await?.error_for_status()?;
+    // 等响应头与 cancel 竞速：惩罚型/停滞服务器可能接受 TCP 连接后长时间不回
+    // 响应头（client 只有 connect_timeout，响应头无超时），若不竞速，删除/取消
+    // 任务会被卡在这里直到服务器开口，manager 的 5s handle 等待必然超时。
+    // 写循环内的 chunk 读取已有同样的竞速 + 停滞超时，此处补齐请求发起阶段。
+    let resp = tokio::select! {
+        _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        r = req.send() => r?.error_for_status()?,
+    };
 
     // --- Range 能力裁决（hint 模式，每任务恰好一次）------------------------
     // 依据首个成功响应：206（服务器履行了 Range）或 200 携带
@@ -3861,11 +3991,12 @@ fn update_seg_state(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        FileSyncGate, LiveSegment, MAX_SEGMENTS, MIN_SPLIT_BYTES, MIN_SYNC_GAP, SegState,
-        TAIL_MIN_SPLIT_BYTES, all_done, build_seg_state_vec, check_cross_segment_validators,
-        conn_cap_cache, dynamic_min_split_bytes, extract_host, find_next_pending_only,
-        find_next_work, is_single_conn_domain, rebuild_seg_states, record_domain_conn_cap,
-        try_proactive_split, try_split_largest, validate_coverage,
+        FileSyncGate, LiveSegment, MAX_SEGMENTS, MIN_SPLIT_BYTES, MIN_SYNC_GAP, RampVerdict,
+        SegState, TAIL_MIN_SPLIT_BYTES, all_done, build_seg_state_vec,
+        check_cross_segment_validators, conn_cap_cache, dynamic_min_split_bytes, extract_host,
+        find_next_pending_only, find_next_work, is_single_conn_domain, ramp_verdict,
+        rebuild_seg_states, record_domain_conn_cap, try_proactive_split, try_split_largest,
+        validate_coverage,
     };
     use crate::downloader::{DownloadError, SegmentProgressInfo, is_server_rejection};
     use std::collections::BTreeMap;
@@ -3879,6 +4010,54 @@ mod tests {
             downloaded_bytes: downloaded,
             state,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ramp_verdict（扩容评估三档判定）
+    // -----------------------------------------------------------------------
+
+    /// 扩容后吞吐显著提升 → 继续扩容。
+    #[test]
+    fn ramp_verdict_improved_on_clear_gain() {
+        assert_eq!(
+            ramp_verdict(10_000_000.0, 18_000_000.0),
+            RampVerdict::Improved
+        );
+    }
+
+    /// 增益不足（<= 前值 × 1.05）→ 冻结；含持平与轻微下降。
+    #[test]
+    fn ramp_verdict_freeze_on_marginal_change() {
+        assert_eq!(
+            ramp_verdict(10_000_000.0, 10_000_000.0),
+            RampVerdict::Freeze
+        );
+        assert_eq!(
+            ramp_verdict(10_000_000.0, 10_400_000.0),
+            RampVerdict::Freeze
+        );
+        assert_eq!(ramp_verdict(10_000_000.0, 8_000_000.0), RampVerdict::Freeze);
+    }
+
+    /// 吞吐腰斩以下 → 崩塌回滚（惩罚型限速，实测 59 MB/s -> 2 MB/s 场景）。
+    #[test]
+    fn ramp_verdict_collapse_on_throughput_cliff() {
+        assert_eq!(
+            ramp_verdict(59_109_230.0, 2_095_233.0),
+            RampVerdict::Collapse
+        );
+    }
+
+    /// 恰在崩塌线上（等于 前值 × 0.5）判 Freeze——回滚只留给明确信号。
+    #[test]
+    fn ramp_verdict_boundary_is_freeze() {
+        assert_eq!(ramp_verdict(10_000_000.0, 5_000_000.0), RampVerdict::Freeze);
+    }
+
+    /// 前后同为 0（服务器停滞）→ Freeze，绝不对停滞服务器继续扩容。
+    #[test]
+    fn ramp_verdict_zero_throughput_freezes() {
+        assert_eq!(ramp_verdict(0.0, 0.0), RampVerdict::Freeze);
     }
 
     // -----------------------------------------------------------------------

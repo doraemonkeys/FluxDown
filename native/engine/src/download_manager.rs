@@ -560,20 +560,42 @@ pub enum ResolveKind {
 
 /// off-actor resolve 的回流结果。worker 无条件发送（含 panic 归一），交
 /// `on_resolve_ready` 兜底，杜绝 pending_resolve/active_tasks 泄漏。
+///
+/// `generation` = 发起本次 resolve 时占位 `ActiveTaskEntry` 的 generation。回流时与
+/// 当前 pending 条目的世代比对：不一致即 stale（resolve 窗口内发生过
+/// pause/cancel/resume，本 outcome 已被新世代取代），一律丢弃。
 #[cfg(feature = "plugins")]
 pub struct ResolveOutcome {
     pub task_id: String,
     pub identity: String,
     pub kind: ResolveKind,
+    pub generation: u64,
     pub result: Result<Option<crate::plugin::ResolveResult>, crate::plugin::PluginError>,
 }
 
 /// resolve 等待中的任务状态。Start 携 `QueuedTask`（再入覆盖 res 后分派）；
-/// Resume 为标记（do_resume_task 从 DB 重读）。
+/// Resume 为标记（do_resume_task 从 DB 重读）。`generation` 与占位/outcome 同源，
+/// 用于识别并丢弃被取代的 stale outcome（见 [`ResolveOutcome`]）。
 #[cfg(feature = "plugins")]
 enum PendingResolve {
-    Start(Box<QueuedTask>),
-    Resume,
+    Start {
+        queued: Box<QueuedTask>,
+        generation: u64,
+    },
+    Resume {
+        generation: u64,
+    },
+}
+
+#[cfg(feature = "plugins")]
+impl PendingResolve {
+    fn generation(&self) -> u64 {
+        match self {
+            PendingResolve::Start { generation, .. } | PendingResolve::Resume { generation } => {
+                *generation
+            }
+        }
+    }
 }
 
 /// 把 resolve 结果应用到 QueuedTask（再入前）。非 ephemeral 保持 hint_file_size=0
@@ -856,7 +878,11 @@ impl DownloadManager {
         let pm = self.plugin_manager.clone()?;
         let all = self.db.get_all_config().await.unwrap_or_default();
         let sources = crate::plugin::MarketClient::source_config(&all);
-        Some(crate::plugin::MarketClient::new(pm, self.db.clone(), sources))
+        Some(crate::plugin::MarketClient::new(
+            pm,
+            self.db.clone(),
+            sources,
+        ))
     }
 
     /// 暴露 plugin_retry_tx 供 bridge 构造（onError 命令式重试意图通道）。
@@ -899,6 +925,7 @@ impl DownloadManager {
         identity: String,
         req: crate::plugin::ResolveRequest,
         kind: ResolveKind,
+        generation: u64,
     ) {
         use futures_util::FutureExt;
         let Some(pm) = self.plugin_manager.clone() else {
@@ -924,6 +951,7 @@ impl DownloadManager {
                 task_id,
                 identity,
                 kind,
+                generation,
                 result,
             });
         });
@@ -933,14 +961,28 @@ impl DownloadManager {
     #[cfg(feature = "plugins")]
     pub async fn on_resolve_ready(&mut self, out: ResolveOutcome) {
         let task_id = out.task_id.clone();
-        // 用户在 resolve 窗口内 pause/cancel/delete 均经 clear_pending_resolve 移除本条目
-        // （见 pause_task/cancel_task/delete_task）；此处以 pending_resolve 成员资格作为
-        // 「窗口内用户已介入」的**权威信号**——不能用 DB status，因为 resume 天然从
-        // paused(2)/error(4) 起步，用 status 判定会把每次 resume 都误判为「已取消」而放弃
-        // （blocker）。同时天然去重 stale/重复 outcome（首次处理已 remove，后续找不到即放弃）。
-        if !self.pending_resolve.contains_key(&task_id) {
-            self.active_tasks.remove(&task_id);
-            self.drain_queue().await;
+        // 世代守卫：pending 条目必须与本 outcome 同世代才可再入。
+        // - 用户在 resolve 窗口内 pause/cancel/delete 均经 clear_pending_resolve 移除条目
+        //   （见 pause_task/cancel_task/delete_task）→ pending 为空，outcome stale；
+        // - 窗口内 pause→resume 会插入**新世代**的 pending 条目 → 世代不等，旧 worker 的
+        //   outcome stale（老实现按成员资格判定，会让旧 outcome 误消费新条目：Start outcome
+        //   吞掉 Resume pending 导致 resume 丢失，或旧 Resume outcome 抢先消费新 Resume）。
+        // 不能用 DB status 判定，因为 resume 天然从 paused(2)/error(4) 起步。
+        // stale outcome 只允许清理「属于自己世代」的占位——active_tasks 里可能已是新世代
+        // 的占位、甚至再入后的真实下载条目，绝不能触碰。
+        let pending_gen = self
+            .pending_resolve
+            .get(&task_id)
+            .map(PendingResolve::generation);
+        if pending_gen != Some(out.generation) {
+            if self
+                .active_tasks
+                .get(&task_id)
+                .is_some_and(|e| e.generation == out.generation)
+            {
+                self.active_tasks.remove(&task_id);
+                self.drain_queue().await;
+            }
             return;
         }
         // 任务已从 DB 删除（兜底；delete_task 亦已清 pending_resolve）→ 放弃再入。
@@ -959,7 +1001,7 @@ impl DownloadManager {
                 // Ok(Some) = 改写；Ok(None) = 放行（用原 url）。
                 match out.kind {
                     ResolveKind::Start => {
-                        if let Some(PendingResolve::Start(mut queued)) =
+                        if let Some(PendingResolve::Start { mut queued, .. }) =
                             self.pending_resolve.remove(&task_id)
                         {
                             if let Some(res) = applied {
@@ -1022,7 +1064,10 @@ impl DownloadManager {
         if !terminal_error {
             return;
         }
-        let count = self.auto_retry_counts.entry(task_id.to_string()).or_insert(0);
+        let count = self
+            .auto_retry_counts
+            .entry(task_id.to_string())
+            .or_insert(0);
         if max_retries != -1 && (*count as i32) >= max_retries {
             log_info!("[plugin] task {} 重试已达上限，忽略 requestRetry", task_id);
             return;
@@ -1066,9 +1111,14 @@ impl DownloadManager {
             user_agent: queued.user_agent.clone(),
             extra_headers: queued.extra_headers.clone(),
         };
-        self.pending_resolve
-            .insert(task_id.clone(), PendingResolve::Start(Box::new(queued)));
-        self.spawn_resolve_worker(task_id, identity, req, ResolveKind::Start);
+        self.pending_resolve.insert(
+            task_id.clone(),
+            PendingResolve::Start {
+                queued: Box::new(queued),
+                generation: spawn_gen,
+            },
+        );
+        self.spawn_resolve_worker(task_id, identity, req, ResolveKind::Start, spawn_gen);
     }
 
     /// do_resume_task 体首守卫调用：对称占位（防 resumeAll 并发双 resolve）+ spawn。
@@ -1113,9 +1163,19 @@ impl DownloadManager {
             user_agent: String::new(),
             extra_headers,
         };
-        self.pending_resolve
-            .insert(task_id.to_string(), PendingResolve::Resume);
-        self.spawn_resolve_worker(task_id.to_string(), identity, req, ResolveKind::Resume);
+        self.pending_resolve.insert(
+            task_id.to_string(),
+            PendingResolve::Resume {
+                generation: spawn_gen,
+            },
+        );
+        self.spawn_resolve_worker(
+            task_id.to_string(),
+            identity,
+            req,
+            ResolveKind::Resume,
+            spawn_gen,
+        );
     }
 
     /// 检查任务是否仍处于"可自动重试的 error(4)"状态，供 actor loop 在自动
@@ -2158,7 +2218,10 @@ impl DownloadManager {
         let resolver_plugin_id = self.plugin_match_resolver(&url).await;
         let has_resolver = !resolver_plugin_id.is_empty();
         if has_resolver {
-            let _ = self.db.set_task_resolver(&task_id, &resolver_plugin_id).await;
+            let _ = self
+                .db
+                .set_task_resolver(&task_id, &resolver_plugin_id)
+                .await;
         }
         // by the shared librqbit session with its own concurrency controls.
         let is_bt = is_magnet(&url) || !torrent_file_bytes.is_empty();
@@ -2992,19 +3055,31 @@ impl DownloadManager {
             }
         };
 
-        // 应用 resolve 改写（url/file_name）；空 url = 放行（用原 url）。后续协议判定
-        // 与下载均以 task.url 为准，因而自动重算 use_bt/hls/dash/ftp/ed2k。
+        // 应用 resolve 改写；空 url = 放行（用原 url）。后续协议判定与下载均以
+        // task.url 为准，因而自动重算 use_bt/hls/dash/ftp/ed2k。extra_headers/
+        // audio_url/ephemeral 同样取出，在下方各自的落点应用——与 start 路径的
+        // apply_resolve_to_queued 对称（缺一即 DASH 轨对丢音轨/鉴权直链丢头/
+        // 一次性直链被 probe 作废）。
         #[cfg(feature = "plugins")]
-        if let Some(res) = plugin_applied {
-            if !res.url.is_empty() {
-                task.url = res.url;
-            }
-            if let Some(name) = res.file_name
-                && !name.is_empty()
-            {
-                task.file_name = name;
-            }
-        }
+        let (plugin_extra_headers, plugin_audio_url, plugin_ephemeral, plugin_total_bytes) =
+            if let Some(res) = plugin_applied {
+                if !res.url.is_empty() {
+                    task.url = res.url;
+                }
+                if let Some(name) = res.file_name
+                    && !name.is_empty()
+                {
+                    task.file_name = name;
+                }
+                (
+                    res.extra_headers,
+                    res.audio_url.filter(|a| !a.is_empty()),
+                    res.ephemeral,
+                    res.total_bytes.unwrap_or(0),
+                )
+            } else {
+                (None, None, false, 0)
+            };
 
         // 恢复持久化的浏览器请求上下文：鉴权站点（cookie+token 双因子的 fnOS、
         // 带 Authorization 的私有服务）缺它们 resume 必然 4xx。
@@ -3047,6 +3122,10 @@ impl DownloadManager {
                 }
             };
 
+        // resolve 的新鲜 extra_headers 优先于 DB 快照（轮换签名头场景）。
+        #[cfg(feature = "plugins")]
+        let resume_extra_headers = plugin_extra_headers.unwrap_or(resume_extra_headers);
+
         // Read actual segment count from DB.  0 means "auto" — the downloader
         // will dynamically calculate the optimal count.
         let seg_count: i32 = self.db.get_task_segments(task_id).await.unwrap_or_default();
@@ -3070,6 +3149,10 @@ impl DownloadManager {
         let use_hls = hls_downloader::is_hls_url(&task.url);
         // 轨对任务：从 DB 读回音频轨 URL，重建轨对下载（与 .mpd 后缀正交）。
         let audio_url = self.db.load_audio_url(task_id).await.unwrap_or_default();
+        // resolve 的新鲜 audio_url 优先（DASH 分离直链随每次 resolve 轮换；
+        // resolver 输出不落 DB）。
+        #[cfg(feature = "plugins")]
+        let audio_url = plugin_audio_url.or(audio_url);
         let use_dash = dash_downloader::is_dash_url(&task.url) || audio_url.is_some();
         let use_bt = is_bt_url(&task.url);
         let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
@@ -3308,6 +3391,21 @@ impl DownloadManager {
                 task.total_bytes
             } else {
                 -1 // 大小未知但确认可下载（沿用扩展 webRequest 嗅探语义）
+            };
+            // ephemeral 直链（一次性/防探测签名 URL）：resolve 刚给出新鲜直链，
+            // probe 会作废它 → 跳过 probe（与 start 路径 hint 语义对称）。大小
+            // 优先取 resolve 的 total_bytes，其次 DB 已知值，再退 -1（未知但可下）。
+            #[cfg(feature = "plugins")]
+            let resume_hint = if plugin_ephemeral {
+                if plugin_total_bytes > 0 {
+                    plugin_total_bytes
+                } else if task.total_bytes > 0 {
+                    task.total_bytes
+                } else {
+                    -1
+                }
+            } else {
+                resume_hint
             };
 
             let params = DownloadParams {

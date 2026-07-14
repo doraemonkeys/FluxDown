@@ -223,10 +223,7 @@ impl PluginManager {
             return None;
         }
 
-        let resolver_entry = manifest
-            .resolvers
-            .first()
-            .map(|r| dir.join(&r.entry));
+        let resolver_entry = manifest.resolvers.first().map(|r| dir.join(&r.entry));
         let hooks_entry = manifest.hooks.as_ref().map(|h| dir.join(&h.entry));
 
         // 死订阅检查：同时声明 resolver 与订阅 onMetaProbed → warn（带 resolver 的
@@ -249,7 +246,10 @@ impl PluginManager {
                 Some(p) => match tokio::fs::read_to_string(p).await {
                     Ok(s) => Some(s),
                     Err(e) => {
-                        log_info!("[plugin] 跳过 {}: 读取 resolver 失败: {e}", manifest.identity);
+                        log_info!(
+                            "[plugin] 跳过 {}: 读取 resolver 失败: {e}",
+                            manifest.identity
+                        );
                         return None;
                     }
                 },
@@ -321,6 +321,11 @@ impl PluginManager {
     }
 
     /// 惰性解析。off-actor worker 调用（在插件专用 runtime 上）。
+    ///
+    /// **fail-closed**：任务带 resolver 绑定但插件已卸载/被禁用/当前版本无
+    /// resolver 时返回 `Err`——绝不放行原始页面 URL（那会把网页 HTML 当媒体文件
+    /// 存盘）。用户经「忽略插件重试」逃生舱显式清绑定后方可按原始链接下载；
+    /// 正常卸载路径由 [`Self::uninstall`] 批量清绑定，不会走到这里。
     pub async fn resolve(
         &self,
         identity: &str,
@@ -330,10 +335,18 @@ impl PluginManager {
         let (manifest, streak, source, dev_ver) = {
             let snapshot = self.plugins.read().await.clone();
             let Some(p) = snapshot.iter().find(|p| p.manifest.identity == identity) else {
-                return Ok(None); // 已卸载
+                return Err(PluginError::Runtime(format!(
+                    "插件 {identity} 已卸载或加载失败；可在任务菜单选择「忽略插件重试」按原始链接下载"
+                )));
             };
             if !p.enabled {
-                return Ok(None); // 禁用 → 放行
+                let reason = match p.disabled_reason {
+                    DisabledReason::CircuitBreaker => "已被熔断自动禁用",
+                    _ => "已被禁用",
+                };
+                return Err(PluginError::Runtime(format!(
+                    "插件 {identity} {reason}；重新启用插件，或选择「忽略插件重试」按原始链接下载"
+                )));
             }
             let source = p.resolver_source().await;
             (
@@ -344,7 +357,9 @@ impl PluginManager {
             )
         };
         let Some(source) = source else {
-            return Ok(None); // 无 resolver → 放行
+            return Err(PluginError::Runtime(format!(
+                "插件 {identity} 当前版本未提供 resolver（或源码读取失败）；可选择「忽略插件重试」按原始链接下载"
+            )));
         };
 
         // required 运行时校验。
@@ -373,11 +388,9 @@ impl PluginManager {
             .invoke_resolve(&script, req, settings_json, self.bridge.clone(), budget)
             .await;
 
-        // 熔断计数：连续 Timeout/MemoryLimitExceeded 触发自动禁用。
-        // v1 已知限制：QuickJS 内存超限经 `set_memory_limit` 会抛「out of memory」JS 异常，
-        // 在本层归一为 `PluginError::Runtime`（非 `MemoryLimitExceeded`）——即 OOM 失败会
-        // fail-closed 让单次任务失败（用户可见、可手动禁用），但不计入自动熔断。主要 DoS
-        // 向量（死循环/挂起）由外层 timeout → `Timeout` 覆盖并计入熔断，故接受此限制。
+        // 熔断计数：连续 Timeout/MemoryLimitExceeded 触发自动禁用。QuickJS 内存
+        // 超限在 JS 侧表现为「out of memory」异常，quickjs.rs 的 reclassify_oom
+        // 已把它归一为 `MemoryLimitExceeded`——OOM 与超时同样计入熔断。
         match &result {
             Err(PluginError::Timeout) | Err(PluginError::MemoryLimitExceeded) => {
                 let n = streak.fetch_add(1, Ordering::SeqCst) + 1;
@@ -416,7 +429,10 @@ impl PluginManager {
             }
             // match.urls（缺省 = 全匹配）。
             let matches = match &hooks.match_decl {
-                Some(m) => m.urls.iter().any(|pat| super::manifest::url_glob_match(pat, &url)),
+                Some(m) => m
+                    .urls
+                    .iter()
+                    .any(|pat| super::manifest::url_glob_match(pat, &url)),
                 None => true,
             };
             if !matches {
@@ -506,10 +522,7 @@ impl PluginManager {
         let abs = std::fs::canonicalize(path)
             .map_err(|e| PluginError::ManifestInvalid(format!("解析路径失败: {e}")))?;
         self.db
-            .set_config(
-                &format!("plugin.dev.{identity}"),
-                &abs.to_string_lossy(),
-            )
+            .set_config(&format!("plugin.dev.{identity}"), &abs.to_string_lossy())
             .await
             .map_err(|e| PluginError::Runtime(e.to_string()))?;
         self.finish_install(&identity).await?;
@@ -574,7 +587,9 @@ impl PluginManager {
             }
         };
         if let Err(e) = validation {
-            let _ = self.uninstall(identity).await;
+            // 回滚用 purge（不清任务绑定）：失败的升级不该改变存量任务语义——
+            // 绑定保留，resume 走 fail-closed 报错，用户重装插件即恢复。
+            let _ = self.purge(identity).await;
             return Err(e);
         }
 
@@ -582,15 +597,26 @@ impl PluginManager {
         // - 新装（无 enabled 键）或熔断 → enabled=1, reason=None（升级即解熔断）
         // - Manual → 维持 disabled 不动（不覆盖用户主动关闭）
         if !has_enabled_key || reason == DisabledReason::CircuitBreaker {
-            self.write_enabled(identity, true, DisabledReason::None).await;
+            self.write_enabled(identity, true, DisabledReason::None)
+                .await;
         }
         // 最终重载让内存态与 config 一致。
         self.load_all().await;
         Ok(())
     }
 
-    /// 卸载：删目录 + 清 plugin.<identity>. 前缀全部键。
+    /// 卸载（用户主动）：删目录 + 清 config 键 + 清任务 resolver 绑定。
+    ///
+    /// 清绑定 = 对受影响任务批量应用「忽略插件、按原始链接重跑」逃生舱；不清则
+    /// 留下 orphaned 绑定，resume 走 fail-closed 报错（见 [`Self::resolve`]）。
     pub async fn uninstall(&self, identity: &str) -> Result<(), PluginError> {
+        let _ = self.db.clear_tasks_resolver(identity).await;
+        self.purge(identity).await
+    }
+
+    /// 删目录 + 清 `plugin.<identity>.` 前缀全部 config 键 + 重载。
+    /// 安装回滚复用（与 [`Self::uninstall`] 的差别：**不**清任务绑定）。
+    async fn purge(&self, identity: &str) -> Result<(), PluginError> {
         // 删安装目录（dev 不删源，仅删配置键）。
         let dir = self.root.join(identity);
         if dir.exists() {
@@ -701,7 +727,9 @@ impl PluginManager {
                     .parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite())
-                    .ok_or_else(|| PluginError::InvalidOutput(format!("'{}' 不是有效数字", field.key)))?;
+                    .ok_or_else(|| {
+                        PluginError::InvalidOutput(format!("'{}' 不是有效数字", field.key))
+                    })?;
                 if let Some(lo) = field.min
                     && v < lo
                 {
@@ -787,14 +815,15 @@ fn value_of(values: &HashMap<String, String>, field: &SettingField) -> Option<St
 }
 
 /// 构建类型化设置 JSON 对象（string→JS string、number→JS number、boolean→JS bool）。
-fn build_typed_settings_json(manifest: &PluginManifest, values: &HashMap<String, String>) -> String {
+fn build_typed_settings_json(
+    manifest: &PluginManifest,
+    values: &HashMap<String, String>,
+) -> String {
     let mut obj = serde_json::Map::new();
     for f in &manifest.settings {
         let raw = value_of(values, f);
         let jv = match f.ty {
-            SettingType::Boolean => {
-                serde_json::Value::Bool(raw.as_deref() == Some("true"))
-            }
+            SettingType::Boolean => serde_json::Value::Bool(raw.as_deref() == Some("true")),
             SettingType::Number => match raw.as_deref().and_then(|s| s.parse::<f64>().ok()) {
                 Some(n) => serde_json::Number::from_f64(n)
                     .map(serde_json::Value::Number)
@@ -838,7 +867,10 @@ fn check_output_url(url: &str) -> Result<(), PluginError> {
         return Err(PluginError::InvalidOutput("url 超过 8KB".to_string()));
     }
     let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(scheme.as_str(), "http" | "https" | "ftp" | "magnet" | "ed2k") {
+    if !matches!(
+        scheme.as_str(),
+        "http" | "https" | "ftp" | "magnet" | "ed2k"
+    ) {
         return Err(PluginError::InvalidOutput(format!(
             "url scheme 不允许: {scheme}"
         )));

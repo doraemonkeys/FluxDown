@@ -11,6 +11,8 @@
 //! - `proxy` 在 bridge 构造时快照（reqwest ClientBuilder 配置构建时定死）；运行期改
 //!   代理后插件出口不随动（可接受，非安全问题）。
 //! - 单次调用严格 per-call fetch 上限退化为**全局并发 fetch 上限**（对宿主保护更强）。
+//! - 配置代理时 DNS 由代理侧解析，[`GuardResolver`] 不参与（hostname 级过滤失效；
+//!   字面量 IP 前置校验与逐跳重定向校验仍然生效）。代理由用户显式配置，视为可信出口。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -145,8 +147,9 @@ impl reqwest::dns::Resolve for GuardResolver {
         let host = name.as_str().to_string();
         Box::pin(async move {
             let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
-            let filtered: Vec<SocketAddr> =
-                addrs.filter(|sa| is_globally_routable_unicast(sa.ip())).collect();
+            let filtered: Vec<SocketAddr> = addrs
+                .filter(|sa| is_globally_routable_unicast(sa.ip()))
+                .collect();
             let iter: reqwest::dns::Addrs = Box::new(filtered.into_iter());
             Ok(iter)
         })
@@ -352,9 +355,7 @@ impl PluginBridge for EngineBridge {
 
     fn request_retry(&self, task_id: &str, delay_ms: u64) {
         // fire-and-forget；限流在 actor 侧（max_auto_retries）。
-        let _ = self
-            .plugin_retry_tx
-            .send((task_id.to_string(), delay_ms));
+        let _ = self.plugin_retry_tx.send((task_id.to_string(), delay_ms));
     }
 }
 
@@ -383,7 +384,10 @@ mod tests {
             "224.0.0.1",       // multicast
             "192.0.2.1",       // documentation
         ] {
-            assert!(!is_globally_routable_unicast(ip(s)), "{s} should be rejected");
+            assert!(
+                !is_globally_routable_unicast(ip(s)),
+                "{s} should be rejected"
+            );
         }
     }
 
@@ -397,19 +401,22 @@ mod tests {
     #[test]
     fn v6_rejects_special() {
         for s in [
-            "::1",                    // loopback
-            "fe80::1",                // link-local
-            "fc00::1",                // ULA
-            "fd00::1",                // ULA
-            "2001:db8::1",            // documentation
-            "2001:0::1",             // Teredo
-            "ff02::1",                // multicast
-            "::",                     // unspecified
-            "::ffff:127.0.0.1",       // v4-mapped loopback
-            "2002:0a00:0001::",       // 6to4 embedding 10.0.0.1
-            "64:ff9b::0a00:0001",     // NAT64 embedding 10.0.0.1
+            "::1",                // loopback
+            "fe80::1",            // link-local
+            "fc00::1",            // ULA
+            "fd00::1",            // ULA
+            "2001:db8::1",        // documentation
+            "2001:0::1",          // Teredo
+            "ff02::1",            // multicast
+            "::",                 // unspecified
+            "::ffff:127.0.0.1",   // v4-mapped loopback
+            "2002:0a00:0001::",   // 6to4 embedding 10.0.0.1
+            "64:ff9b::0a00:0001", // NAT64 embedding 10.0.0.1
         ] {
-            assert!(!is_globally_routable_unicast(ip(s)), "{s} should be rejected");
+            assert!(
+                !is_globally_routable_unicast(ip(s)),
+                "{s} should be rejected"
+            );
         }
     }
 

@@ -8,6 +8,7 @@
 //! 未设置该环境变量时跳过（不阻塞常规 CI）。
 
 #![cfg(feature = "plugins")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use fluxdown_engine::plugin::install;
 
