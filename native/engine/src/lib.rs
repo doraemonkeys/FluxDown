@@ -5,8 +5,8 @@
 //! 解耦,不绑定具体的 FFI/信号/传输协议。
 
 pub mod bt_downloader;
-pub mod dash_downloader;
 pub mod components;
+pub mod dash_downloader;
 pub mod data_dir;
 pub mod db;
 pub mod disk_space;
@@ -196,8 +196,13 @@ impl Engine {
             let (proxy_cfg, plugin_sink, max_conc, data_dir_p) = plugin_ctx;
             let retry_tx = manager.plugin_retry_sender();
             let bridge: StdArc<dyn plugin::PluginBridge> = StdArc::new(
-                plugin::bridge::EngineBridge::new(db.clone(), &proxy_cfg, retry_tx)
-                    .map_err(|e| EngineError::Plugin(e.to_string()))?,
+                plugin::bridge::EngineBridge::new(
+                    db.clone(),
+                    &proxy_cfg,
+                    retry_tx,
+                    data_dir_p.clone(),
+                )
+                .map_err(|e| EngineError::Plugin(e.to_string()))?,
             );
             let runtime: StdArc<dyn plugin::ScriptRuntime> = StdArc::new(
                 plugin::quickjs::QuickJsScriptRuntime::new(max_conc)

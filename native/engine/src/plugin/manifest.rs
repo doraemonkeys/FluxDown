@@ -162,10 +162,19 @@ pub struct PluginManifest {
     pub hooks: Option<HooksDecl>,
     #[serde(default)]
     pub settings: Vec<SettingField>,
+    /// 声明式能力权限（v1 仅 `"ffmpeg"`）。空 = 无额外能力。授予的能力经宿主
+    /// 门控注入对应 `flux.*` 门面（见 [`super::runtime::HostContext`]）。
+    #[serde(default)]
+    pub permissions: Vec<String>,
 }
 
 /// 合法事件名（manifest `hooks.events`）。
 pub const VALID_EVENTS: [&str; 4] = ["onStart", "onError", "onDone", "onMetaProbed"];
+
+/// ffmpeg 能力权限名（manifest `permissions`）。
+pub const PERMISSION_FFMPEG: &str = "ffmpeg";
+/// 合法能力权限（manifest `permissions`）。
+pub const VALID_PERMISSIONS: [&str; 1] = [PERMISSION_FFMPEG];
 
 impl PluginManifest {
     /// 从 JSON 字节解析（不校验语义，仅结构）。
@@ -279,6 +288,15 @@ impl PluginManifest {
             }
             validate_setting_field(f)?;
         }
+
+        // permissions：仅收已知能力名（拒未知，靠 minAppVersion 前向兼容）。
+        for perm in &self.permissions {
+            if !VALID_PERMISSIONS.contains(&perm.as_str()) {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "未知权限 '{perm}'，合法：{VALID_PERMISSIONS:?}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -288,6 +306,11 @@ impl PluginManifest {
             .first()
             .map(|r| r.match_decl.urls.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// manifest 是否声明了指定能力权限。
+    pub fn has_permission(&self, perm: &str) -> bool {
+        self.permissions.iter().any(|p| p == perm)
     }
 }
 

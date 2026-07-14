@@ -20,6 +20,7 @@ order: 3
 | `minAppVersion` | no | string | Three-part version. If the running FluxDown is older, the plugin is skipped at load (logged, not an error). |
 | `resolvers` | no | array | **At most one entry** in v1. See below. |
 | `hooks` | no | object | See below. |
+| `permissions` | no | array | Capability grants. v1 accepts only `"ffmpeg"`. Unknown values are rejected. |
 | `settings` | no | array | Declarative settings fields. See below. |
 
 A plugin may declare a resolver, hooks, or both. A manifest with neither is valid but does nothing.
@@ -63,6 +64,21 @@ A plugin may declare a resolver, hooks, or both. A manifest with neither is vali
 | `match` | no | Optional URL filter, same pattern rules. If present, `urls` must be non-empty. Omitted = the hooks fire for every task. |
 
 Caveat: if the same plugin also declares a resolver, `onMetaProbed` never fires for its tasks — resolver tasks skip the metadata probe entirely. FluxDown logs a warning if you subscribe to it anyway.
+
+
+## `permissions`
+
+Extra host capabilities a plugin opts into. Empty or omitted = the base sandbox (network via `flux.fetch`, `flux.storage`, logging). v1 recognises a single value:
+
+| Value | Grants |
+|---|---|
+| `ffmpeg` | The `flux.ffmpeg` API — run the resolved ffmpeg on a finished file (see the [API reference](/docs/en/plugins/api-reference/)). |
+
+```json
+{ "permissions": ["ffmpeg"] }
+```
+
+Unknown values fail the whole manifest, so an older FluxDown that doesn't know a permission rejects the plugin rather than silently ignoring it — pair a new permission with a `minAppVersion` bump.
 
 ## `settings[]`
 
@@ -126,6 +142,6 @@ Examples:
 
 ## Validation summary
 
-The manifest is validated when the plugin is installed and every time it's loaded. On failure the plugin is skipped and the reason lands in the log. The checks, in order: identity format → name non-empty → version format → `minAppVersion` format → icon path safety → at most one resolver → resolver entry path / non-empty `match.urls` / `timeoutMs ≠ 0` → hooks entry path / non-empty valid `events` / non-empty `match.urls` if present → settings key uniqueness and the per-field rules above.
+The manifest is validated when the plugin is installed and every time it's loaded. On failure the plugin is skipped and the reason lands in the log. The checks, in order: identity format → name non-empty → version format → `minAppVersion` format → icon path safety → at most one resolver → resolver entry path / non-empty `match.urls` / `timeoutMs ≠ 0` → hooks entry path / non-empty valid `events` / non-empty `match.urls` if present → settings key uniqueness and the per-field rules above → `permissions` are all recognised values.
 
 Both entry scripts are also compile-checked at install time — a syntax error is rejected up front rather than discovered on the first download.

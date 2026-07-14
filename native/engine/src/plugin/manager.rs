@@ -16,11 +16,11 @@ use crate::db::Db;
 use crate::events::{EngineEvent, EventSink};
 use crate::logger::log_info;
 
-use super::manifest::{PluginManifest, SettingField, SettingType};
+use super::manifest::{PERMISSION_FFMPEG, PluginManifest, SettingField, SettingType};
 use super::quickjs::HARD_TIMEOUT_CEILING;
 use super::runtime::{
-    ExecutionBudget, PluginBridge, PluginEntryKind, PluginError, PluginEvent, PluginScript,
-    ResolveRequest, ResolveResult, ScriptRuntime,
+    ExecutionBudget, HostContext, PluginBridge, PluginEntryKind, PluginError, PluginEvent,
+    PluginScript, ResolveRequest, ResolveResult, ScriptRuntime,
 };
 
 /// 连续超时/超内存达到该次数 → 自动熔断禁用。
@@ -34,6 +34,13 @@ const DEFAULT_RESOLVE_BUDGET: ExecutionBudget = ExecutionBudget {
 /// 默认 hook 预算。
 const DEFAULT_HOOK_BUDGET: ExecutionBudget = ExecutionBudget {
     timeout: Duration::from_secs(5),
+    memory_limit_bytes: 32 * 1024 * 1024,
+};
+/// ffmpeg-授权插件的 hook 墙钟预算：容纳长时 ffmpeg 子进程（转码可达分钟级）。
+/// CPU/中断预算仍是 30s（见 [`super::quickjs`]，`await` 不烧 CPU、不计入中断顶），
+/// 内存与普通 hook 一致。
+const FFMPEG_HOOK_BUDGET: ExecutionBudget = ExecutionBudget {
+    timeout: Duration::from_secs(1830),
     memory_limit_bytes: 32 * 1024 * 1024,
 };
 
@@ -113,6 +120,8 @@ pub struct PluginInfo {
     pub settings: Vec<SettingField>,
     /// 当前设置值（key → value 字符串）。
     pub settings_values: Vec<(String, String)>,
+    /// manifest 声明的能力权限（供 UI 展示授权，如 `["ffmpeg"]`）。
+    pub permissions: Vec<String>,
 }
 
 /// 安装来源判别（供 actor 分发规则表）。
@@ -385,7 +394,14 @@ impl PluginManager {
 
         let result = self
             .runtime
-            .invoke_resolve(&script, req, settings_json, self.bridge.clone(), budget)
+            .invoke_resolve(
+                &script,
+                req,
+                settings_json,
+                self.bridge.clone(),
+                budget,
+                HostContext::default(),
+            )
             .await;
 
         // 熔断计数：连续 Timeout/MemoryLimitExceeded 触发自动禁用。QuickJS 内存
@@ -446,7 +462,24 @@ impl PluginManager {
             let identity = p.manifest.identity.clone();
             let version = p.manifest.version.clone();
             let app_version = self.app_version.clone();
-            let budget = self.hook_budget;
+            // ffmpeg 门：授权 + 有产物文件（onDone 才有）→ 注入 flux.ffmpeg 并抬升
+            // hook 墙钟预算；牢笼根 = 产物所在目录。其余事件/未授权 → 无 ffmpeg。
+            let ffmpeg_permitted = p.manifest.has_permission(PERMISSION_FFMPEG);
+            let ffmpeg_root = match &event {
+                PluginEvent::Done { file_path, .. } => {
+                    Path::new(file_path).parent().map(Path::to_path_buf)
+                }
+                _ => None,
+            };
+            let host = HostContext {
+                ffmpeg_permitted,
+                ffmpeg_root,
+            };
+            let budget = if ffmpeg_permitted && host.ffmpeg_root.is_some() {
+                FFMPEG_HOOK_BUDGET
+            } else {
+                self.hook_budget
+            };
             let event = event.clone();
             let handle = self.runtime.spawn_handle();
             let dev = p.dev;
@@ -472,7 +505,7 @@ impl PluginManager {
                     app_version,
                 };
                 runtime
-                    .invoke_hook(&script, event, settings_json, bridge, budget)
+                    .invoke_hook(&script, event, settings_json, bridge, budget, host)
                     .await;
             });
         }
@@ -776,6 +809,7 @@ impl PluginManager {
                 disabled_reason: p.disabled_reason.as_str().to_string(),
                 settings: p.manifest.settings.clone(),
                 settings_values: values.into_iter().collect(),
+                permissions: p.manifest.permissions.clone(),
             });
         }
         out

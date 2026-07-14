@@ -466,16 +466,20 @@ CLI 独立二进制可能解析到不同目录、不共享），下载任务对 
   惰性 = 每次 start/resume 都重跑，天然防直链过期。
 - **通知平面**：onStart/onDone/onError/onMetaProbed 全部 **fire-and-forget**（失败仅记日志、超时、
   `try_acquire` 不阻塞，绝不影响任务状态）。仅 onError 内可 `flux.task.requestRetry({delayMs})` 命令式重试。
+- **ffmpeg 能力面**：`flux.ffmpeg.run(spec)`/`.available()`，**manifest `permissions:["ffmpeg"]` 门控** +
+  仅在有产物文件的钩子（onDone）可用（resolve/无产物事件无牢笼 → 拒）。单一 near-raw argv 面（近乎全量
+  ffmpeg CLI），bridge 侧只封网（拒 URL scheme/协议前缀）+ 封越牢路径（拒绝对/盘符/`..`/内嵌绝对路径），
+  文件引用一律相对 cwd=任务 save_dir 牢笼；off-actor 子进程 + kill_on_drop + 并发 2 + 默认 5min/上限 30min 超时。
 
 ### 模块（`native/engine/src/plugin/`，全部仅 `plugins` feature 编译）
 
 |文件|职责|
 |---|---|
-|`manifest.rs`|`PluginManifest`/`SettingField` + 手写校验器（identity 正则 / resolvers≤1 / widget×type 矩阵 / 路径安全）+ `url_glob_match`（`*` 唯一通配符）|
+|`manifest.rs`|`PluginManifest`/`SettingField` + 手写校验器（identity 正则 / resolvers≤1 / widget×type 矩阵 / 路径安全 / `permissions`⊆{`ffmpeg`}）+ `is_safe_relative_path` + `url_glob_match`（`*` 唯一通配符）|
 |`semver.rs`|engine-local 三段 semver（`satisfies_min`，复刻 hub updater）|
-|`runtime.rs`|抽象层 `ScriptRuntime`/`PluginBridge` trait + 跨 JS 边界结构（禁 rquickjs 类型，未来可换 deno_core）|
+|`runtime.rs`|抽象层 `ScriptRuntime`/`PluginBridge` trait（含 `run_ffmpeg`/`ffmpeg_available`，默认实现拒绝）+ `HostContext`（宿主注入的 ffmpeg 权限门 + 牢笼根）+ 跨 JS 边界结构（`FfmpegSpec`/`FfmpegOutcome`；禁 rquickjs 类型，未来可换 deno_core）|
 |`quickjs.rs`|v1 唯一实现 `QuickJsScriptRuntime`：专用 multi_thread runtime（`min(4,cpu)` 线程）；每调用新建 `AsyncRuntime`+`AsyncContext`；memory_limit + interrupt + 外层 timeout 三重兜底；Drop 用 `shutdown_background` 避异步上下文 drop panic；连续 3 次 Timeout/MemoryLimit → 熔断|
-|`bridge.rs`|`EngineBridge`（网络出口守卫防 SSRF：单一 `is_globally_routable_unicast` 判定 × 字面量 IP 前置校验 + 自定义 dns::Resolve + redirect Policy::custom 三腿复用）+ `flux.storage`/`flux.log`/`flux.task.requestRetry`|
+|`bridge.rs`|`EngineBridge`（网络出口守卫防 SSRF：单一 `is_globally_routable_unicast` 判定 × 字面量 IP 前置校验 + 自定义 dns::Resolve + redirect Policy::custom 三腿复用）+ `flux.storage`/`flux.log`/`flux.task.requestRetry` + `flux.ffmpeg`（argv 校验器 `arg_reject_reason` 封网/封越牢 + 牢笼 canonicalize 禁逃逸 + `tokio::process` 子进程）|
 |`manager.rs`|`PluginManager`（Arc 共享）：`RwLock<Arc<Vec<LoadedPlugin>>>` 整表原子替换；load_all/match_resolver/resolve/notify/install/uninstall/set_enabled/update_settings|
 |`install.rs`|zip 安装（zip-slip + 压缩炸弹防护 + 单层剥壳），复用 install 管线|
 |`market.rs`|去中心化市场客户端 `MarketClient`（见下）|
@@ -513,6 +517,26 @@ content_hash 钉住校验 → 复用 install 管线。**v1 无作者密码学签
 `sigScheme`/`sigstoreBundleRef`，晚加不破坏兼容），完整性基座 = 内容寻址 + TLS + Git Merkle DAG 防篡改。
 api 侧 `GET /api/v1/market`、`POST /api/v1/market/install`；hub 侧 `RequestMarketIndex`/`InstallMarketPlugin` 信号。
 
+### ffmpeg 能力面（`flux.ffmpeg`，`permissions` 门控 + 牢笼隔离）
+
+设计取向：**尽量少 API + 近乎全量 ffmpeg 能力 + 安全不外扩**。只暴露两个 JS 方法：
+- `flux.ffmpeg.available() → {available,version,source}`：探测生效 ffmpeg（复用 `components::ffmpeg_status`）。
+- `flux.ffmpeg.run(spec) → {code,stdout,stderr,timedOut,truncated*}`：`spec={args,subdir?,timeoutMs?}`，
+  `args` 近乎直传 ffmpeg（不含程序名，自动前置 `-nostdin`）。
+
+安全模型（`bridge.rs::run_ffmpeg`，与 QuickJS 沙箱正交但复用其纪律）：
+- **权限门**：manifest 未声明 `permissions:["ffmpeg"]` → `flux.ffmpeg` 门面根本不注入（undefined）。
+- **牢笼**：仅 `HostContext.ffmpeg_root=Some` 时可用——manager 仅在 `onDone` 用**产物所在目录**注入；
+  resolve/其余事件 root=None → `run` 直接抛错（不触达 bridge）。cwd=牢笼（canonicalize），`subdir` 须安全相对路径且禁逃逸。
+- **封网 + 封越牢路径**（`arg_reject_reason`，逐 token）：拒 URL scheme（`://`）/协议前缀（`file:`/`concat:`/`crypto:`…）/
+  绝对路径/盘符/`..`/内嵌绝对路径（`=/`·`:/`…）；除法（`30000/1001`）、流选择器（`0:a`/`-c:v`）、滤镜（`scale=1280:720`）等合法语法放行。
+  文件引用一律**相对 cwd**（产物在牢笼内，用 basename）。
+- **资源**：off-actor 子进程 + `kill_on_drop` + `stdin=null`；全局并发 2；默认 300s、上限 1800s（`timeoutMs` 裁剪）；stdout≤256KB/stderr≤64KB 截断。
+- **不阻塞 + 不误杀**：JS 中断（CPU）顶仍 30s（`await` 子进程不烧 CPU、不计入），墙钟顶抬至 1830s（`FFMPEG_HOOK_BUDGET`，仅授权+有牢笼的 hook）；
+  `run` 完成后把子进程挂起时长补进中断截止（`interrupt_ns.fetch_add`），使长时转码返回后 JS 仍有 CPU 预算、不被立刻中断。
+- **残留边界（记录在案）**：牢笼 = 任务 save_dir（非 per-task 子目录），授权插件可读写**该下载目录内**其它文件；
+  ffprobe 未随托管安装分发（v1 只暴露 ffmpeg，结构化探测用 `ffmpeg -i` stderr）。
+
 ### 关键约束（务必遵守）
 
 - `native/engine/Cargo.toml` 的 `rquickjs` 依赖**禁止**叠加 `rust-alloc`/`allocator` feature（会让
@@ -522,7 +546,8 @@ api 侧 `GET /api/v1/market`、`POST /api/v1/market/install`；hub 侧 `RequestM
 - desktop（hub）/ server 的 `fluxdown_engine`+`fluxdown_api` 依赖开 `plugins` feature；CLI 不开。
 - 插件运行时永不阻塞宿主 current_thread actor：resolve 走 off-actor spawn + 通道回流。
 - 测试命令：`cargo test -p fluxdown_engine --features plugins --lib plugin`、
-  `... --test plugin_lazy_resolve --test plugin_market`、`... --test fxplug_install`（需 `FLUXDOWN_TEST_FXPLUG` 环境变量）。
+  `... --test plugin_lazy_resolve --test plugin_market --test plugin_ffmpeg`、`... --test fxplug_install`（需 `FLUXDOWN_TEST_FXPLUG`）；
+  ffmpeg 真实执行断言经 `FLUXDOWN_TEST_FFMPEG=<ffmpeg 绝对路径>` 注入（缺省跳过执行部分，校验/门控仍确定性运行）。
 
 ## 浏览器扩展（fluxDown/）
 

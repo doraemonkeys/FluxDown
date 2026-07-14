@@ -1,10 +1,11 @@
 {
   "identity": "fluxdown@youtube",
   "name": "YouTube 视频解析",
-  "version": "1.1.0",
-  "description": "解析 YouTube 视频页为可下载直链（Innertube 多客户端回退链 ANDROID_VR→IOS→ANDROID，无需签名解密；遇 bot 风控自动补 visitorData 重试）。支持画质选择与音视频分离合并（DASH），签名直链自动按一次性 URL 处理。",
+  "version": "1.2.0",
+  "description": "解析 YouTube 视频页为可下载直链（Innertube 多客户端回退链 ANDROID_VR→IOS→ANDROID，无需签名解密；遇 bot 风控自动补 visitorData 重试）。支持画质选择与音视频分离合并（DASH），签名直链自动按一次性 URL 处理。关闭「优先 MP4 容器」时，下载完成后经 ffmpeg 自动转码为 H.264/AAC mp4。",
   "homepage": "https://fluxdown.zerx.dev",
   "minAppVersion": "0.1.60",
+  "permissions": ["ffmpeg"],
   "resolvers": [
     {
       "match": {
@@ -24,6 +25,23 @@
       "timeoutMs": 20000
     }
   ],
+  "hooks": {
+    "entry": "hooks.js",
+    "events": ["onDone"],
+    "match": {
+      "urls": [
+        "*://www.youtube.com/watch*",
+        "*://youtube.com/watch*",
+        "*://m.youtube.com/watch*",
+        "*://music.youtube.com/watch*",
+        "*://www.youtube.com/shorts/*",
+        "*://youtube.com/shorts/*",
+        "*://www.youtube.com/live/*",
+        "*://www.youtube.com/embed/*",
+        "*://youtu.be/*"
+      ]
+    }
+  },
   "settings": [
     {
       "key": "quality",

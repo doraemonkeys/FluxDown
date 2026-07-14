@@ -4,6 +4,7 @@
 //! dyn 兼容论证同 `selection.rs`：`Engine` 以 `Arc<dyn>` 存字段跨任务共享。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,6 +207,61 @@ pub struct BridgeHttpResponse {
 }
 
 // ---------------------------------------------------------------------------
+// ffmpeg bridge：单一 near-raw argv 面（flux.ffmpeg.run / .available）。
+// ---------------------------------------------------------------------------
+
+/// `flux.ffmpeg.run(spec)` 的请求。**近乎全量 ffmpeg CLI**：`args` 直传给 ffmpeg
+/// 二进制（不含程序名），仅经 bridge 侧「封网 + 封越牢路径」校验（见
+/// [`super::bridge`]）。文件引用一律用**相对路径**（相对 cwd = 牢笼根/`subdir`），
+/// 绝对路径 / `..` / URL scheme 会被拒。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FfmpegSpec {
+    /// ffmpeg 参数数组（不含二进制名与自动注入的 `-nostdin`）。
+    pub args: Vec<String>,
+    /// 牢笼根下的工作子目录（可空；须为安全相对路径）。缺省时 cwd = 牢笼根本身。
+    pub subdir: Option<String>,
+    /// 本次调用超时（毫秒）。缺省取 bridge 默认值，并被 bridge 上限裁剪。
+    pub timeout_ms: Option<u64>,
+}
+
+/// `flux.ffmpeg.run(spec)` 的返回值。`stdout`/`stderr` 均按 bridge 上限截断。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegOutcome {
+    /// 进程退出码（被信号杀死或无码时为 -1）。
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    /// 命中超时被强杀。
+    pub timed_out: bool,
+    pub truncated_stdout: bool,
+    pub truncated_stderr: bool,
+}
+
+/// `flux.ffmpeg.available()` 的返回值（探测生效 ffmpeg 路径）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegAvailability {
+    pub available: bool,
+    /// `ffmpeg -version` 探测到的版本串（不可用时为空）。
+    pub version: String,
+    /// 路径来源：`"manual"`/`"managed"`/`"system"`/`"none"`。
+    pub source: String,
+}
+
+/// 单次插件调用的**宿主侧上下文**（不跨 JS 边界，插件不可设置）。承载 ffmpeg
+/// 能力门 + 文件访问牢笼根，由 manager 按调用上下文（事件/resolve）注入。
+#[derive(Debug, Clone, Default)]
+pub struct HostContext {
+    /// manifest `permissions` 是否含 `"ffmpeg"`——决定是否注入 `flux.ffmpeg` 门面。
+    pub ffmpeg_permitted: bool,
+    /// ffmpeg 允许读写的牢笼根（通常为任务 `save_dir`）。`None` = 无牢笼
+    /// （resolve / 无产物事件）→ `flux.ffmpeg.run` 一律被拒。
+    pub ffmpeg_root: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
 // trait
 // ---------------------------------------------------------------------------
 
@@ -232,6 +288,7 @@ pub trait ScriptRuntime: Send + Sync {
         settings_json: String,
         bridge: Arc<dyn PluginBridge>,
         budget: ExecutionBudget,
+        host: HostContext,
     ) -> Result<Option<ResolveResult>, PluginError>;
 
     /// 通知钩子；**全部事件（含 Error）统一 fire-and-forget，实现方吞掉一切错误
@@ -244,6 +301,7 @@ pub trait ScriptRuntime: Send + Sync {
         settings_json: String,
         bridge: Arc<dyn PluginBridge>,
         budget: ExecutionBudget,
+        host: HostContext,
     );
 
     /// 供 off-actor worker `spawn` 用的 tokio `Handle`（专用 multi_thread runtime）。
@@ -281,6 +339,39 @@ pub trait PluginBridge: Send + Sync {
     /// 内部经 `plugin_retry_tx` 通道发起延迟 resume；限流在 actor 侧
     /// （`max_auto_retries`）；不阻塞、不返回决策。
     fn request_retry(&self, task_id: &str, delay_ms: u64);
+
+    /// `flux.task.recordArtifact(name)`：登记任务的衍生产物文件名（同
+    /// `save_dir` 下的相对文件名，如转码产物 `<stem>.mp4`）。onDone 钩子专用；
+    /// 登记后「删除任务并删除文件」会连同产物一并删除，保证单一任务的所有
+    /// 文件成组管理。默认实现拒绝（无持久化能力的 bridge）。
+    async fn record_artifact(
+        &self,
+        _plugin_id: &str,
+        _task_id: &str,
+        _file_name: &str,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Runtime("此 bridge 不支持产物登记".to_string()))
+    }
+
+    /// `flux.ffmpeg.available()`：探测生效 ffmpeg（manual→managed→system）。
+    /// 只读、不触网、不落盘。默认实现返回 `None`（无 ffmpeg 支持的 bridge）。
+    async fn ffmpeg_available(&self) -> Option<FfmpegAvailability> {
+        None
+    }
+
+    /// `flux.ffmpeg.run(spec)`：在 `jail_root` 牢笼内执行 ffmpeg。
+    ///
+    /// `jail_root` 由宿主按调用上下文注入（见 [`HostContext::ffmpeg_root`]），
+    /// **插件无法设置**；实现方须把一切文件访问约束在 `jail_root` 内、并封死
+    /// 网络协议（见 [`super::bridge`] 的校验器）。默认实现拒绝调用。
+    async fn run_ffmpeg(
+        &self,
+        _plugin_id: &str,
+        _jail_root: PathBuf,
+        _spec: FfmpegSpec,
+    ) -> Result<FfmpegOutcome, PluginError> {
+        Err(PluginError::Runtime("此 bridge 不支持 ffmpeg".to_string()))
+    }
 }
 
 #[cfg(test)]

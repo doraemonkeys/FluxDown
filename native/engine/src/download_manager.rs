@@ -369,6 +369,20 @@ async fn deferred_file_cleanup(
     }
 }
 
+/// 删除任务已登记的衍生产物文件（插件 onDone 经 `flux.task.recordArtifact`
+/// 登记，如转码 mp4）。仅在「删除任务并删除文件」时调用；文件名经
+/// `is_safe_file_name` 二次校验后限定在 `save_dir` 内 best-effort 删除。
+async fn delete_task_artifact_files(db: &crate::db::Db, task_id: &str, save_dir: &str) {
+    let Ok(names) = db.load_task_artifacts(task_id).await else {
+        return;
+    };
+    for name in names {
+        if is_safe_file_name(&name) {
+            let _ = tokio::fs::remove_file(PathBuf::from(save_dir).join(&name)).await;
+        }
+    }
+}
+
 /// Synchronous version of `dedup_filename` for use in the manager's
 /// synchronous section (before `tokio::spawn`).
 ///
@@ -3846,6 +3860,12 @@ impl DownloadManager {
             })
             .await;
 
+        // 插件登记的衍生产物（如转码 mp4）随任务文件一并删除；须在 DB 行
+        // 删除前读取登记表。
+        if delete_files && let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
+            delete_task_artifact_files(&self.db, task_id, &t.save_dir).await;
+        }
+
         if let Err(e) = self.db.delete_task(task_id).await {
             log_info!("[manager] delete_task {}: DB delete error: {}", task_id, e);
         }
@@ -4186,6 +4206,15 @@ impl DownloadManager {
                 futures_util::future::join_all(cleanup_futs),
             )
             .await;
+        }
+
+        // 5.5 插件登记的衍生产物随任务文件一并删除（须在 DB 批量删除前读表）。
+        if delete_files {
+            for tid in task_ids {
+                if let Some(t) = info_map.get(tid.as_str()) {
+                    delete_task_artifact_files(&self.db, tid, &t.save_dir).await;
+                }
+            }
         }
 
         // 6. Single-transaction batch DB delete.

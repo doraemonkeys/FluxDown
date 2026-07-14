@@ -108,6 +108,50 @@ Read-only object with your manifest-declared settings, already typed: `string` f
 
 `flux.task.requestRetry({ delayMs: 5000 })` — ask FluxDown to retry the failed task after a delay. Only meaningful inside `onError`; called anywhere else it logs a warning and does nothing. Retries share the task's automatic-retry budget, so a plugin cannot retry forever.
 
+### `flux.ffmpeg`
+
+Available **only** when the manifest declares `permissions: ["ffmpeg"]` — otherwise `flux.ffmpeg` is `undefined`, so guard with `if (flux.ffmpeg)`. It runs the ffmpeg FluxDown resolves (a user-set path → the managed install → system `PATH`), so ffmpeg must also actually be present (installable from the app's Components page).
+
+- `flux.ffmpeg.available()` → `Promise<{ available, version, source }>` — probe the effective ffmpeg. `source` is `"manual"` / `"managed"` / `"system"` / `"none"`.
+- `flux.ffmpeg.run(spec)` → `Promise<outcome>` — run ffmpeg. `spec`:
+
+| Field | Default | Notes |
+|---|---|---|
+| `args` | — | Required, non-empty. ffmpeg argument array (no program name; `-nostdin` is prepended for you). |
+| `subdir` | none | Working sub-directory under the jail root; safe relative path, may not escape. |
+| `timeoutMs` | 300000 | Per-call timeout, capped at 1800000 (30 min). |
+
+Resolves to `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }` — `code` is the exit code (`-1` when killed / none), `stdout`/`stderr` are truncated (256 KB / 64 KB), `timedOut` is `true` when the timeout killed the run.
+
+**The jail.** `flux.ffmpeg` only works inside `onDone` (the one hook with a produced file); in `resolve` and other events the call rejects. The working directory is the finished file's own folder, and that folder is the jail — reference files by **relative** name (the basename), prefixing with `./` in case a name starts with `-`.
+
+Arguments are screened; a spawn is refused when any token is:
+
+| Blocked | Examples |
+|---|---|
+| a URL scheme / protocol | `http://…`, `file:…`, `concat:…`, `crypto:…` |
+| an absolute path / drive letter | `/etc/x`, `C:\x`, `\\host\share` |
+| parent traversal | `../x`, `a/../b` |
+| an embedded absolute path | `subtitles=/etc/x` |
+
+Ordinary ffmpeg syntax is untouched — division (`30000/1001`), stream specifiers (`0:a`, `-c:v`), filters (`scale=1280:720`) all pass. With no URL and no absolute path reachable, ffmpeg can only touch files inside the jail, so there's no network path either. At most 2 ffmpeg processes run at once across all plugins, and each child is killed on timeout or cancellation.
+
+Example — convert a non-MP4 result to MP4 in `onDone`:
+
+```js
+globalThis.onDone = async (ctx) => {
+  if (!flux.ffmpeg) return;
+  const name = ctx.filePath.split(/[\\/]/).pop();
+  if (/\.mp4$/i.test(name)) return;
+  const out = name.replace(/\.[^.]+$/, '') + '.mp4';
+  const r = await flux.ffmpeg.run({
+    args: ['-i', './' + name, '-c:v', 'libx264', '-c:a', 'aac',
+           '-movflags', '+faststart', '-y', './' + out],
+  });
+  if (r.code !== 0) flux.logger.error('convert failed', (r.stderr || '').slice(-400));
+};
+```
+
 ## Runtime limits
 
 Each invocation runs in a fresh QuickJS context: no globals survive between calls, timers and DOM APIs don't exist, and scripts load as classic scripts (top-level `function` declarations become globals; `export` syntax will not work).
@@ -118,3 +162,5 @@ Each invocation runs in a fresh QuickJS context: no globals survive between call
 | Memory | 64 MB | 32 MB |
 
 Three consecutive timeouts or memory-limit hits trip the circuit breaker: the plugin is auto-disabled, the app shows a notice, and it stays off until manually re-enabled.
+
+Hooks granted `permissions: ["ffmpeg"]` get a raised wall-clock budget (~30 min) so a long ffmpeg run can finish; the 30 s CPU ceiling still bounds the JavaScript itself — time spent awaiting the ffmpeg subprocess doesn't count against it.

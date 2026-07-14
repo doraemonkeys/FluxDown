@@ -11,7 +11,9 @@
 //!   `tokio::time::timeout`（不依赖 QuickJS 检查点，覆盖 await 挂起）。
 //! - 脚本以 **classic script** 加载（`Context::eval`，非 ESM），入口函数挂 `globalThis`。
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::{
@@ -21,12 +23,17 @@ use rquickjs::{
 use tokio::sync::Semaphore;
 
 use super::runtime::{
-    ExecutionBudget, PluginBridge, PluginEntryKind, PluginError, PluginEvent, PluginLogLevel,
-    PluginScript, ResolveRequest, ResolveResult, ScriptRuntime,
+    ExecutionBudget, FfmpegSpec, HostContext, PluginBridge, PluginEntryKind, PluginError,
+    PluginEvent, PluginLogLevel, PluginScript, ResolveRequest, ResolveResult, ScriptRuntime,
 };
 
-/// 硬顶：任何单次调用（含 manifest timeoutMs）都不得超过 30s。
+/// 硬顶（**CPU/中断**预算）：单次调用的 JS 字节码执行不得跨过该墙——interrupt
+/// handler 据此掐死 `while(true)` 类忙循环。挂起（`await` 外部 future，如 ffmpeg
+/// 子进程）不烧 CPU、不触发 interrupt，故不计入此顶（见 [`Self::run_script`]）。
 pub const HARD_TIMEOUT_CEILING: Duration = Duration::from_secs(30);
+/// 硬顶（**墙钟**预算）：单次调用的总墙钟时长上限（外层 `tokio::time::timeout`）。
+/// 覆盖长时 `await`（ffmpeg 转码可达分钟级），远大于中断顶。
+pub const HARD_WALL_CEILING: Duration = Duration::from_secs(1830);
 /// resolve 信号量 acquire 超时（超时 → `Overloaded`，fail-closed）。
 const RESOLVE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 /// resolve 返回 null/undefined 的哨兵。
@@ -89,7 +96,8 @@ impl QuickJsScriptRuntime {
     /// clamp budget.timeout 到硬顶。
     fn clamp(budget: ExecutionBudget) -> ExecutionBudget {
         ExecutionBudget {
-            timeout: budget.timeout.min(HARD_TIMEOUT_CEILING),
+            // 墙钟顶：容纳长时 await（ffmpeg）。CPU/中断顶另在 run_script 单独裁剪。
+            timeout: budget.timeout.min(HARD_WALL_CEILING),
             memory_limit_bytes: budget.memory_limit_bytes,
         }
     }
@@ -111,7 +119,9 @@ impl QuickJsScriptRuntime {
     /// 执行一段脚本并调用入口函数，返回 JS 侧字符串结果（resolve 用；hook 返回空串）。
     ///
     /// `entry` = 入口全局函数名；`arg_json` = 传给入口的参数 JSON；`retry_task_id`
-    /// = Some(task_id) 时 `flux.task.requestRetry` 生效（onError 专用），否则 warn 忽略。
+    /// = Some(task_id) 时 `flux.task.requestRetry` 生效（onError 专用）；
+    /// `artifact_task_id` = Some(task_id) 时 `flux.task.recordArtifact` 生效
+    /// （onDone 专用）；均为 None 时对应门面调用被 warn 忽略/拒绝。
     #[allow(clippy::too_many_arguments)]
     async fn run_script(
         &self,
@@ -122,25 +132,48 @@ impl QuickJsScriptRuntime {
         settings_json: String,
         info_json: String,
         retry_task_id: Option<String>,
+        artifact_task_id: Option<String>,
         bridge: Arc<dyn PluginBridge>,
         plugin_id: String,
         budget: ExecutionBudget,
+        host: HostContext,
     ) -> Result<String, PluginError> {
         let budget = Self::clamp(budget);
 
         let rt = AsyncRuntime::new().map_err(|e| PluginError::Runtime(e.to_string()))?;
         rt.set_memory_limit(budget.memory_limit_bytes).await;
-        let deadline = Instant::now() + budget.timeout;
-        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)))
-            .await;
+        // 中断（CPU）预算与墙钟预算解耦：interrupt handler 掐忙循环，用相对基准 +
+        // 可累加的纳秒截止；`flux.ffmpeg.run` 完成后把挂起时长补进截止（见
+        // inject_bridge），使长时子进程返回后 JS 仍保有中断预算、不被立刻中断。
+        let base = Instant::now();
+        let interrupt_ns = Arc::new(AtomicU64::new(
+            budget.timeout.min(HARD_TIMEOUT_CEILING).as_nanos() as u64,
+        ));
+        let dl = interrupt_ns.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            base.elapsed().as_nanos() as u64 >= dl.load(Ordering::Acquire)
+        })))
+        .await;
         let ctx = AsyncContext::full(&rt)
             .await
             .map_err(|e| PluginError::Runtime(e.to_string()))?;
 
         let entry_owned = entry.to_string();
+        let ffmpeg_permitted = host.ffmpeg_permitted;
+        let ffmpeg_root = host.ffmpeg_root.clone();
+        let interrupt_ns_bridge = interrupt_ns.clone();
         let exec = ctx.async_with(async move |ctx| -> Result<String, PluginError> {
-            inject_bridge(&ctx, &bridge, &plugin_id, retry_task_id)
-                .map_err(|e| PluginError::Runtime(format!("注入 flux 失败: {e}")))?;
+            inject_bridge(
+                &ctx,
+                &bridge,
+                &plugin_id,
+                retry_task_id,
+                artifact_task_id,
+                ffmpeg_permitted,
+                ffmpeg_root,
+                interrupt_ns_bridge,
+            )
+            .map_err(|e| PluginError::Runtime(format!("注入 flux 失败: {e}")))?;
 
             // 注入类型化设置 / info / 入口参数。
             set_json_global(&ctx, "__flux_settings_json", &settings_json)?;
@@ -221,6 +254,7 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         settings_json: String,
         bridge: Arc<dyn PluginBridge>,
         budget: ExecutionBudget,
+        host: HostContext,
     ) -> Result<Option<ResolveResult>, PluginError> {
         // resolve 平面：acquire 3s 超时 → Overloaded（fail-closed）。
         let permit = tokio::time::timeout(
@@ -245,9 +279,11 @@ impl ScriptRuntime for QuickJsScriptRuntime {
                 settings_json,
                 info_json,
                 None,
+                None,
                 bridge,
                 plugin.identity.clone(),
                 budget,
+                host,
             )
             .await?;
 
@@ -266,6 +302,7 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         settings_json: String,
         bridge: Arc<dyn PluginBridge>,
         budget: ExecutionBudget,
+        host: HostContext,
     ) {
         debug_assert_eq!(plugin.entry_fn_hint, PluginEntryKind::Hook);
         // hook 平面：try_acquire，失败即静默丢弃（不等待、不影响任何计数）。
@@ -283,6 +320,11 @@ impl ScriptRuntime for QuickJsScriptRuntime {
             PluginEvent::Error { task_id, .. } => Some(task_id.clone()),
             _ => None,
         };
+        // onDone 专用：flux.task.recordArtifact 登记衍生产物。
+        let artifact_task_id = match &event {
+            PluginEvent::Done { task_id, .. } => Some(task_id.clone()),
+            _ => None,
+        };
         let info_json = info_json(&plugin.identity, &plugin.version, &plugin.app_version);
         let identity = plugin.identity.clone();
         let log_bridge = bridge.clone();
@@ -296,9 +338,11 @@ impl ScriptRuntime for QuickJsScriptRuntime {
                 settings_json,
                 info_json,
                 retry_task_id,
+                artifact_task_id,
                 bridge,
                 identity.clone(),
                 budget,
+                host,
             )
             .await
         {
@@ -373,12 +417,19 @@ fn build_entry_wrapper(entry: &str, is_resolve: bool) -> String {
     }
 }
 
-/// 注入低层 `__flux_*` 桥接函数（异步 fetch/storage、同步 log/requestRetry）。
+/// 注入低层 `__flux_*` 桥接函数（异步 fetch/storage、同步 log/requestRetry；
+/// 授权时另注入异步 `__flux_ffmpeg_*`）。`interrupt_ns` 供 ffmpeg 调用把子进程
+/// 挂起时长补进中断预算。
+#[allow(clippy::too_many_arguments)]
 fn inject_bridge(
     ctx: &Ctx<'_>,
     bridge: &Arc<dyn PluginBridge>,
     plugin_id: &str,
     retry_task_id: Option<String>,
+    artifact_task_id: Option<String>,
+    ffmpeg_permitted: bool,
+    ffmpeg_root: Option<PathBuf>,
+    interrupt_ns: Arc<AtomicU64>,
 ) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -492,6 +543,107 @@ fn inject_bridge(
         globals.set("__flux_request_retry", f)?;
     }
 
+    // __flux_record_artifact(name) -> Promise<String("" 或错误消息)>（仅 onDone 生效）
+    {
+        let b = bridge.clone();
+        let pid = plugin_id.to_string();
+        let f = Function::new(
+            ctx.clone(),
+            Async(move |name: String| {
+                let b = b.clone();
+                let pid = pid.clone();
+                let tid = artifact_task_id.clone();
+                async move {
+                    let msg = match &tid {
+                        Some(tid) => match b.record_artifact(&pid, tid, &name).await {
+                            Ok(()) => String::new(),
+                            Err(e) => e.to_string(),
+                        },
+                        None => "flux.task.recordArtifact 仅 onDone 钩子可用".to_string(),
+                    };
+                    Ok::<String, rquickjs::Error>(msg)
+                }
+            }),
+        )?
+        .with_name("__flux_record_artifact")?;
+        globals.set("__flux_record_artifact", f)?;
+    }
+
+    // __flux_ffmpeg_*：仅在 manifest 授予 "ffmpeg" 权限时注入（否则 flux.ffmpeg
+    // 门面不存在）。二者均返回 Promise<String(JSON)>：{value|__fluxError}。
+    if ffmpeg_permitted {
+        // __flux_ffmpeg_available() -> Promise<String(JSON)>
+        {
+            let b = bridge.clone();
+            let f = Function::new(
+                ctx.clone(),
+                Async(move || {
+                    let b = b.clone();
+                    async move {
+                        let payload = match b.ffmpeg_available().await {
+                            Some(a) => serde_json::json!({ "value": {
+                                "available": a.available,
+                                "version": a.version,
+                                "source": a.source,
+                            }}),
+                            None => serde_json::json!({ "value": {
+                                "available": false, "version": "", "source": "none",
+                            }}),
+                        };
+                        Ok::<String, rquickjs::Error>(payload.to_string())
+                    }
+                }),
+            )?
+            .with_name("__flux_ffmpeg_available")?;
+            globals.set("__flux_ffmpeg_available", f)?;
+        }
+
+        // __flux_ffmpeg_run(optsJson) -> Promise<String(JSON)>
+        {
+            let b = bridge.clone();
+            let pid = plugin_id.to_string();
+            let root = ffmpeg_root.clone();
+            let dl = interrupt_ns.clone();
+            let f = Function::new(
+                ctx.clone(),
+                Async(move |opts: String| {
+                    let b = b.clone();
+                    let pid = pid.clone();
+                    let root = root.clone();
+                    let dl = dl.clone();
+                    async move {
+                        let Some(root) = root else {
+                            return Ok::<String, rquickjs::Error>(
+                                serde_json::json!({ "__fluxError":
+                                    "flux.ffmpeg.run 仅在有产物文件的钩子（如 onDone）中可用" })
+                                .to_string(),
+                            );
+                        };
+                        let spec: FfmpegSpec = serde_json::from_str(&opts).unwrap_or_default();
+                        // 挂起时长补进中断预算：长时子进程返回后 JS 仍保有 CPU 预算。
+                        let started = Instant::now();
+                        let out = b.run_ffmpeg(&pid, root, spec).await;
+                        dl.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Release);
+                        let payload = match out {
+                            Ok(o) => serde_json::json!({ "value": {
+                                "code": o.code,
+                                "stdout": o.stdout,
+                                "stderr": o.stderr,
+                                "timedOut": o.timed_out,
+                                "truncatedStdout": o.truncated_stdout,
+                                "truncatedStderr": o.truncated_stderr,
+                            }}),
+                            Err(e) => serde_json::json!({ "__fluxError": e.to_string() }),
+                        };
+                        Ok::<String, rquickjs::Error>(payload.to_string())
+                    }
+                }),
+            )?
+            .with_name("__flux_ffmpeg_run")?;
+            globals.set("__flux_ffmpeg_run", f)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -522,8 +674,24 @@ const FLUX_PRELUDE: &str = r#"
     },
     task: {
       requestRetry: (opts) => __flux_request_retry(String((opts && opts.delayMs) || 0)),
+      recordArtifact: (name) => __flux_record_artifact(String(name)).then((s) => {
+        if (s) throw new Error(s);
+      }),
     },
   };
+  // flux.ffmpeg：仅当宿主注入了 __flux_ffmpeg_run（即 manifest 授予 ffmpeg 权限）
+  // 时可用；否则 flux.ffmpeg 为 undefined，插件应先 `if (flux.ffmpeg)` 判定。
+  if (typeof __flux_ffmpeg_run === 'function') {
+    const __ffunwrap = (s) => {
+      const r = JSON.parse(s);
+      if (r.__fluxError) throw new Error(r.__fluxError);
+      return r.value;
+    };
+    globalThis.flux.ffmpeg = {
+      available: () => __flux_ffmpeg_available().then(__ffunwrap),
+      run: (opts) => __flux_ffmpeg_run(JSON.stringify(opts || {})).then(__ffunwrap),
+    };
+  }
   globalThis.console = {
     log: (...a) => __flux_log('info', __args2str(a)),
     info: (...a) => __flux_log('info', __args2str(a)),
@@ -542,8 +710,9 @@ mod tests {
 
     use super::QuickJsScriptRuntime;
     use crate::plugin::runtime::{
-        BridgeHttpRequest, BridgeHttpResponse, ExecutionBudget, PluginBridge, PluginEntryKind,
-        PluginError, PluginLogLevel, PluginScript, ResolveRequest, ScriptRuntime,
+        BridgeHttpRequest, BridgeHttpResponse, ExecutionBudget, HostContext, PluginBridge,
+        PluginEntryKind, PluginError, PluginLogLevel, PluginScript, ResolveRequest, ResolveResult,
+        ScriptRuntime,
     };
 
     /// 测试桩：全空实现（OOM 测试不触网/不落盘）。
@@ -600,12 +769,118 @@ mod tests {
             memory_limit_bytes: 16 * 1024 * 1024,
         };
         let err = rt
-            .invoke_resolve(&script, req, "{}".to_string(), Arc::new(NullBridge), budget)
+            .invoke_resolve(
+                &script,
+                req,
+                "{}".to_string(),
+                Arc::new(NullBridge),
+                budget,
+                HostContext::default(),
+            )
             .await
             .expect_err("unbounded allocation must fail");
         assert!(
             matches!(err, PluginError::MemoryLimitExceeded),
             "expected MemoryLimitExceeded, got: {err:?}"
+        );
+    }
+
+    /// 用给定 host 上下文跑一段 resolver，返回其 `url` 字段（测试探针）。
+    async fn probe_resolve(source: &str, host: HostContext) -> ResolveResult {
+        let rt = QuickJsScriptRuntime::new(1).expect("runtime");
+        let script = PluginScript {
+            identity: "test@ff".to_string(),
+            source: source.to_string(),
+            entry_fn_hint: PluginEntryKind::Resolve,
+            version: "1.0.0".to_string(),
+            app_version: "0.0.0".to_string(),
+        };
+        let req = ResolveRequest {
+            task_id: "t".to_string(),
+            url: "http://x/".to_string(),
+            cookies: String::new(),
+            referrer: String::new(),
+            user_agent: String::new(),
+            extra_headers: Default::default(),
+        };
+        let budget = ExecutionBudget {
+            timeout: Duration::from_secs(10),
+            memory_limit_bytes: 32 * 1024 * 1024,
+        };
+        rt.invoke_resolve(
+            &script,
+            req,
+            "{}".to_string(),
+            Arc::new(NullBridge),
+            budget,
+            host,
+        )
+        .await
+        .expect("resolve ok")
+        .expect("non-null")
+    }
+
+    /// 无 ffmpeg 权限 → `flux.ffmpeg` 门面不注入（undefined）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffmpeg_facade_absent_without_permission() {
+        let r = probe_resolve(
+            "globalThis.resolve = async () => ({ url: String(typeof flux.ffmpeg) });",
+            HostContext::default(),
+        )
+        .await;
+        assert_eq!(r.url, "undefined");
+    }
+
+    /// 授予权限 → 门面注入（object）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffmpeg_facade_present_with_permission() {
+        let r = probe_resolve(
+            "globalThis.resolve = async () => ({ url: String(typeof flux.ffmpeg) });",
+            HostContext {
+                ffmpeg_permitted: true,
+                ffmpeg_root: None,
+            },
+        )
+        .await;
+        assert_eq!(r.url, "object");
+    }
+
+    /// 授权但无牢笼根（如 resolve 平面）→ run() 抛错、不触达 bridge。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffmpeg_run_rejected_without_jail_root() {
+        let r = probe_resolve(
+            "globalThis.resolve = async () => { try { \
+             await flux.ffmpeg.run({ args: ['-version'] }); return { url: 'nothrow' }; \
+             } catch (e) { return { url: 'threw:' + e.message }; } };",
+            HostContext {
+                ffmpeg_permitted: true,
+                ffmpeg_root: None,
+            },
+        )
+        .await;
+        assert!(r.url.starts_with("threw:"), "expected throw, got {}", r.url);
+        assert!(
+            r.url.contains("onDone"),
+            "error should mention onDone: {}",
+            r.url
+        );
+    }
+
+    /// resolve 平面无产物任务上下文 → recordArtifact 抛错、不触达 bridge。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_artifact_rejected_outside_done_hook() {
+        let r = probe_resolve(
+            "globalThis.resolve = async () => { try { \
+             await flux.task.recordArtifact('a.mp4'); return { url: 'nothrow' }; \
+             } catch (e) { return { url: 'threw:' + e.message }; } };",
+            HostContext::default(),
+        )
+        .await;
+        assert!(r.url.starts_with("threw:"), "expected throw, got {}", r.url);
+        assert!(
+            r.url.contains("onDone"),
+            "error should mention onDone: {}",
+            r.url
         );
     }
 }

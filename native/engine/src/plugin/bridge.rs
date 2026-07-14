@@ -15,8 +15,12 @@
 //!   字面量 IP 前置校验与逐跳重定向校验仍然生效）。代理由用户显式配置，视为可信出口。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
+use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::db::Db;
@@ -24,7 +28,8 @@ use crate::logger::{log_error, log_info};
 use crate::proxy_config::ProxyConfig;
 
 use super::runtime::{
-    BridgeHttpRequest, BridgeHttpResponse, PluginBridge, PluginError, PluginLogLevel,
+    BridgeHttpRequest, BridgeHttpResponse, FfmpegAvailability, FfmpegOutcome, FfmpegSpec,
+    PluginBridge, PluginError, PluginLogLevel,
 };
 
 /// 响应体上限（超限截断 + `truncated:true`）。
@@ -41,6 +46,20 @@ const MAX_STORAGE_VALUE: usize = 64 * 1024;
 const MAX_STORAGE_KEYS: usize = 100;
 /// 单条日志截断长度。
 const MAX_LOG_BYTES: usize = 4 * 1024;
+/// ffmpeg 单次调用默认超时（缺省 `timeoutMs` 时）。
+const FFMPEG_DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// ffmpeg 单次调用超时上限（裁剪 `timeoutMs`）。
+const FFMPEG_MAX_TIMEOUT: Duration = Duration::from_secs(1800);
+/// 全局并发 ffmpeg 进程上限（CPU/IO 密集，保守取 2）。
+const MAX_CONCURRENT_FFMPEG: usize = 2;
+/// ffmpeg 参数条数上限。
+const MAX_FFMPEG_ARGS: usize = 512;
+/// ffmpeg 单参数字节上限。
+const MAX_FFMPEG_ARG_LEN: usize = 8 * 1024;
+/// ffmpeg stdout 回传上限（够 ffprobe 式 JSON；超限截断）。
+const FFMPEG_STDOUT_CAP: usize = 256 * 1024;
+/// ffmpeg stderr 回传上限（超限截断）。
+const FFMPEG_STDERR_CAP: usize = 64 * 1024;
 
 /// 唯一的「可全局路由单播」判定函数。三处复用，杜绝判定逻辑漂移。
 ///
@@ -170,6 +189,10 @@ pub struct EngineBridge {
     db: Db,
     plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
     fetch_sema: Arc<Semaphore>,
+    /// 数据目录：供 `flux.ffmpeg` 解析生效 ffmpeg 路径（manual→managed→system）。
+    data_dir: PathBuf,
+    /// 全局并发 ffmpeg 进程限流。
+    ffmpeg_sema: Arc<Semaphore>,
 }
 
 impl EngineBridge {
@@ -178,6 +201,7 @@ impl EngineBridge {
         db: Db,
         proxy: &ProxyConfig,
         plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
+        data_dir: PathBuf,
     ) -> Result<Self, PluginError> {
         let mut builder = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -211,6 +235,8 @@ impl EngineBridge {
             db,
             plugin_retry_tx,
             fetch_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCH)),
+            data_dir,
+            ffmpeg_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FFMPEG)),
         })
     }
 }
@@ -357,15 +383,316 @@ impl PluginBridge for EngineBridge {
         // fire-and-forget；限流在 actor 侧（max_auto_retries）。
         let _ = self.plugin_retry_tx.send((task_id.to_string(), delay_ms));
     }
+
+    async fn record_artifact(
+        &self,
+        plugin_id: &str,
+        task_id: &str,
+        file_name: &str,
+    ) -> Result<(), PluginError> {
+        // 仅接受单层裸文件名（无路径分隔/盘符/`..`）；删除侧还有
+        // `is_safe_file_name` 二次校验，双保险。
+        let bad = file_name.is_empty()
+            || file_name.len() > 512
+            || file_name.contains(['/', '\\', ':'])
+            || file_name == "."
+            || file_name == "..";
+        if bad {
+            return Err(PluginError::Runtime(format!(
+                "recordArtifact: 非法产物文件名: {file_name:?}"
+            )));
+        }
+        self.db
+            .add_task_artifact(task_id, file_name)
+            .await
+            .map_err(|e| PluginError::Runtime(format!("recordArtifact 落库失败: {e}")))?;
+        log_info!(
+            "[plugin:{}] recordArtifact: task={} file={}",
+            plugin_id,
+            task_id,
+            file_name
+        );
+        Ok(())
+    }
+
+    async fn ffmpeg_available(&self) -> Option<FfmpegAvailability> {
+        let status = crate::components::ffmpeg_status(&self.db, &self.data_dir).await;
+        Some(FfmpegAvailability {
+            available: !status.path.is_empty(),
+            version: status.version,
+            source: status.source.as_str().to_string(),
+        })
+    }
+
+    async fn run_ffmpeg(
+        &self,
+        _plugin_id: &str,
+        jail_root: PathBuf,
+        spec: FfmpegSpec,
+    ) -> Result<FfmpegOutcome, PluginError> {
+        // 1) 参数校验（封网 + 封越牢路径；近乎全量 CLI）。先于二进制解析 fail-fast。
+        if spec.args.is_empty() {
+            return Err(PluginError::InvalidOutput(
+                "ffmpeg args 不可为空".to_string(),
+            ));
+        }
+        if spec.args.len() > MAX_FFMPEG_ARGS {
+            return Err(PluginError::InvalidOutput(format!(
+                "ffmpeg 参数过多（>{MAX_FFMPEG_ARGS}）"
+            )));
+        }
+        validate_ffmpeg_args(&spec.args)?;
+
+        // 2) 生效 ffmpeg 二进制（manual→managed→system；不触网）。
+        let bin = crate::components::resolve_ffmpeg(&self.db, &self.data_dir)
+            .await
+            .ok_or_else(|| PluginError::Runtime("ffmpeg 未安装或不可用".to_string()))?;
+
+        // 3) 工作目录：牢笼根（canonicalize 后）+ 可选安全 subdir，禁逃逸。
+        let jail = tokio::fs::canonicalize(&jail_root)
+            .await
+            .map_err(|e| PluginError::Runtime(format!("ffmpeg 牢笼根无效: {e}")))?;
+        let work = match spec.subdir.as_deref() {
+            Some(sub) if !sub.is_empty() => {
+                if !super::manifest::is_safe_relative_path(sub) {
+                    return Err(PluginError::InvalidOutput(format!(
+                        "ffmpeg subdir '{sub}' 非法"
+                    )));
+                }
+                let cand = jail.join(sub);
+                tokio::fs::create_dir_all(&cand)
+                    .await
+                    .map_err(|e| PluginError::Runtime(format!("创建 ffmpeg subdir 失败: {e}")))?;
+                let real = tokio::fs::canonicalize(&cand)
+                    .await
+                    .map_err(|e| PluginError::Runtime(format!("ffmpeg subdir 无效: {e}")))?;
+                if !real.starts_with(&jail) {
+                    return Err(PluginError::InvalidOutput(
+                        "ffmpeg subdir 逃逸牢笼".to_string(),
+                    ));
+                }
+                real
+            }
+            _ => jail.clone(),
+        };
+
+        // 4) 超时（裁剪到上限）。
+        let timeout = spec
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(FFMPEG_DEFAULT_TIMEOUT)
+            .min(FFMPEG_MAX_TIMEOUT);
+
+        // 5) 并发限流。
+        let _permit = self
+            .ffmpeg_sema
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PluginError::Runtime("ffmpeg semaphore closed".to_string()))?;
+
+        // 6) 启动。`-nostdin` 前置注入；stdin=null；kill_on_drop 保超时/取消时清进程。
+        let mut cmd = Command::new(&bin);
+        cmd.current_dir(&work)
+            .arg("-nostdin")
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd
+            .spawn()
+            .map_err(|e| PluginError::Runtime(format!("启动 ffmpeg 失败: {e}")))?;
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return Err(PluginError::Runtime(format!("ffmpeg 执行失败: {e}"))),
+            Err(_) => {
+                // 超时：future 被 drop → kill_on_drop 杀子进程。
+                return Ok(FfmpegOutcome {
+                    code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    timed_out: true,
+                    truncated_stdout: false,
+                    truncated_stderr: false,
+                });
+            }
+        };
+        let (stdout, truncated_stdout) = truncate_utf8(&output.stdout, FFMPEG_STDOUT_CAP);
+        let (stderr, truncated_stderr) = truncate_utf8(&output.stderr, FFMPEG_STDERR_CAP);
+        Ok(FfmpegOutcome {
+            code: output.status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+            timed_out: false,
+            truncated_stdout,
+            truncated_stderr,
+        })
+    }
+}
+
+/// 校验 ffmpeg 参数：仅封堵网络协议与越牢路径引用，其余（滤镜/编码器/复用器
+/// /元数据…）近乎全量放行。文件引用一律相对 cwd（牢笼根/subdir）。
+fn validate_ffmpeg_args(args: &[String]) -> Result<(), PluginError> {
+    for a in args {
+        if a.len() > MAX_FFMPEG_ARG_LEN {
+            return Err(PluginError::InvalidOutput("ffmpeg 参数过长".to_string()));
+        }
+        if a.contains('\0') {
+            return Err(PluginError::InvalidOutput("ffmpeg 参数含 NUL".to_string()));
+        }
+        if let Some(reason) = arg_reject_reason(a) {
+            return Err(PluginError::InvalidOutput(format!(
+                "ffmpeg 参数 '{a}' 被拒: {reason}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 单参数拒绝原因（`None` = 放行）。判定：绝对路径 / 盘符 / `..` / URL scheme /
+/// 协议前缀 / 内嵌绝对路径。除法（`30000/1001`）、流选择器（`0:a`/`-c:v`）、
+/// 滤镜分隔（`scale=1280:720`）等合法语法均放行。
+fn arg_reject_reason(a: &str) -> Option<&'static str> {
+    // 绝对路径 / 分隔符开头。
+    if a.starts_with('/') || a.starts_with('\\') {
+        return Some("绝对路径");
+    }
+    // Windows 盘符（X: 开头，含 UNC 前缀由上面的 `\` 覆盖）。
+    let b = a.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return Some("盘符路径");
+    }
+    // `..` 路径段（含内嵌 `foo/../bar`）。
+    if a.split(['/', '\\']).any(|seg| seg == "..") {
+        return Some(".. 越级");
+    }
+    // 显式 URL（http:// / file:// / rtmp:// …）。
+    if a.contains("://") {
+        return Some("URL scheme");
+    }
+    // 无 `//` 的协议前缀（file:/concat:/crypto:/data:/pipe:/subfile: …）：首个 `:`
+    // 前缀是 ≥2 位、字母起头的合法 scheme 字符集时判为协议。`-c:v`（`-` 起头）、
+    // `0:a`（数字/单字符）、`scale=…:…`（含 `=`）均不满足，放行。
+    if let Some(idx) = a.find(':') {
+        let scheme = &a[..idx];
+        if scheme.len() >= 2
+            && scheme.as_bytes()[0].is_ascii_alphabetic()
+            && scheme
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'.' || c == b'-')
+        {
+            return Some("协议前缀");
+        }
+    }
+    // 选项值内嵌的绝对路径（如 `subtitles=/etc/passwd`、`movie=C\:/x`）。
+    if a.contains("=/") || a.contains("=\\") || a.contains(":/") || a.contains(":\\") {
+        return Some("内嵌绝对路径");
+    }
+    None
+}
+
+/// UTF-8 有损转换 + 按字符边界截断到 `cap` 字节。返回 `(文本, 是否截断)`。
+fn truncate_utf8(bytes: &[u8], cap: usize) -> (String, bool) {
+    let s = String::from_utf8_lossy(bytes);
+    if s.len() <= cap {
+        return (s.into_owned(), false);
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (s[..end].to_string(), true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_globally_routable_unicast;
+    use super::{
+        arg_reject_reason, is_globally_routable_unicast, truncate_utf8, validate_ffmpeg_args,
+    };
     use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap_or_else(|_| panic!("bad ip {s}"))
+    }
+
+    #[test]
+    fn ffmpeg_args_accept_legit_syntax() {
+        // 常见合法参数：滤镜/编码器/流选择器/除法/时间戳/相对文件名，均须放行。
+        for a in [
+            "-i",
+            "video.ts",
+            "-c",
+            "copy",
+            "out.mp4",
+            "-vf",
+            "scale=1280:720",
+            "-r",
+            "30000/1001",
+            "-map",
+            "0:a",
+            "-c:v",
+            "libx264",
+            "-b:v",
+            "2M",
+            "-ss",
+            "00:01:02",
+            "-metadata:s:a:0",
+            "title=x",
+            "-vf",
+            "setpts=0.5*PTS",
+            "-filter_complex",
+            "overlay=W-w:H-h",
+            "sub.srt",
+            "clip.audio.m4a",
+            "-y",
+        ] {
+            assert!(
+                arg_reject_reason(a).is_none(),
+                "'{a}' should be accepted, got {:?}",
+                arg_reject_reason(a)
+            );
+        }
+    }
+
+    #[test]
+    fn ffmpeg_args_reject_network_and_escape() {
+        // 越牢路径 + 网络协议，须逐一拒绝。
+        for a in [
+            "/etc/passwd",
+            "\\\\server\\share",
+            "C:\\Windows\\system32",
+            "../secret",
+            "a/../../b",
+            "http://evil.example/x",
+            "https://evil/x",
+            "file:/etc/passwd",
+            "concat:a.ts|b.ts",
+            "crypto:key",
+            "subfile:,start,0,end,10,:in",
+            "subtitles=/etc/passwd",
+            "movie=C\\:/secret",
+        ] {
+            assert!(arg_reject_reason(a).is_some(), "'{a}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn ffmpeg_validate_rejects_nul_and_reports() {
+        assert!(validate_ffmpeg_args(&["ok.mp4".into()]).is_ok());
+        assert!(validate_ffmpeg_args(&["bad\0name".into()]).is_err());
+        assert!(validate_ffmpeg_args(&["/abs".into()]).is_err());
+    }
+
+    #[test]
+    fn truncate_utf8_respects_char_boundary() {
+        let (s, t) = truncate_utf8("hello".as_bytes(), 100);
+        assert_eq!(s, "hello");
+        assert!(!t);
+        // 3 字节字符边界：cap=4 落在第二个 '啊'(3 字节) 中间 → 回退到 3。
+        let (s, t) = truncate_utf8("啊啊".as_bytes(), 4);
+        assert_eq!(s, "啊");
+        assert!(t);
     }
 
     #[test]

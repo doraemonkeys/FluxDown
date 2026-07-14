@@ -113,6 +113,12 @@ CREATE TABLE IF NOT EXISTS ed2k_hashset (
     hashes BLOB NOT NULL,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS task_artifacts (
+    task_id TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    PRIMARY KEY (task_id, file_name),
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
 ";
 
 /// 建表 DDL（PostgreSQL 方言）。
@@ -185,6 +191,12 @@ CREATE TABLE IF NOT EXISTS ed2k_blocks (
 CREATE TABLE IF NOT EXISTS ed2k_hashset (
     task_id TEXT PRIMARY KEY,
     hashes BYTEA NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS task_artifacts (
+    task_id TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    PRIMARY KEY (task_id, file_name),
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 ";
@@ -738,6 +750,10 @@ impl Db {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM task_artifacts WHERE task_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         // 任务级 config 行(完成幂等哨兵 bt_completion_top_<id>、HLS 断点
         // hls_resume_<id>)随任务一并清理,防孤儿行累积。
         sqlx::query("DELETE FROM config WHERE key IN ($1, $2)")
@@ -767,7 +783,7 @@ impl Db {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            for table in ["task_segments", "torrent_files"] {
+            for table in ["task_segments", "torrent_files", "task_artifacts"] {
                 let sql = format!("DELETE FROM {table} WHERE task_id IN ({placeholders})");
                 let mut query = sqlx::query(AssertSqlSafe(sql));
                 for id in chunk {
@@ -815,6 +831,35 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+    // -----------------------------------------------------------------------
+    // Task derived-artifact registry (plugin outputs, e.g. transcoded mp4)
+    // -----------------------------------------------------------------------
+
+    /// 登记任务的衍生产物文件名（同 `save_dir` 下的相对文件名，如插件转码
+    /// 产物 `<stem>.mp4`）。删除任务且勾选删除文件时随任务文件一并删除。
+    ///
+    /// 幂等：重复登记同名产物为 no-op。
+    pub async fn add_task_artifact(&self, task_id: &str, file_name: &str) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO task_artifacts (task_id, file_name) VALUES ($1, $2)
+             ON CONFLICT (task_id, file_name) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(file_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 读取任务已登记的衍生产物文件名列表（可能为空）。
+    pub async fn load_task_artifacts(&self, task_id: &str) -> Result<Vec<String>, DbError> {
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT file_name FROM task_artifacts WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
     }
 
     /// Persist the user's BT file selection so it survives app restart.
@@ -1903,6 +1948,68 @@ mod tests {
         assert!(
             result.is_ok(),
             "second delete of already-deleted task must succeed"
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn task_artifacts_roundtrip_and_cascade() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "a1").await;
+
+        // 幂等登记：同名产物重复登记不报错、不重复。
+        db.add_task_artifact("a1", "file.mp4").await.expect("add");
+        db.add_task_artifact("a1", "file.mp4")
+            .await
+            .expect("add idempotent");
+        db.add_task_artifact("a1", "file.srt").await.expect("add 2");
+
+        let mut names = db.load_task_artifacts("a1").await.expect("load");
+        names.sort();
+        assert_eq!(names, vec!["file.mp4".to_string(), "file.srt".to_string()]);
+
+        // 未登记任务读取为空。
+        assert!(
+            db.load_task_artifacts("phantom")
+                .await
+                .expect("load phantom")
+                .is_empty()
+        );
+
+        // 删除任务后登记行随任务清理。
+        db.delete_task("a1").await.expect("delete");
+        assert!(
+            db.load_task_artifacts("a1")
+                .await
+                .expect("load after delete")
+                .is_empty(),
+            "artifact rows must be removed with the task"
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn task_artifacts_batch_delete_cleans_rows() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "b1").await;
+        insert_task(&db, "b2").await;
+        db.add_task_artifact("b1", "x.mp4").await.expect("add b1");
+        db.add_task_artifact("b2", "y.mp4").await.expect("add b2");
+
+        db.delete_tasks_batch(&["b1".to_string()])
+            .await
+            .expect("batch delete");
+
+        assert!(
+            db.load_task_artifacts("b1")
+                .await
+                .expect("load b1")
+                .is_empty()
+        );
+        assert_eq!(
+            db.load_task_artifacts("b2").await.expect("load b2"),
+            vec!["y.mp4".to_string()],
+            "unrelated task's artifacts must survive"
         );
         close_test_db(&db, dir).await;
     }

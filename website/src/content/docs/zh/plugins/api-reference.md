@@ -3,7 +3,7 @@ title: 插件 API 参考
 description: 入口函数签名、flux.* 完整接口、全部运行时限制。
 section: plugins
 order: 4
-sourceHash: "08a39add78a2"
+sourceHash: "4b8d3f0f5697"
 ---
 
 插件脚本能看到的一切：FluxDown 会调用的五个入口函数，和注入的 `flux` 对象。跨越 JS 边界的字段名全部是 camelCase。
@@ -109,6 +109,50 @@ resolve 出 `{ status, headers, body, truncated }`——`status` 是数字状态
 
 `flux.task.requestRetry({ delayMs: 5000 })`——请求 FluxDown 在延迟后重试失败的任务。只在 `onError` 里有意义；其他地方调用只记一条警告，什么也不做。重试消耗任务自己的自动重试额度，插件无法无限重试。
 
+### `flux.ffmpeg`
+
+**仅当** manifest 声明 `permissions: ["ffmpeg"]` 时可用——否则 `flux.ffmpeg` 为 `undefined`，请用 `if (flux.ffmpeg)` 判断。它运行 FluxDown 解析到的 ffmpeg（用户手动指定的路径 → 托管安装 → 系统 `PATH`），因此还要求 ffmpeg 确实存在（可在应用「组件」页安装）。
+
+- `flux.ffmpeg.available()` → `Promise<{ available, version, source }>`——探测生效的 ffmpeg。`source` 取 `"manual"` / `"managed"` / `"system"` / `"none"`。
+- `flux.ffmpeg.run(spec)` → `Promise<outcome>`——运行 ffmpeg。`spec`：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `args` | — | 必填，非空。ffmpeg 参数数组（不含程序名；`-nostdin` 会自动前置）。 |
+| `subdir` | 无 | 牢笼根下的工作子目录；安全相对路径，不得逃逸。 |
+| `timeoutMs` | 300000 | 单次调用超时，上限 1800000（30 分钟）。 |
+
+resolve 出 `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }`——`code` 是退出码（被杀死/无码时为 `-1`），`stdout`/`stderr` 会截断（256 KB / 64 KB），`timedOut` 为 `true` 表示被超时杀掉。
+
+**牢笼。** `flux.ffmpeg` 只在 `onDone`（唯一有产物文件的钩子）里可用；`resolve` 和其他事件里调用会 reject。工作目录就是完成文件所在的目录，且该目录就是牢笼——文件一律用**相对**名（basename）引用，名字可能以 `-` 开头时前缀 `./`。
+
+参数会被审查，出现以下 token 时拒绝启动：
+
+| 拦截 | 例子 |
+|---|---|
+| URL scheme / 协议 | `http://…`、`file:…`、`concat:…`、`crypto:…` |
+| 绝对路径 / 盘符 | `/etc/x`、`C:\x`、`\\host\share` |
+| 上级穿越 | `../x`、`a/../b` |
+| 内嵌绝对路径 | `subtitles=/etc/x` |
+
+正常的 ffmpeg 语法不受影响——除法（`30000/1001`）、流选择器（`0:a`、`-c:v`）、滤镜（`scale=1280:720`）都放行。既无 URL 也够不到绝对路径，ffmpeg 只能碰牢笼内的文件，因此也没有网络出口。全部插件合计同时至多跑 2 个 ffmpeg 进程，每个子进程在超时或取消时被杀。
+
+例子——在 `onDone` 里把非 MP4 产物转为 MP4：
+
+```js
+globalThis.onDone = async (ctx) => {
+  if (!flux.ffmpeg) return;
+  const name = ctx.filePath.split(/[\\/]/).pop();
+  if (/\.mp4$/i.test(name)) return;
+  const out = name.replace(/\.[^.]+$/, '') + '.mp4';
+  const r = await flux.ffmpeg.run({
+    args: ['-i', './' + name, '-c:v', 'libx264', '-c:a', 'aac',
+           '-movflags', '+faststart', '-y', './' + out],
+  });
+  if (r.code !== 0) flux.logger.error('转码失败', (r.stderr || '').slice(-400));
+};
+```
+
 ## 运行时限制
 
 每次调用都在全新的 QuickJS 上下文里跑：调用之间没有任何全局变量残留，没有定时器和 DOM API，脚本按 classic script 加载（顶层 `function` 声明自动成为全局函数；`export` 语法不能用）。
@@ -119,3 +163,5 @@ resolve 出 `{ status, headers, body, truncated }`——`status` 是数字状态
 | 内存 | 64 MB | 32 MB |
 
 连续 3 次超时或内存超限会触发熔断：插件被自动禁用，应用弹出提示，直到手动重新启用为止。
+
+获得 `permissions: ["ffmpeg"]` 的钩子会拿到抬高的墙钟预算（约 30 分钟），好让长时 ffmpeg 跑完；30 秒 CPU 顶仍约束 JavaScript 本身——等待 ffmpeg 子进程的时间不计入。
