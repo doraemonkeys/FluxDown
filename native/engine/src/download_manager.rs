@@ -683,6 +683,8 @@ pub struct DownloadManager {
     default_save_dir: String,
     /// Application data directory (exe dir) for BT persistence files.
     app_data_dir: String,
+    /// 解析后的引擎数据目录（组件 bin/ 探测用；由 `Engine::new` 注入）。
+    data_dir: std::path::PathBuf,
     /// User-configurable BT settings (DHT, UPnP, ports, custom trackers).
     bt_config: BtConfig,
     /// Globally configured user-agent string. Empty = use built-in Chrome UA.
@@ -776,6 +778,7 @@ pub struct DownloadManagerConfig {
     pub speed_limit_bps: u64,
     pub default_save_dir: String,
     pub app_data_dir: String,
+    pub data_dir: std::path::PathBuf,
     pub bt_config: BtConfig,
     pub proxy_config: ProxyConfig,
     pub user_agent: String,
@@ -792,6 +795,7 @@ impl DownloadManager {
             speed_limit_bps,
             default_save_dir,
             app_data_dir,
+            data_dir,
             bt_config,
             proxy_config,
             user_agent,
@@ -822,6 +826,7 @@ impl DownloadManager {
             bt_session: None,
             default_save_dir,
             app_data_dir,
+            data_dir,
             bt_config,
             global_user_agent: user_agent,
             global_default_segments: 0,
@@ -2843,6 +2848,7 @@ impl DownloadManager {
                 // 段行布局属主令牌：本次 spawn 的 generation。多段路径起飞时
                 // 落 tasks.segments_epoch，旧 spawn 迟到的段进度写全类失效。
                 spawn_gen: spawn_gen as i64,
+                ffmpeg_path: crate::components::resolve_ffmpeg(&self.db, &self.data_dir).await,
             };
 
             tokio::spawn(async move {
@@ -3553,6 +3559,7 @@ impl DownloadManager {
                 auto_max_connections: self.auto_max_connections,
                 use_server_time: self.use_server_time,
                 spawn_gen: spawn_gen as i64,
+                ffmpeg_path: crate::components::resolve_ffmpeg(&self.db, &self.data_dir).await,
             };
 
             tokio::spawn(async move {

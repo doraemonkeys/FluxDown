@@ -4,11 +4,14 @@ import { clearCredentials, getBase, getToken } from './auth'
 import { t, translateBackendMessage } from './i18n'
 import type {
   ApiInfo,
+  ComponentFfmpegStatus,
+  ComponentVersions,
   ConfigMap,
   CreateQueueRequest,
   CreateTaskRequest,
   CreatedTask,
   FsListResponse,
+  InstallFfmpegRequest,
   InstalledPlugin,
   MarketEntry,
   PingInfo,
@@ -144,6 +147,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ pluginId }),
     }),
+
+  getFfmpegStatus: () => apiFetch<ComponentFfmpegStatus>('/api/v1/components/ffmpeg'),
+  getFfmpegVersions: () => apiFetch<ComponentVersions>('/api/v1/components/ffmpeg/versions'),
+  installFfmpeg: (version?: string) =>
+    apiFetch<unknown>('/api/v1/components/ffmpeg/install', {
+      method: 'POST',
+      body: JSON.stringify({ version } satisfies InstallFfmpegRequest),
+    }),
+  uninstallFfmpeg: () =>
+    apiFetch<unknown>('/api/v1/components/ffmpeg/uninstall', { method: 'POST' }),
 }
 
 /** 「保存到本地」下载地址（浏览器导航下载，token 走查询参数）。 */

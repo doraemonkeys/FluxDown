@@ -205,6 +205,7 @@ fn make_params(
         audio_url: Some(format!("{base}/audio")),
         auto_max_connections: 0,
         use_server_time: false,
+        ffmpeg_path: None,
     }
 }
 

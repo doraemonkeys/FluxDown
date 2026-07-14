@@ -182,6 +182,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_handle = engine.db.clone();
     let selector_handle = engine.selector.clone();
     let plugin_manager = engine.manager.plugin_manager();
+    // 组件 API（ffmpeg 探测/安装）不走 actor，直接持 Db + data_dir；取自
+    // engine 而非局部 data_dir，保持与引擎内部解析结果一致（含 override）。
+    let engine_data_dir = engine.data_dir.clone();
 
     // actor 独占 engine；HTTP 层经 cmd_tx 写入。
     let (cmd_tx, cmd_rx) = mpsc::channel::<ActorCmd>(64);
@@ -221,6 +224,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         token,
         version: SERVER_VERSION.to_string(),
         demo_url: server_cfg.demo_url.clone(),
+        data_dir: engine_data_dir,
+        ffmpeg_installing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let spa = ServeDir::new(&server_cfg.webroot)
         .fallback(ServeFile::new(server_cfg.webroot.join("index.html")));

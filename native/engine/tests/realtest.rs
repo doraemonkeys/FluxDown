@@ -1284,6 +1284,7 @@ async fn run_full(
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
+        ffmpeg_path: None,
     };
 
     run_download(params).await;
@@ -1367,6 +1368,7 @@ async fn run_full_server_time(
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time,
+        ffmpeg_path: None,
     };
 
     run_download(params).await;
@@ -1507,6 +1509,7 @@ async fn use_server_time_uses_new_last_modified_after_version_change() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: true,
+        ffmpeg_path: None,
     };
     run_download(params).await;
     let _ = collector.await;
@@ -2489,6 +2492,7 @@ async fn resume_of_unverified_hint_task_stays_plain_get() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
+        ffmpeg_path: None,
     };
     run_download(params).await;
     let _ = collector.await;
@@ -2720,6 +2724,7 @@ async fn manual_real_url_hint_download() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
+        ffmpeg_path: None,
     };
     run_download(params).await;
     let _ = collector.await;

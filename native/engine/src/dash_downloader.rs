@@ -146,12 +146,17 @@ pub async fn run_dash_download(params: DownloadParams) {
     }
 }
 
+/// mux 使用的 ffmpeg 路径：manager 解析注入的组件路径，缺省回退 PATH 名。
+fn effective_ffmpeg(p: &DownloadParams) -> &Path {
+    p.ffmpeg_path.as_deref().unwrap_or(Path::new("ffmpeg"))
+}
+
 /// Attempt to mux separate audio and video files into a single MP4 using ffmpeg.
 ///
 /// DASH streams split audio and video into separate files.  This function
-/// invokes the system's `ffmpeg` (if available) to combine them into a single
-/// playable file.  If ffmpeg is not installed, returns an error — the caller
-/// should fall back to keeping both files.
+/// invokes the resolved `ffmpeg` binary (if available) to combine them into a
+/// single playable file.  If ffmpeg is not installed, returns an error — the
+/// caller should fall back to keeping both files.
 ///
 /// The muxing is done with `-c copy` (stream copy, no re-encoding) which is
 /// near-instant regardless of file size.
@@ -165,6 +170,7 @@ async fn mux_audio_video(
     audio_path: &Path,
     expected_bytes: u64,
     cancel_token: &tokio_util::sync::CancellationToken,
+    ffmpeg: &Path,
 ) -> Result<(), DownloadError> {
     use tokio::process::Command;
 
@@ -191,7 +197,7 @@ async fn mux_audio_video(
     // Spawn ffmpeg with -c copy (stream copy, no re-encoding).
     // `.kill_on_drop(true)` ensures if we're cancelled (select! drops the
     // future), the child process is killed automatically.
-    let output_fut = Command::new("ffmpeg")
+    let output_fut = Command::new(ffmpeg)
         .args([
             "-y", // overwrite output without asking
             "-i",
@@ -439,7 +445,15 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     if audio_bytes > 0 {
         let audio_path = build_audio_path(&dest_path);
         let expected = (video_bytes + audio_bytes).max(0) as u64;
-        match mux_audio_video(&dest_path, &audio_path, expected, &p.cancel_token).await {
+        match mux_audio_video(
+            &dest_path,
+            &audio_path,
+            expected,
+            &p.cancel_token,
+            effective_ffmpeg(p),
+        )
+        .await
+        {
             Ok(()) => {
                 log_info!(
                     "[dash] task {} audio+video muxed successfully, cleaning up audio track",
@@ -899,7 +913,15 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     let mut mux_succeeded = true;
     if audio_bytes > 0 {
         let expected = (video_bytes + audio_bytes).max(0) as u64;
-        match mux_audio_video(&dest_path, &audio_path, expected, &p.cancel_token).await {
+        match mux_audio_video(
+            &dest_path,
+            &audio_path,
+            expected,
+            &p.cancel_token,
+            effective_ffmpeg(p),
+        )
+        .await
+        {
             Ok(()) => {
                 log_info!(
                     "[dash] task {} track-pair muxed successfully, cleaning up audio track",

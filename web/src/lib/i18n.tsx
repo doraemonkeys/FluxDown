@@ -43,6 +43,7 @@ const BACKEND_KEYS: Record<string, I18nKey> = {
   'file not found on disk': 'backend.fileNotFoundOnDisk',
   'failed to persist task': 'backend.failedToPersistTask',
   'demo mode: only the designated demo file can be downloaded': 'backend.demoModeFileOnly',
+  'managed install not supported on this platform': 'backend.componentUnsupported',
 }
 
 /** 按语言本地化后端返回的 message；未识别的消息原样返回。 */

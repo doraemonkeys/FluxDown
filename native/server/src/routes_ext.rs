@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use axum::Router;
@@ -23,8 +24,11 @@ use axum::routing::{get, post, put};
 use fluxdown_api::auth::{check_management_auth, constant_time_eq};
 use fluxdown_api::service::ApiError;
 use fluxdown_api::types::{QueueDto, TaskDto};
+use fluxdown_engine::components::{ffmpeg_status, install_ffmpeg, list_versions, uninstall_ffmpeg};
 use fluxdown_engine::db::Db;
+use fluxdown_engine::downloader::build_client;
 use fluxdown_engine::log_info;
+use fluxdown_engine::proxy_config::ProxyConfig;
 use fluxdown_engine::selection::HostSelection;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -34,8 +38,9 @@ use utoipa::OpenApi;
 use crate::actor::ActorCmd;
 use crate::config::default_save_dir;
 use crate::wire::{
-    CreateQueueRequest, FsEntry, FsListResponse, MoveQueueRequest, ProxyTestRequest,
-    ProxyTestResponse, StatsResponse, TokenResponse, UpdateQueueRequest, WsClientMsg, WsServerMsg,
+    ComponentFfmpegStatus, ComponentVersions, CreateQueueRequest, FsEntry, FsListResponse,
+    InstallFfmpegRequest, MoveQueueRequest, ProxyTestRequest, ProxyTestResponse, StatsResponse,
+    TokenResponse, UpdateQueueRequest, WsClientMsg, WsServerMsg,
 };
 use crate::ws_hub::WsHub;
 
@@ -51,6 +56,11 @@ pub struct ServerState {
     pub version: String,
     /// 演示模式：`Some(url)` 时仅允许下载该 URL（`FLUXDOWN_DEMO_URL`）。
     pub demo_url: Option<String>,
+    /// 解析后的数据目录（与 `engine.data_dir` 一致），供组件 API
+    /// （ffmpeg 探测/安装）直接调用，无需经 actor。
+    pub data_dir: PathBuf,
+    /// ffmpeg 托管安装互斥标志：安装/更新期间为 `true`，防止并发重复安装。
+    pub ffmpeg_installing: Arc<AtomicBool>,
 }
 
 impl ServerState {
@@ -97,6 +107,10 @@ pub fn extra_router(state: ServerState) -> Router {
         .route(paths::PROXY_TEST, post(proxy_test))
         .route(paths::TOKEN_REGENERATE, post(token_regenerate))
         .route(paths::STATS, get(stats))
+        .route(paths::COMPONENT_FFMPEG, get(component_ffmpeg_status))
+        .route(paths::COMPONENT_FFMPEG_VERSIONS, get(component_ffmpeg_versions))
+        .route(paths::COMPONENT_FFMPEG_INSTALL, post(component_ffmpeg_install))
+        .route(paths::COMPONENT_FFMPEG_UNINSTALL, post(component_ffmpeg_uninstall))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let open = Router::new()
@@ -121,6 +135,10 @@ pub mod paths {
     pub const PROXY_TEST: &str = "/api/v1/proxy/test";
     pub const TOKEN_REGENERATE: &str = "/api/v1/token/regenerate";
     pub const STATS: &str = "/api/v1/stats";
+    pub const COMPONENT_FFMPEG: &str = "/api/v1/components/ffmpeg";
+    pub const COMPONENT_FFMPEG_VERSIONS: &str = "/api/v1/components/ffmpeg/versions";
+    pub const COMPONENT_FFMPEG_INSTALL: &str = "/api/v1/components/ffmpeg/install";
+    pub const COMPONENT_FFMPEG_UNINSTALL: &str = "/api/v1/components/ffmpeg/uninstall";
     pub const OPENAPI: &str = "/api/v1/openapi.json";
     pub const DOCS: &str = "/api/v1/docs";
 }
@@ -632,6 +650,118 @@ async fn stats(State(state): State<ServerState>) -> Result<Response, ApiError> {
 }
 
 // ---------------------------------------------------------------------------
+// 组件（v1 仅 ffmpeg）—— 不走 actor，直接持 Db + data_dir 调引擎 components API。
+// ---------------------------------------------------------------------------
+
+/// ffmpeg 组件状态探测（生效路径来源 / 版本 / 托管版本 / 系统路径）。
+#[utoipa::path(get, path = "/api/v1/components/ffmpeg", tag = "server",
+    responses((status = 200, body = ComponentFfmpegStatus)),
+    security(("bearer_token" = []), ("api_key" = []))
+)]
+async fn component_ffmpeg_status(State(state): State<ServerState>) -> Result<Response, ApiError> {
+    let status = ffmpeg_status(&state.db, &state.data_dir).await;
+    Ok(axum::Json(ComponentFfmpegStatus::from(status)).into_response())
+}
+
+/// 列出当前平台可安装的 ffmpeg 稳定版本（降序；数据来自 BtbN/FFmpeg-Builds latest Release）。
+#[utoipa::path(get, path = "/api/v1/components/ffmpeg/versions", tag = "server",
+    responses(
+        (status = 200, body = ComponentVersions),
+        (status = 500, description = "拉取版本列表失败（网络错误或当前平台无托管构建）")
+    ),
+    security(("bearer_token" = []), ("api_key" = []))
+)]
+async fn component_ffmpeg_versions(
+    State(_state): State<ServerState>,
+) -> Result<Response, ApiError> {
+    let client =
+        build_client(&ProxyConfig::default(), "").map_err(|e| ApiError::Internal(e.to_string()))?;
+    let versions = list_versions(&client)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(axum::Json(ComponentVersions::from(versions)).into_response())
+}
+
+/// 安装/更新托管 ffmpeg：立即返回 202，实际下载在后台执行——进度经 WS
+/// `componentProgress` 推送，完成/失败经 `componentResult` 推送。安装期间
+/// 重复请求返回 400（`ffmpeg_installing` 互斥标志去重）。
+#[utoipa::path(post, path = "/api/v1/components/ffmpeg/install", tag = "server",
+    request_body = InstallFfmpegRequest,
+    responses(
+        (status = 202, description = "已开始安装，经 WS 推送进度/结果"),
+        (status = 400, description = "已有安装任务在进行中")
+    ),
+    security(("bearer_token" = []), ("api_key" = []))
+)]
+async fn component_ffmpeg_install(
+    State(state): State<ServerState>,
+    axum::Json(req): axum::Json<InstallFfmpegRequest>,
+) -> Result<Response, ApiError> {
+    if state.ffmpeg_installing.swap(true, Ordering::SeqCst) {
+        return Err(ApiError::BadRequest(
+            "ffmpeg install already in progress".to_string(),
+        ));
+    }
+    let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
+    let hub = state.hub.clone();
+    let flag = state.ffmpeg_installing.clone();
+    tokio::spawn(async move {
+        let outcome: Result<(), String> = async {
+            let client = build_client(&ProxyConfig::default(), "").map_err(|e| e.to_string())?;
+            let hub_progress = hub.clone();
+            let progress = move |downloaded: u64, total: u64| {
+                hub_progress.broadcast(&WsServerMsg::ComponentProgress {
+                    component: "ffmpeg".to_string(),
+                    downloaded_bytes: downloaded as i64,
+                    total_bytes: total as i64,
+                });
+            };
+            install_ffmpeg(&db, &data_dir, &client, req.version.as_deref(), &progress)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        match outcome {
+            Ok(()) => hub.broadcast(&WsServerMsg::ComponentResult {
+                component: "ffmpeg".to_string(),
+                ok: true,
+                message: "installed".to_string(),
+            }),
+            Err(message) => {
+                log_info!("[components] ffmpeg install failed: {}", message);
+                hub.broadcast(&WsServerMsg::ComponentResult {
+                    component: "ffmpeg".to_string(),
+                    ok: false,
+                    message,
+                });
+            }
+        }
+        flag.store(false, Ordering::SeqCst);
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(serde_json::json!({ "success": true, "message": "installing" })),
+    )
+        .into_response())
+}
+
+/// 卸载托管安装（删除数据目录 `bin/ffmpeg[.exe]` 与版本记录；手动/系统路径不受影响）。
+#[utoipa::path(post, path = "/api/v1/components/ffmpeg/uninstall", tag = "server",
+    responses((status = 200, description = "已卸载")),
+    security(("bearer_token" = []), ("api_key" = []))
+)]
+async fn component_ffmpeg_uninstall(
+    State(state): State<ServerState>,
+) -> Result<Response, ApiError> {
+    uninstall_ffmpeg(&state.db, &state.data_dir)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(ok_response())
+}
+
+// ---------------------------------------------------------------------------
 // OpenAPI（核心 + 扩展合并）与 Scalar 文档
 // ---------------------------------------------------------------------------
 
@@ -658,6 +788,10 @@ async fn stats(State(state): State<ServerState>) -> Result<Response, ApiError> {
         proxy_test,
         token_regenerate,
         stats,
+        component_ffmpeg_status,
+        component_ffmpeg_versions,
+        component_ffmpeg_install,
+        component_ffmpeg_uninstall,
     ),
     components(schemas(
         crate::wire::WsServerMsg,
@@ -674,6 +808,9 @@ async fn stats(State(state): State<ServerState>) -> Result<Response, ApiError> {
         crate::wire::FsListResponse,
         crate::wire::StatsResponse,
         crate::wire::TokenResponse,
+        crate::wire::ComponentFfmpegStatus,
+        crate::wire::ComponentVersions,
+        crate::wire::InstallFfmpegRequest,
     )),
     tags((name = "server", description = "headless 服务器扩展端点"))
 )]

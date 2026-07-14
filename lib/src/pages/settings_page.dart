@@ -17,6 +17,7 @@ import '../i18n/locale_provider.dart';
 import '../models/custom_category.dart';
 import '../models/download_controller.dart';
 import '../models/download_queue.dart';
+import '../models/components_provider.dart';
 import '../models/plugin_provider.dart';
 import '../models/settings_provider.dart';
 import '../services/app_icon_service.dart';
@@ -47,6 +48,7 @@ enum SettingsCategory {
   proxy(icon: LucideIcons.globe),
   apiService(icon: LucideIcons.server),
   plugins(icon: LucideIcons.puzzle),
+  components(icon: LucideIcons.blocks),
   about(icon: LucideIcons.info);
 
   final IconData icon;
@@ -66,6 +68,7 @@ extension SettingsCategoryI18n on SettingsCategory {
       SettingsCategory.proxy => s.settingsCatProxy,
       SettingsCategory.apiService => s.settingsCatApiService,
       SettingsCategory.plugins => s.settingsCatPlugins,
+      SettingsCategory.components => s.settingsCatComponents,
       SettingsCategory.about => s.settingsCatAbout,
     };
   }
@@ -81,6 +84,7 @@ extension SettingsCategoryI18n on SettingsCategory {
       SettingsCategory.proxy => s.settingsCatProxyDesc,
       SettingsCategory.apiService => s.settingsCatApiServiceDesc,
       SettingsCategory.plugins => s.settingsCatPluginsDesc,
+      SettingsCategory.components => s.settingsCatComponentsDesc,
       SettingsCategory.about => s.settingsCatAboutDesc,
     };
   }
@@ -992,6 +996,9 @@ class _SettingsContentState extends State<_SettingsContent> {
                   SettingsCategory.plugins => PluginListView(
                     key: const ValueKey('plugins'),
                     provider: pluginProvider,
+                  ),
+                  SettingsCategory.components => const _ComponentsContent(
+                    key: ValueKey('components'),
                   ),
                   SettingsCategory.about => _AboutContent(
                     key: const ValueKey('about'),
@@ -4440,6 +4447,533 @@ class _CopyUserscriptButton extends StatelessWidget {
           const SizedBox(width: 4),
           Text(LocaleScope.of(context).apiServiceCopyScript),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 组件管理（v1 仅 ffmpeg）
+// ─────────────────────────────────────────────
+
+/// 组件设置分类 body：ffmpeg 状态展示 + 手动路径 + 托管安装/卸载。
+///
+/// ffmpeg 是可选的外部工具，由官方源按需下载，不随安装包分发；用于合并
+/// 音视频轨（DASH/轨对任务）。内部持有独立的 [ComponentsProvider] 实例
+/// （随本 widget 生命周期创建/销毁），进入本分类时自动请求一次状态 +
+/// 版本列表（懒加载，无需额外按钮）。
+class _ComponentsContent extends StatefulWidget {
+  const _ComponentsContent({super.key});
+
+  @override
+  State<_ComponentsContent> createState() => _ComponentsContentState();
+}
+
+class _ComponentsContentState extends State<_ComponentsContent> {
+  late final ComponentsProvider _provider;
+  late final TextEditingController _pathController;
+  late final FocusNode _pathFocusNode;
+  String? _selectedVersion;
+  int _lastInstallResultSeq = -1;
+  String _pendingOp = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _provider = ComponentsProvider();
+    _lastInstallResultSeq = _provider.installResultSeq;
+    _pathController = TextEditingController(text: _provider.manualPath);
+    _pathFocusNode = FocusNode();
+    _provider.addListener(_onProviderChanged);
+    _provider.requestStatus();
+    _provider.requestVersions();
+  }
+
+  @override
+  void dispose() {
+    _provider.removeListener(_onProviderChanged);
+    _provider.dispose();
+    _pathController.dispose();
+    _pathFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _onProviderChanged() {
+    if (!mounted) return;
+    // 手动路径框跟随 provider（ConfigLoaded 回流）刷新，但用户正在编辑
+    // 时不打断（与 UA/端口编辑器一致的失焦提交护栏）。
+    if (!_pathFocusNode.hasFocus &&
+        _pathController.text != _provider.manualPath) {
+      _pathController.text = _provider.manualPath;
+    }
+    if (_selectedVersion == null && _provider.latestStable.isNotEmpty) {
+      _selectedVersion = _provider.latestStable;
+    }
+    final seq = _provider.installResultSeq;
+    if (seq != _lastInstallResultSeq) {
+      _lastInstallResultSeq = seq;
+      final result = _provider.lastInstallResult;
+      if (result != null) _showInstallResultToast(result);
+      _pendingOp = '';
+    }
+    setState(() {});
+  }
+
+  void _showInstallResultToast(FfmpegInstallResult result) {
+    final s = LocaleScope.of(context);
+    final isUninstall = _pendingOp == 'uninstall';
+    if (result.ok) {
+      ShadSonner.of(context).show(
+        ShadToast(
+          title: Text(
+            isUninstall
+                ? s.componentsUninstallSuccess
+                : s.componentsInstallSuccess,
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    ShadSonner.of(context).show(
+      ShadToast.destructive(
+        title: Text(
+          isUninstall
+              ? s.componentsUninstallFailed(result.message)
+              : s.componentsInstallFailed(result.message),
+        ),
+      ),
+    );
+  }
+
+  void _saveManualPath() => _provider.saveManualPath(_pathController.text.trim());
+
+  void _clearManualPath() {
+    _pathController.clear();
+    _provider.saveManualPath('');
+  }
+
+  void _install() {
+    _pendingOp = 'install';
+    _provider.install(_selectedVersion ?? '');
+  }
+
+  void _confirmUninstall() {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    showShadDialog(
+      context: context,
+      barrierColor: c.dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog(
+        title: Text(s.componentsUninstallConfirmTitle),
+        description: Text(s.componentsUninstallConfirmMsg),
+        actions: [
+          ShadButton.outline(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(s.cancel),
+          ),
+          ShadButton.destructive(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _pendingOp = 'uninstall';
+              _provider.uninstall();
+            },
+            child: Text(s.componentsUninstallButton),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _sourceLabel(S s, String source) => switch (source) {
+    'manual' => s.componentsSourceManual,
+    'managed' => s.componentsSourceManaged,
+    _ => s.componentsSourceSystem,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final m = AppMetrics.of(context);
+    final status = _provider.status;
+    final hasManaged = status != null && status.managedVersion.isNotEmpty;
+
+    return _SettingCard(
+      label: s.componentsFfmpegTitle,
+      description: s.componentsFfmpegDesc,
+      vertical: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildStatusRow(c, s, status),
+          const SizedBox(height: 8),
+          _buildSystemPathRow(c, s, status),
+          const SizedBox(height: 16),
+          Divider(height: 1, color: m.borderFaint(c.border)),
+          const SizedBox(height: 16),
+          _buildManualPathSection(c, s),
+          const SizedBox(height: 16),
+          Divider(height: 1, color: m.borderFaint(c.border)),
+          const SizedBox(height: 16),
+          _buildInstallSection(context, c, s, hasManaged),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusRow(AppColors c, S s, FfmpegStatusReport? status) {
+    if (status == null) {
+      return Row(
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: c.textSecondary,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            s.componentsStatusLoading,
+            style: TextStyle(fontSize: 12, color: c.textMuted),
+          ),
+        ],
+      );
+    }
+    if (status.source == 'none') {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(LucideIcons.circleAlert, size: 14, color: AppColors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              s.componentsStatusNotFound,
+              style: TextStyle(fontSize: 12, color: c.textPrimary),
+            ),
+          ),
+        ],
+      );
+    }
+    final m = AppMetrics.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(LucideIcons.circleCheck, size: 14, color: AppColors.green),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  _ComponentBadge(
+                    text: _sourceLabel(s, status.source),
+                    color: c.accent,
+                    bg: m.subtle(c.accent),
+                  ),
+                  if (status.version.isNotEmpty)
+                    Text(
+                      'v${status.version}',
+                      style: TextStyle(fontSize: 11, color: c.textMuted),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                status.path,
+                style: TextStyle(fontSize: 11.5, color: c.textSecondary),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSystemPathRow(AppColors c, S s, FfmpegStatusReport? status) {
+    if (status == null) return const SizedBox.shrink();
+    final found = status.systemPath.isNotEmpty;
+    return Row(
+      children: [
+        Icon(LucideIcons.terminal, size: 12, color: c.textMuted),
+        const SizedBox(width: 6),
+        Text(
+          s.componentsSystemPathLabel,
+          style: TextStyle(fontSize: 11, color: c.textMuted),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            found ? status.systemPath : s.componentsSystemPathNotFound,
+            style: TextStyle(
+              fontSize: 11,
+              color: found ? c.textSecondary : c.textMuted,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildManualPathSection(AppColors c, S s) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          s.componentsManualPathLabel,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: c.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          s.componentsManualPathDesc,
+          style: TextStyle(fontSize: 11, color: c.textMuted),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: ShadInput(
+                controller: _pathController,
+                focusNode: _pathFocusNode,
+                placeholder: Text(s.componentsManualPathHint),
+                onSubmitted: (_) => _saveManualPath(),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ShadButton.outline(
+              size: ShadButtonSize.sm,
+              onPressed: _saveManualPath,
+              child: Text(s.componentsManualPathSave),
+            ),
+            const SizedBox(width: 4),
+            ShadTooltip(
+              builder: (_) => Text(s.componentsManualPathClear),
+              child: ShadIconButton.ghost(
+                icon: Icon(LucideIcons.x, size: 15, color: c.textSecondary),
+                onPressed: _clearManualPath,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildInstallSection(
+    BuildContext context,
+    AppColors c,
+    S s,
+    bool hasManaged,
+  ) {
+    final m = AppMetrics.of(context);
+    final p = _provider;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                s.componentsInstallSectionTitle,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: c.textPrimary,
+                ),
+              ),
+            ),
+            ShadTooltip(
+              builder: (_) => Text(s.componentsFetchVersionsButton),
+              child: ShadIconButton.ghost(
+                icon: p.versionsLoading
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: c.textSecondary,
+                        ),
+                      )
+                    : Icon(
+                        LucideIcons.refreshCw,
+                        size: 14,
+                        color: c.textSecondary,
+                      ),
+                onPressed: p.versionsLoading ? null : p.requestVersions,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          s.componentsInstallSectionDesc,
+          style: TextStyle(fontSize: 11, color: c.textMuted),
+        ),
+        const SizedBox(height: 8),
+        if (hasManaged) ...[
+          Text(
+            s.componentsManagedVersionLabel(p.status?.managedVersion ?? ''),
+            style: TextStyle(fontSize: 11, color: c.textMuted),
+          ),
+          const SizedBox(height: 8),
+        ],
+        if (p.versionsError.isNotEmpty) ...[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(LucideIcons.circleAlert, size: 13, color: AppColors.amber),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  s.componentsVersionsLoadFailed(p.versionsError),
+                  style: TextStyle(fontSize: 11.5, color: c.textPrimary),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        ShadSelect<String>(
+          enabled: p.versions.isNotEmpty && !p.installing,
+          initialValue: _selectedVersion,
+          placeholder: Text(
+            p.versionsLoading
+                ? s.componentsVersionsLoading
+                : s.componentsVersionSelectPlaceholder,
+          ),
+          options: p.versions
+              .map((v) => ShadOption(value: v, child: Text(v)))
+              .toList(),
+          selectedOptionBuilder: (context, value) => Text(value),
+          onChanged: (v) {
+            if (v != null) setState(() => _selectedVersion = v);
+          },
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            ShadButton(
+              size: ShadButtonSize.sm,
+              enabled: !p.installing,
+              onPressed: _install,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (p.installing) ...[
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(s.componentsInstalling),
+                  ] else ...[
+                    const Icon(
+                      LucideIcons.download,
+                      size: 13,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      hasManaged
+                          ? s.componentsReinstallButton
+                          : s.componentsInstallButton,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (hasManaged) ...[
+              const SizedBox(width: 8),
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                enabled: !p.installing,
+                onPressed: _confirmUninstall,
+                child: Text(s.componentsUninstallButton),
+              ),
+            ],
+          ],
+        ),
+        if (p.installing) ...[
+          const SizedBox(height: 10),
+          _buildProgress(c, m, s, p),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildProgress(AppColors c, AppMetrics m, S s, ComponentsProvider p) {
+    final total = p.totalBytes;
+    final downloaded = p.downloadedBytes;
+    final fraction = total > 0 ? (downloaded / total).clamp(0.0, 1.0) : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
+          borderRadius: m.brXs,
+          child: LinearProgressIndicator(
+            value: fraction,
+            backgroundColor: c.surface2,
+            valueColor: AlwaysStoppedAnimation<Color>(c.accent),
+            minHeight: 6,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          total > 0
+              ? '${(fraction! * 100).toStringAsFixed(1)}%  '
+                    '${UpdateService.formatBytes(downloaded)} / ${UpdateService.formatBytes(total)}'
+              : '${UpdateService.formatBytes(downloaded)} · ${s.componentsInstallUnknownSize}',
+          style: TextStyle(fontSize: 11, color: c.textMuted),
+        ),
+      ],
+    );
+  }
+}
+
+/// ffmpeg 来源标签（手动指定/组件安装/系统 PATH），复刻插件卡片的
+/// `_Badge`（`plugin_list_view.dart`，私有类型无法跨文件复用）。
+class _ComponentBadge extends StatelessWidget {
+  final String text;
+  final Color color;
+  final Color bg;
+
+  const _ComponentBadge({
+    required this.text,
+    required this.color,
+    required this.bg,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final m = AppMetrics.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(color: bg, borderRadius: m.brPill),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w500,
+          color: color,
+        ),
       ),
     );
   }

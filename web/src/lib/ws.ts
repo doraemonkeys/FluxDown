@@ -62,6 +62,14 @@ export const priorityStore = new Store<{ priorityTaskId: string; autoPausedCount
 /** 待处理的 HLS/BT 选择请求（对话框消费后置 null）。 */
 export const hlsRequestStore = new Store<{ taskId: string; options: HlsQualityOption[] } | null>(null)
 export const btRequestStore = new Store<{ taskId: string; files: BtFileEntry[] } | null>(null)
+/** 组件（ffmpeg）安装/下载进度，按 component 名索引。 */
+export const componentProgressStore = new Store<
+  Record<string, { downloadedBytes: number; totalBytes: number }>
+>({})
+/** 最近一次组件操作结果（安装/卸载完成后设置一次，供设置页展示提示）。 */
+export const componentResultStore = new Store<
+  { component: string; ok: boolean; message: string; at: number } | null
+>(null)
 
 // ---------------- 连接管理 ----------------
 
@@ -225,6 +233,21 @@ function dispatch(msg: WsServerMsg) {
       )
       break
     }
+    case 'componentProgress':
+      componentProgressStore.set((prev) => ({
+        ...prev,
+        [msg.component]: { downloadedBytes: msg.downloadedBytes, totalBytes: msg.totalBytes },
+      }))
+      break
+    case 'componentResult':
+      componentResultStore.set({ component: msg.component, ok: msg.ok, message: msg.message, at: Date.now() })
+      componentProgressStore.set((prev) => {
+        const next = { ...prev }
+        delete next[msg.component]
+        return next
+      })
+      void queryClientRef?.invalidateQueries({ queryKey: ['ffmpegStatus'] })
+      break
     case 'pong':
       connStore.set({ status: 'connected', rttMs: Math.round(performance.now() - pingSentAt) })
       break

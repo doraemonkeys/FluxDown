@@ -24,15 +24,17 @@ use crate::signals::{
     BatchControlTask, BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol,
     ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask,
     DeleteQueue, DetectSystemProxy, DownloadUpdate, Ed2kServerSubscriptionResult,
-    ExternalDownloadRequest, FileAssociationStatus, IgnorePluginRetry, InstallMarketPlugin,
-    InstallPlugin, InstallUpdate, MarketEntrySignal, MarketIndexLoaded, MoveTaskToQueue,
-    OpenFile, PluginList, PluginOpResult, ProbeTorrentMeta, ProxyTestResult, RequestAllQueues,
-    RequestAllTasks, RequestConfig, RequestMarketIndex, RequestPlugins,
-    RequestUpdateFailureMarker, RescanFiles, RevealFile, SaveConfig, SavePluginSettings,
-    SelectBtFiles, SelectHlsQuality, SetFileAssociation, SetPluginEnabled, SetPriorityTask,
-    SetUrlProtocol, SystemProxyInfo, TestProxyConnection, TrackerSubscriptionResult,
-    UninstallPlugin, UpdateCheckResult, UpdateEd2kServerSubscription, UpdateFailureMarker,
-    UpdateQueue, UpdateTrackerSubscription, UrlProtocolStatus,
+    ExternalDownloadRequest, FfmpegInstallProgress, FfmpegInstallResult, FfmpegStatusReport,
+    FfmpegVersionList, FileAssociationStatus, IgnorePluginRetry, InstallFfmpeg,
+    InstallMarketPlugin, InstallPlugin, InstallUpdate, MarketEntrySignal, MarketIndexLoaded,
+    MoveTaskToQueue, OpenFile, PluginList, PluginOpResult, ProbeTorrentMeta, ProxyTestResult,
+    RequestAllQueues, RequestAllTasks, RequestConfig, RequestFfmpegStatus,
+    RequestFfmpegVersions, RequestMarketIndex, RequestPlugins, RequestUpdateFailureMarker,
+    RescanFiles, RevealFile, SaveConfig, SavePluginSettings, SelectBtFiles, SelectHlsQuality,
+    SetFileAssociation, SetPluginEnabled, SetPriorityTask, SetUrlProtocol, SystemProxyInfo,
+    TestProxyConnection, TrackerSubscriptionResult, UninstallFfmpeg, UninstallPlugin,
+    UpdateCheckResult, UpdateEd2kServerSubscription, UpdateFailureMarker, UpdateQueue,
+    UpdateTrackerSubscription, UrlProtocolStatus,
 };
 use crate::updater;
 use fluxdown_api::server::{ApiServerConfig, ApiServerHandle, spawn_api_server};
@@ -495,6 +497,10 @@ pub async fn run(db_dir: PathBuf) {
     let ignore_plugin_retry_recv = IgnorePluginRetry::get_dart_signal_receiver();
     let request_market_index_recv = RequestMarketIndex::get_dart_signal_receiver();
     let install_market_plugin_recv = InstallMarketPlugin::get_dart_signal_receiver();
+    let req_ffmpeg_status_recv = RequestFfmpegStatus::get_dart_signal_receiver();
+    let req_ffmpeg_versions_recv = RequestFfmpegVersions::get_dart_signal_receiver();
+    let install_ffmpeg_recv = InstallFfmpeg::get_dart_signal_receiver();
+    let uninstall_ffmpeg_recv = UninstallFfmpeg::get_dart_signal_receiver();
 
     // Tracker 订阅刷新通道：后台 fetch 任务完成后把结果送回 actor 循环，
     // 由循环更新 BtConfig、失效 BT 会话并通知 Dart。
@@ -1410,6 +1416,125 @@ pub async fn run(db_dir: PathBuf) {
                     }
                 }
             }
+            // --- ffmpeg 组件管理（v1，见组件契约）：状态探测是本地进程
+            // 调用，快，直接分支内 await；版本列表/安装是网络 I/O（GitHub
+            // Release API + 下载归档，单个可达数十 MB），严禁在本 select!
+            // 分支内 await —— 会冻结整条命令面。分支内只做快速的 proxy
+            // client 构造（读 Db config，无网络），真正的网络请求丢进
+            // off-actor tokio::spawn，完成后直接在该任务里
+            // send_signal_to_dart()（RustSignal 可从任意任务发送）。---
+            Some(_) = req_ffmpeg_status_recv.recv() => {
+                let status =
+                    fluxdown_engine::components::ffmpeg_status(&engine.db, &engine.data_dir).await;
+                ffmpeg_status_report(status).send_signal_to_dart();
+            }
+            Some(_) = req_ffmpeg_versions_recv.recv() => {
+                let all_cfg = engine.db.get_all_config().await.unwrap_or_default();
+                let proxy_cfg = ProxyConfig::from_config_map(&all_cfg);
+                match fluxdown_engine::downloader::build_client(&proxy_cfg, "") {
+                    Ok(client) => {
+                        tokio::spawn(async move {
+                            match fluxdown_engine::components::list_versions(&client).await {
+                                Ok(v) => {
+                                    FfmpegVersionList {
+                                        ok: true,
+                                        message: String::new(),
+                                        versions: v.versions,
+                                        latest_stable: v.latest_stable,
+                                    }
+                                    .send_signal_to_dart();
+                                }
+                                Err(e) => {
+                                    FfmpegVersionList {
+                                        ok: false,
+                                        message: e.to_string(),
+                                        versions: Vec::new(),
+                                        latest_stable: String::new(),
+                                    }
+                                    .send_signal_to_dart();
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        FfmpegVersionList {
+                            ok: false,
+                            message: e.to_string(),
+                            versions: Vec::new(),
+                            latest_stable: String::new(),
+                        }
+                        .send_signal_to_dart();
+                    }
+                }
+            }
+            Some(signal) = install_ffmpeg_recv.recv() => {
+                let version = signal.message.version;
+                let all_cfg = engine.db.get_all_config().await.unwrap_or_default();
+                let proxy_cfg = ProxyConfig::from_config_map(&all_cfg);
+                match fluxdown_engine::downloader::build_client(&proxy_cfg, "") {
+                    Ok(client) => {
+                        let db = engine.db.clone();
+                        let data_dir = engine.data_dir.clone();
+                        tokio::spawn(async move {
+                            let version_opt =
+                                if version.is_empty() { None } else { Some(version.as_str()) };
+                            // 引擎已按 ~256KB 步进节流回调，无需在此额外去抖。
+                            let progress = |downloaded: u64, total: u64| {
+                                FfmpegInstallProgress {
+                                    downloaded_bytes: i64::try_from(downloaded).unwrap_or(i64::MAX),
+                                    total_bytes: i64::try_from(total).unwrap_or(i64::MAX),
+                                }
+                                .send_signal_to_dart();
+                            };
+                            let result = fluxdown_engine::components::install_ffmpeg(
+                                &db,
+                                &data_dir,
+                                &client,
+                                version_opt,
+                                &progress,
+                            )
+                            .await;
+                            match result {
+                                Ok(_) => {
+                                    FfmpegInstallResult { ok: true, message: String::new() }
+                                        .send_signal_to_dart();
+                                }
+                                Err(e) => {
+                                    FfmpegInstallResult { ok: false, message: e.to_string() }
+                                        .send_signal_to_dart();
+                                }
+                            }
+                            // 无论成败都重新探测一次：安装失败时 UI 需要看到
+                            // 回退状态（如此前已有的托管版本仍然生效）。
+                            let status =
+                                fluxdown_engine::components::ffmpeg_status(&db, &data_dir).await;
+                            ffmpeg_status_report(status).send_signal_to_dart();
+                        });
+                    }
+                    Err(e) => {
+                        FfmpegInstallResult { ok: false, message: e.to_string() }
+                            .send_signal_to_dart();
+                    }
+                }
+            }
+            Some(_) = uninstall_ffmpeg_recv.recv() => {
+                let result =
+                    fluxdown_engine::components::uninstall_ffmpeg(&engine.db, &engine.data_dir)
+                        .await;
+                match result {
+                    Ok(()) => {
+                        FfmpegInstallResult { ok: true, message: String::new() }
+                            .send_signal_to_dart();
+                    }
+                    Err(e) => {
+                        FfmpegInstallResult { ok: false, message: e.to_string() }
+                            .send_signal_to_dart();
+                    }
+                }
+                let status =
+                    fluxdown_engine::components::ffmpeg_status(&engine.db, &engine.data_dir).await;
+                ffmpeg_status_report(status).send_signal_to_dart();
+            }
             // --- Off-actor plugin resolve 回流(见插件系统契约一，关键：不接线
             // 会导致该宿主下 off-actor resolve 永不完成，下载卡死) ---
             Some(out) = resolve_rx.recv() => {
@@ -1465,6 +1590,20 @@ async fn notify_plugin_manager_unavailable(op: &str, identity: &str) {
     }
     .send_signal_to_dart();
     PluginList { plugins: Vec::new() }.send_signal_to_dart();
+}
+
+/// `fluxdown_engine::components::FfmpegStatus` → `FfmpegStatusReport` 信号。
+/// `source` 走 `FfmpegSource::as_str()` 保持与 server/web 端一致的 wire 字符串。
+fn ffmpeg_status_report(
+    status: fluxdown_engine::components::FfmpegStatus,
+) -> FfmpegStatusReport {
+    FfmpegStatusReport {
+        source: status.source.as_str().to_string(),
+        path: status.path,
+        version: status.version,
+        managed_version: status.managed_version,
+        system_path: status.system_path,
+    }
 }
 
 /// 处理管理 API 写命令：在 actor 事件循环内串行执行，完成后经 oneshot 回执。

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use fluxdown_api::types::{QueueDto, TaskDto};
+use fluxdown_engine::components::{FfmpegStatus, FfmpegVersions};
 use fluxdown_engine::model::{BtFileEntry, HlsQualityOption, QueuePosition, SegmentDetail};
 
 // ---------------------------------------------------------------------------
@@ -170,6 +171,18 @@ pub enum WsServerMsg {
     /// 插件表发生增删改（安装/卸载/启停/设置变更）；空载荷 ping，客户端收到后
     /// 全量 invalidate 插件列表查询。
     PluginsChanged {},
+    /// 组件安装/下载进度（`component` 固定 `"ffmpeg"`；`totalBytes=0` 表示未知）。
+    ComponentProgress {
+        component: String,
+        downloaded_bytes: i64,
+        total_bytes: i64,
+    },
+    /// 组件安装/卸载操作结果（成功/失败 + 说明）。
+    ComponentResult {
+        component: String,
+        ok: bool,
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +308,66 @@ pub struct TokenResponse {
     pub token: String,
     /// 生效说明（新 token 需重启服务器后生效）。
     pub note: String,
+}
+
+// ---------------------------------------------------------------------------
+// 组件（v1 仅 ffmpeg）
+// ---------------------------------------------------------------------------
+
+/// ffmpeg 组件状态（`GET /api/v1/components/ffmpeg`）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentFfmpegStatus {
+    /// 生效路径来源：`manual` / `managed` / `system` / `none`。
+    pub source: String,
+    /// 生效的可执行文件路径（`source == "none"` 时为空）。
+    pub path: String,
+    /// `ffmpeg -version` 探测到的版本串（探测失败/未找到时为空）。
+    pub version: String,
+    /// 托管安装记录的版本号（空 = 未托管安装）。
+    pub managed_version: String,
+    /// 系统 PATH 中探测到的 ffmpeg 路径（无论是否生效；空 = 无）。
+    pub system_path: String,
+}
+
+impl From<FfmpegStatus> for ComponentFfmpegStatus {
+    fn from(s: FfmpegStatus) -> Self {
+        Self {
+            source: s.source.as_str().to_string(),
+            path: s.path,
+            version: s.version,
+            managed_version: s.managed_version,
+            system_path: s.system_path,
+        }
+    }
+}
+
+/// ffmpeg 可安装版本列表（`GET /api/v1/components/ffmpeg/versions`）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentVersions {
+    /// 降序排列的稳定版本号。
+    pub versions: Vec<String>,
+    /// 最新稳定版（= `versions` 首个；空 = 解析失败）。
+    pub latest_stable: String,
+}
+
+impl From<FfmpegVersions> for ComponentVersions {
+    fn from(v: FfmpegVersions) -> Self {
+        Self {
+            versions: v.versions,
+            latest_stable: v.latest_stable,
+        }
+    }
+}
+
+/// 安装/更新 ffmpeg 请求（`POST /api/v1/components/ffmpeg/install`）。
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallFfmpegRequest {
+    /// 钉住的版本号；`None` = 安装/更新到最新稳定版。
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[cfg(test)]

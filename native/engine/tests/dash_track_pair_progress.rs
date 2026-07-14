@@ -137,6 +137,7 @@ async fn track_pair_reports_midway_progress_with_real_total() {
         audio_url: Some(format!("{base}/audio")),
         auto_max_connections: 0,
         use_server_time: false,
+        ffmpeg_path: None,
     };
 
     fluxdown_engine::dash_downloader::run_dash_download(params).await;

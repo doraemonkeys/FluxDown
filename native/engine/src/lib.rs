@@ -6,6 +6,7 @@
 
 pub mod bt_downloader;
 pub mod dash_downloader;
+pub mod components;
 pub mod data_dir;
 pub mod db;
 pub mod disk_space;
@@ -139,6 +140,9 @@ pub struct Engine {
     /// [`Engine::new`] 的实例相同 —— 供宿主收到"投递答案"信号时直接调用
     /// `engine.selector.provide_*(...)`,不必另行持有一份引用。
     pub selector: Arc<dyn HostSelection>,
+    /// 解析后的数据目录（含 override）。供宿主调用 `components::*` API
+    /// （ffmpeg 探测/安装）时传入,与引擎内部使用的目录保持一致。
+    pub data_dir: PathBuf,
 }
 
 impl Engine {
@@ -177,6 +181,7 @@ impl Engine {
                 speed_limit_bps: config.speed_limit_bps,
                 default_save_dir: config.default_save_dir,
                 app_data_dir: config.app_data_dir,
+                data_dir: data_dir.clone(),
                 bt_config: config.bt_config,
                 proxy_config: config.proxy_config,
                 user_agent: config.user_agent,
@@ -221,6 +226,7 @@ impl Engine {
             db,
             manager,
             selector,
+            data_dir,
         })
     }
 

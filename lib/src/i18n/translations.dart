@@ -1086,4 +1086,57 @@ class S {
   String get taskIgnorePluginRetryMsg => _r('taskIgnorePluginRetryMsg');
   String pluginAutoDisabledToast(String name) =>
       _r('pluginAutoDisabledToast', {'name': name});
+
+  // ─────────────────────────────────────────────
+  // 组件管理（v1 仅 ffmpeg）
+  // ─────────────────────────────────────────────
+  String get settingsCatComponents => _r('settingsCatComponents');
+  String get settingsCatComponentsDesc => _r('settingsCatComponentsDesc');
+
+  String get componentsFfmpegTitle => _r('componentsFfmpegTitle');
+  String get componentsFfmpegDesc => _r('componentsFfmpegDesc');
+  String get componentsStatusLoading => _r('componentsStatusLoading');
+  String get componentsStatusNotFound => _r('componentsStatusNotFound');
+  String get componentsSourceManual => _r('componentsSourceManual');
+  String get componentsSourceManaged => _r('componentsSourceManaged');
+  String get componentsSourceSystem => _r('componentsSourceSystem');
+  String get componentsSystemPathLabel => _r('componentsSystemPathLabel');
+  String get componentsSystemPathNotFound =>
+      _r('componentsSystemPathNotFound');
+
+  String get componentsManualPathLabel => _r('componentsManualPathLabel');
+  String get componentsManualPathDesc => _r('componentsManualPathDesc');
+  String get componentsManualPathHint => _r('componentsManualPathHint');
+  String get componentsManualPathSave => _r('componentsManualPathSave');
+  String get componentsManualPathClear => _r('componentsManualPathClear');
+
+  String get componentsInstallSectionTitle =>
+      _r('componentsInstallSectionTitle');
+  String get componentsInstallSectionDesc =>
+      _r('componentsInstallSectionDesc');
+  String get componentsFetchVersionsButton =>
+      _r('componentsFetchVersionsButton');
+  String get componentsVersionsLoading => _r('componentsVersionsLoading');
+  String componentsVersionsLoadFailed(String message) =>
+      _r('componentsVersionsLoadFailed', {'message': message});
+  String get componentsVersionSelectPlaceholder =>
+      _r('componentsVersionSelectPlaceholder');
+  String componentsManagedVersionLabel(String version) =>
+      _r('componentsManagedVersionLabel', {'version': version});
+  String get componentsInstallButton => _r('componentsInstallButton');
+  String get componentsReinstallButton => _r('componentsReinstallButton');
+  String get componentsUninstallButton => _r('componentsUninstallButton');
+  String get componentsInstalling => _r('componentsInstalling');
+  String get componentsInstallUnknownSize =>
+      _r('componentsInstallUnknownSize');
+  String get componentsInstallSuccess => _r('componentsInstallSuccess');
+  String componentsInstallFailed(String message) =>
+      _r('componentsInstallFailed', {'message': message});
+  String get componentsUninstallSuccess => _r('componentsUninstallSuccess');
+  String componentsUninstallFailed(String message) =>
+      _r('componentsUninstallFailed', {'message': message});
+  String get componentsUninstallConfirmTitle =>
+      _r('componentsUninstallConfirmTitle');
+  String get componentsUninstallConfirmMsg =>
+      _r('componentsUninstallConfirmMsg');
 }

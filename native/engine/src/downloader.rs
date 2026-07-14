@@ -249,6 +249,10 @@ pub struct DownloadParams {
     /// 快速 pause→resume 后旧 spawn 迟到的写入全类失效（含段 0），杜绝
     /// "迟到写落到重建后段行"的静默空洞。单流路径不使用。
     pub spawn_gen: i64,
+    /// mux（DASH/轨对）使用的 ffmpeg 路径，由 manager 经
+    /// `components::resolve_ffmpeg` 解析注入（manual → managed → system）。
+    /// `None` = 未解析到，dash 下载器回退 `Command::new("ffmpeg")` 走 PATH。
+    pub ffmpeg_path: Option<std::path::PathBuf>,
 }
 
 /// 将浏览器扩展捕获的额外 HTTP 头应用到请求构建器上。

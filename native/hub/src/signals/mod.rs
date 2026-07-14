@@ -982,3 +982,72 @@ impl From<fluxdown_engine::plugin::MarketEntry> for MarketEntrySignal {
         }
     }
 }
+
+// ========== Component management signals (v1: ffmpeg only) ==========
+
+/// Request the current ffmpeg component status (Dart → Rust, sent when the
+/// components settings page opens). Local process probe — fast enough to
+/// `.await` directly inside the `download_actor` `select!` branch.
+#[derive(Deserialize, DartSignal)]
+pub struct RequestFfmpegStatus {}
+
+/// Request the list of installable ffmpeg versions (Dart → Rust). Network
+/// I/O (GitHub release API) — `download_actor` MUST NOT `.await` it inside
+/// the `select!` branch; it hands off to an off-actor `tokio::spawn` task.
+#[derive(Deserialize, DartSignal)]
+pub struct RequestFfmpegVersions {}
+
+/// Install (or reinstall/update) the managed ffmpeg build (Dart → Rust).
+/// `version` empty = latest stable. Same off-actor dispatch rule as
+/// [`RequestFfmpegVersions`] (downloads a multi-MB archive).
+#[derive(Deserialize, DartSignal)]
+pub struct InstallFfmpeg {
+    pub version: String,
+}
+
+/// Uninstall the managed ffmpeg build (Dart → Rust). No network I/O —
+/// manual/system paths are unaffected.
+#[derive(Deserialize, DartSignal)]
+pub struct UninstallFfmpeg {}
+
+/// ffmpeg component status snapshot (Rust → Dart), sent after
+/// [`RequestFfmpegStatus`] and after every install/uninstall completes.
+/// `source` mirrors `fluxdown_engine::components::FfmpegSource::as_str()`
+/// ("manual"/"managed"/"system"/"none").
+#[derive(Serialize, RustSignal)]
+pub struct FfmpegStatusReport {
+    pub source: String,
+    pub path: String,
+    pub version: String,
+    pub managed_version: String,
+    pub system_path: String,
+}
+
+/// Installable ffmpeg version list result (Rust → Dart), sent after
+/// [`RequestFfmpegVersions`]. `versions` is empty and `message` carries the
+/// error text on failure (network error / unsupported platform).
+#[derive(Serialize, RustSignal)]
+pub struct FfmpegVersionList {
+    pub ok: bool,
+    pub message: String,
+    pub versions: Vec<String>,
+    pub latest_stable: String,
+}
+
+/// ffmpeg managed install download progress (Rust → Dart), sent while
+/// [`InstallFfmpeg`] is in flight. `total_bytes == 0` means the total size
+/// is unknown (indeterminate progress). Throttled by the engine (~256KB
+/// steps) — safe to send on every event without extra debouncing.
+#[derive(Serialize, RustSignal)]
+pub struct FfmpegInstallProgress {
+    pub downloaded_bytes: i64,
+    pub total_bytes: i64,
+}
+
+/// Result of an [`InstallFfmpeg`]/[`UninstallFfmpeg`] operation (Rust →
+/// Dart). Always immediately followed by a fresh [`FfmpegStatusReport`].
+#[derive(Serialize, RustSignal)]
+pub struct FfmpegInstallResult {
+    pub ok: bool,
+    pub message: String,
+}

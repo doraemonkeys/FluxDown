@@ -99,6 +99,8 @@ export type WsServerMsg =
   | { type: 'btSelectionRequest'; taskId: string; files: BtFileEntry[] }
   | { type: 'pluginsChanged' }
   | { type: 'pluginAutoDisabled'; identity: string; reason: string }
+  | { type: 'componentProgress'; component: string; downloadedBytes: number; totalBytes: number }
+  | { type: 'componentResult'; component: string; ok: boolean; message: string }
   | { type: 'pong' }
 
 export interface TaskProgressMsg {
@@ -186,6 +188,28 @@ export interface StatsResponse {
 export interface TokenResponse {
   token: string
   note: string
+}
+
+// ---- 组件（v1 仅 ffmpeg） ----
+
+/** ffmpeg 路径来源：manual=手动指定 managed=托管安装 system=系统 PATH none=未找到。 */
+export type FfmpegSource = 'manual' | 'managed' | 'system' | 'none'
+
+export interface ComponentFfmpegStatus {
+  source: FfmpegSource
+  path: string
+  version: string
+  managedVersion: string
+  systemPath: string
+}
+
+export interface ComponentVersions {
+  versions: string[]
+  latestStable: string
+}
+
+export interface InstallFfmpegRequest {
+  version?: string
 }
 
 export type ConfigMap = Record<string, string>
