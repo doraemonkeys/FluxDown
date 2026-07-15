@@ -656,6 +656,7 @@
     "sponsor.wall.link": "スポンサーウォールを見る",
     "sponsor.wall.thanksNote": "あなたのスポンサーはまもなくスポンサーウォールに表示されます。",
     "sponsor.list.title": "最近のスポンサー",
+    "sponsor.list.featured": "特別な感謝",
     "board.tabLabel": "Issueトラッカー",
     "board.loading": "ボードを読み込み中...",
     "board.error": "ボードの読み込みに失敗しました。もう一度お試しください。",

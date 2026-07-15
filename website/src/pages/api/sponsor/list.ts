@@ -2,7 +2,7 @@
  * GET /api/sponsor/list
  *
  * 从 GitHub 赞助名录 issue（SPONSOR_WALL_REPO#SPONSOR_WALL_ISSUE）的评论
- * 解析赞助者，返回「最新 20 位」并按 金额降序 → 时间降序 排列。
+ * 解析赞助者，返回「最新 20 位」并按 赞助时间降序 排列。
  *
  * 评论均由本站/迁移脚本生成，格式固定：
  *   ### [<img src="AVATAR" …>] 💖 NAME
@@ -105,11 +105,10 @@ async function fetchSponsors(): Promise<WallSponsor[]> {
     if (comments.length < 100) break;
   }
 
-  // 最新 20 位（按赞助时间），再按 金额降序 → 时间降序 展示。
+  // 最新 20 位，按赞助时间降序展示（名副其实的「最新赞助」，不按金额排序）。
   return all
     .sort((a, b) => b.ts - a.ts)
     .slice(0, LATEST_COUNT)
-    .sort((a, b) => b.amountCents - a.amountCents || b.ts - a.ts)
     .map(({ ts: _ts, ...s }) => s);
 }
 

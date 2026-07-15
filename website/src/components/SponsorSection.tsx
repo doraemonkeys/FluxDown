@@ -93,7 +93,7 @@ export default function SponsorSection({
     wallInfo.current = { name, message };
   }, [name, message]);
 
-  // Latest sponsors from the GitHub wall (amount desc, then newest).
+  // Latest sponsors from the GitHub wall (newest first).
   const [sponsors, setSponsors] = useState<WallSponsor[]>([]);
   useEffect(() => {
     let alive = true;
@@ -107,6 +107,15 @@ export default function SponsorSection({
       alive = false;
     };
   }, []);
+
+  // Featured: top 3 by amount ("special thanks"); rest: newest first.
+  const featuredIdx = sponsors
+    .map((_, i) => i)
+    .sort((a, b) => sponsors[b]!.amountCents - sponsors[a]!.amountCents)
+    .slice(0, 3);
+  const featuredSet = new Set(featuredIdx);
+  const featured = featuredIdx.map((i) => sponsors[i]!);
+  const rest = sponsors.filter((_, i) => !featuredSet.has(i));
 
   // Effective amount in yuan (custom overrides preset when valid).
   const customNum = parseFloat(custom);
@@ -382,41 +391,86 @@ export default function SponsorSection({
             <h3 className="text-center text-sm font-semibold text-dark-text mb-4">
               {t("sponsor.list.title")}
             </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {sponsors.map((s, i) => (
-                <div
-                  key={`${s.name}-${s.date}-${i}`}
-                  className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-dark-border/40 bg-dark-surface1/40"
-                >
-                  {s.avatar ? (
-                    <img
-                      src={s.avatar}
-                      alt=""
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="w-8 h-8 rounded-full object-cover shrink-0"
-                    />
-                  ) : (
-                    <span
-                      className={`w-8 h-8 rounded-full shrink-0 inline-flex items-center justify-center text-xs font-semibold ${avatarColor(s.name)}`}
+            {featured.length > 0 && (
+              <>
+                <p className="text-center text-xs text-dark-text-muted mb-2.5">
+                  {t("sponsor.list.featured")}
+                </p>
+                <div className="grid grid-cols-3 gap-2.5 sm:gap-3 mb-4">
+                  {featured.map((s, i) => (
+                    <div
+                      key={`feat-${s.name}-${s.date}-${i}`}
+                      className="flex flex-col items-center text-center rounded-2xl border border-dark-border/40 bg-gradient-to-b from-pink-500/[0.05] to-dark-surface1/40 px-2 pt-4 pb-3.5"
                     >
-                      {s.name.slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
-                  <span
-                    className="flex-1 min-w-0 truncate text-sm text-dark-text-secondary"
-                    title={s.name}
-                  >
-                    {s.name}
-                  </span>
-                  {s.amountCents > 0 && (
-                    <span className="shrink-0 text-xs font-semibold text-pink-400">
-                      {fmtCents(s.amountCents)}
-                    </span>
-                  )}
+                      {s.avatar ? (
+                        <img
+                          src={s.avatar}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="w-14 h-14 rounded-full object-cover ring-2 ring-pink-400/25"
+                        />
+                      ) : (
+                        <span
+                          className={`w-14 h-14 rounded-full inline-flex items-center justify-center text-base font-semibold ring-2 ring-pink-400/25 ${avatarColor(s.name)}`}
+                        >
+                          {s.name.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                      <span
+                        className="mt-2 max-w-full truncate text-xs sm:text-sm font-medium text-dark-text"
+                        title={s.name}
+                      >
+                        {s.name}
+                      </span>
+                      {s.amountCents > 0 && (
+                        <span className="mt-0.5 text-xs text-dark-text-muted">
+                          {fmtCents(s.amountCents)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </>
+            )}
+
+            {rest.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {rest.map((s, i) => (
+                  <div
+                    key={`${s.name}-${s.date}-${i}`}
+                    className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-dark-border/40 bg-dark-surface1/40"
+                  >
+                    {s.avatar ? (
+                      <img
+                        src={s.avatar}
+                        alt=""
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        className="w-8 h-8 rounded-full object-cover shrink-0"
+                      />
+                    ) : (
+                      <span
+                        className={`w-8 h-8 rounded-full shrink-0 inline-flex items-center justify-center text-xs font-semibold ${avatarColor(s.name)}`}
+                      >
+                        {s.name.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <span
+                      className="flex-1 min-w-0 truncate text-sm text-dark-text-secondary"
+                      title={s.name}
+                    >
+                      {s.name}
+                    </span>
+                    {s.amountCents > 0 && (
+                      <span className="shrink-0 text-xs text-dark-text-muted">
+                        {fmtCents(s.amountCents)}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             <p className="mt-4 text-center">
               <a
                 href={SPONSOR_WALL_URL}

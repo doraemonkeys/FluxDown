@@ -656,6 +656,7 @@
   "sponsor.wall.link": "View sponsor wall",
   "sponsor.wall.thanksNote": "Your sponsorship will appear on the sponsor wall shortly.",
   "sponsor.list.title": "Recent Sponsors",
+  "sponsor.list.featured": "Special thanks",
   "board.tabLabel": "Issue Tracker",
   "board.loading": "Loading board...",
   "board.error": "Failed to load board. Please try again.",

@@ -632,6 +632,7 @@
     "sponsor.wall.link": "查看赞助名录",
     "sponsor.wall.thanksNote": "您的赞助将很快出现在赞助名录中。",
     "sponsor.list.title": "最新赞助",
+    "sponsor.list.featured": "特别感谢",
     "footer.desc": "基于 Rust 构建的下载管理器，支持 HTTP/FTP/BT 多协议加速、智能分段、浏览器无缝集成。极速可靠，零广告，永久免费。",
     "footer.product": "产品",
     "footer.features": "功能特性",
