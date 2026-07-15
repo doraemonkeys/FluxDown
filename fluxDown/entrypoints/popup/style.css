@@ -106,7 +106,7 @@ select,
 
 body {
   width: 360px;
-  max-height: 640px; /* 安全上限，实际高度随内容撑开；任务列表超出后仅任务区内部滚动 */
+  height: 600px;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
@@ -118,9 +118,24 @@ body {
 .container {
   display: flex;
   flex-direction: column;
-  max-height: 640px;
+  height: 600px;
   box-sizing: border-box;
   padding: 14px;
+}
+
+/* Header + top tabs stay pinned; only the active pane scrolls */
+.header,
+.top-tabs,
+.footer {
+  flex-shrink: 0;
+}
+
+/* Active pane fills remaining height and owns the middle scroll region */
+.tab-pane:not(.hidden) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ===== Header ===== */
@@ -297,6 +312,25 @@ body {
 }
 
 /* ===== Switch Section ===== */
+.switch-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-right: -6px;
+  padding-right: 6px;
+}
+
+.switch-section::-webkit-scrollbar {
+  width: 4px;
+}
+.switch-section::-webkit-scrollbar-track {
+  background: transparent;
+}
+.switch-section::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
 .switch-section .row {
   align-items: center;
 }
@@ -355,20 +389,19 @@ body {
   transform: translateX(18px);
 }
 
-/* ===== Compressed Stats Line ===== */
+/* ===== Compressed Stats Line (footer center) ===== */
 .stats-line {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  width: 100%;
-  padding: 6px 4px;
-  margin-top: 4px;
+  padding: 3px 6px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-size: 11px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -628,11 +661,14 @@ select:focus {
 .task-section {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 8px 8px 6px;
 }
 
 .task-scroll {
-  max-height: 300px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   margin-right: -6px;
   padding-right: 6px;
@@ -683,12 +719,13 @@ select:focus {
   color: var(--text-secondary);
 }
 
-/* --- Quick download (empty state) --- */
+/* --- Quick download (pinned top bar of Tasks pane) --- */
 .quick-download-row {
   display: flex;
   gap: 6px;
   width: 100%;
-  margin-top: 8px;
+  flex-shrink: 0;
+  margin-bottom: 8px;
 }
 
 .quick-download-row input {
@@ -1105,6 +1142,8 @@ select:focus {
 .resource-section {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 8px 8px 6px;
 }
 
@@ -1112,6 +1151,7 @@ select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  flex-shrink: 0;
   margin-bottom: 6px;
 }
 
@@ -1142,7 +1182,8 @@ select:focus {
 }
 
 .res-scroll {
-  max-height: 300px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   margin-right: -6px;
   padding-right: 6px;
@@ -1359,6 +1400,7 @@ select:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-shrink: 0;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid var(--border);

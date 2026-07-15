@@ -72,6 +72,7 @@ const downloadingListEl = $('#downloadingList')!;
 const completedListEl = $('#completedList')!;
 const startAppBtn = $<HTMLButtonElement>('#startAppBtn');
 const quickDownloadInput = $<HTMLInputElement>('#quickDownloadInput');
+const quickDownloadRow = $('#quickDownloadRow')!;
 const quickDownloadBtn = $<HTMLButtonElement>('#quickDownloadBtn');
 
 // 顶部 tab
@@ -578,6 +579,7 @@ startAppBtn.addEventListener('click', () => {
 });
 
 function renderTaskPanel(connected: boolean, tasks: TaskBrief[]): void {
+  quickDownloadRow.classList.toggle('hidden', !connected);
   if (!connected) {
     taskDisconnectedEl.classList.remove('hidden');
     taskEmptyEl.classList.add('hidden');
@@ -708,6 +710,8 @@ function switchPane(pane: PaneKey): void {
   for (const [key, el] of Object.entries(PANES)) {
     el.classList.toggle('hidden', key !== pane);
   }
+  // 统计行属任务范畴，仅在任务 pane 显示（位于 footer，不占内容区）
+  statsLine.classList.toggle('hidden', pane !== 'tasks');
   // 任务轮询只在任务 pane 可见时跑；资源 pane 每次进入取一次新快照
   if (pane === 'tasks') {
     startPolling();
