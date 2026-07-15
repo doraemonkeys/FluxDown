@@ -3,7 +3,7 @@ title: Web 界面
 description: 用服务器自带的浏览器界面登录并管理下载。
 section: headless-server
 order: 3
-sourceHash: "50cbeb4cbb24"
+sourceHash: "1606eb509dc8"
 ---
 
 服务器跑起来后(见[服务器部署](/docs/zh/headless-server/setup/)),在浏览器里打开它的地址即可,例如 `http://<host>:17800/`。它的任务管理体验与桌面客户端一致,只是为远程、多会话场景做了适配。
@@ -111,7 +111,7 @@ fxd_bfc6b03e8e494ec8907415a2e8a0b21b
 | BitTorrent | `librqbit` 引擎参数(DHT、Tracker 等),服务器端。 |
 | 代理 | 服务器端出站代理。与桌面客户端不同,"系统代理"需要读取**服务器**的注册表/系统设置,因此这里实际可用的是手动配置。 |
 | 安全与访问 | 访问令牌(查看/复制/重新生成),aria2 兼容 RPC(`/jsonrpc`)与脚本接管入口(`/download`)的开关,以及当前 WebSocket 连接状态。 |
-| 关于 | 服务器版本与构建信息。 |
+| 关于 | 服务器版本、更新渠道、服务器端**日志目录**(带复制按钮)与一键**导出日志为 ZIP**下载(远程/NAS 排障很方便),以及退出登录。 |
 
 每个分类对应桌面客户端设置页里同名分区、共用相同的底层配置键;完整字段列表与含义见桌面客户端文档的[设置](/docs/zh/getting-started/settings/)页。
 

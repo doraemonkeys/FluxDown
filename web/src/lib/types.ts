@@ -214,6 +214,17 @@ export interface TokenResponse {
   note: string
 }
 
+export interface LogFileDto {
+  name: string
+  size: number
+}
+
+export interface LogsResponse {
+  /** 日志目录绝对路径（服务器文件系统）。 */
+  dir: string
+  files: LogFileDto[]
+}
+
 // ---- 组件（ffmpeg / yt-dlp） ----
 
 /** ffmpeg 路径来源：manual=手动指定 managed=托管安装 system=系统 PATH none=未找到。 */

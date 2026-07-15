@@ -89,6 +89,7 @@ svg { display: block; }
 .btn.danger.solid:hover { background: var(--danger); border-color: var(--danger); filter: brightness(1.06); }
 .btn.sm { height: 28px; padding: 0 11px; font-size: 12px; border-radius: 7px; }
 .btn.block { width: 100%; justify-content: center; height: 38px; }
+.btn:disabled, .btn.disabled { opacity: .5; cursor: not-allowed; }
 
 .icon-btn {
   width: 34px; height: 34px; border-radius: 8px;

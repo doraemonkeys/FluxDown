@@ -110,7 +110,7 @@ The settings screen (gear icon in the top bar) has seven categories:
 | BitTorrent | `librqbit` engine parameters (DHT, trackers, etc.), server-side. |
 | Proxy | Server-side outbound proxy. Unlike the desktop app, "System proxy" would require reading the *server's* registry/settings, so manual proxy configuration is the practical choice here. |
 | Security & Access | Access token (view/copy/regenerate), and toggles for the aria2-compatible RPC (`/jsonrpc`) and script takeover (`/download`) entry points, plus the current WebSocket connection status. |
-| About | Server version and build info. |
+| About | Server version, update channel, the server-side **log directory** (with a copy button) and a one-click **Export logs as ZIP** download — handy for remote/NAS troubleshooting — plus sign-out. |
 
 Each category mirrors a section of the desktop app's settings with the same underlying config keys; for the full list of fields and their meaning see [Settings](/docs/en/getting-started/settings/) in the desktop client docs.
 

@@ -321,11 +321,24 @@ fn parse_log_name(name: &str) -> Option<(&str, u32)> {
 //  公开 API
 // ══════════════════════════════════════════════════
 
-/// 初始化全局日志。应在 Rust runtime 启动时调用一次。
+/// 初始化全局日志（平台自动探测日志目录）。应在 Rust runtime 启动时调用一次。
 ///
 /// 自动清理 7 天前的日志文件、执行总量超量清理，并写入 session header。
 pub fn init() {
-    let log_dir = resolve_log_dir();
+    init_at(resolve_log_dir());
+}
+
+/// 用显式数据目录初始化全局日志：日志写入 `<data_dir>/logs`。
+///
+/// 供 headless server 使用——它按 `FLUXDOWN_DATA_DIR` 解析数据目录，日志须
+/// 随之落到同一（可能是挂载卷的）目录，而非平台默认的 HOME 路径。Docker
+/// 部署（`FLUXDOWN_DATA_DIR=/data`）下日志因此持久化到 `/data/logs`。
+pub fn init_with_dir(data_dir: &std::path::Path) {
+    init_at(data_dir.join("logs"));
+}
+
+/// [`init`] / [`init_with_dir`] 的共用实现，日志目录显式传入。
+fn init_at(log_dir: PathBuf) {
     let logger = AppLogger::new(log_dir);
     logger.cleanup_old_logs(LOG_RETENTION_DAYS);
     if LOGGER.set(logger).is_ok()
@@ -376,6 +389,77 @@ pub fn write_error(message: &str) {
     }
     #[cfg(debug_assertions)]
     eprintln!("{message}");
+}
+
+/// 单个日志文件的元信息（列举与导出用）。
+pub struct LogFileMeta {
+    /// 文件名（`fluxdown_YYYY-MM-DD.log` / `fluxdown_YYYY-MM-DD.N.log`）。
+    pub name: String,
+    /// 文件字节大小。
+    pub size: u64,
+}
+
+/// 当前日志目录的绝对路径。初始化后返回真实目录，否则回退平台解析。
+pub fn log_dir() -> PathBuf {
+    LOGGER
+        .get()
+        .map(|l| l.log_dir.clone())
+        .unwrap_or_else(resolve_log_dir)
+}
+
+/// 列举日志目录下全部日志文件，按文件名升序（即日期 + 分卷序）。
+///
+/// 只识别 `fluxdown_YYYY-MM-DD[.N].log` 命名的文件，忽略目录内其它内容。
+pub fn list_log_files() -> Vec<LogFileMeta> {
+    list_log_files_in(&log_dir())
+}
+
+/// [`list_log_files`] 的纯实现，目录显式传入以便测试。
+fn list_log_files_in(dir: &std::path::Path) -> Vec<LogFileMeta> {
+    let mut files: Vec<LogFileMeta> = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if parse_log_name(&name).is_none() {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        files.push(LogFileMeta { name, size });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    files
+}
+
+/// 将日志目录下全部日志文件打包为 zip 字节（deflate 压缩），供 headless
+/// server 的「导出日志」下载端点使用。桌面端另有 Dart 侧 `LogService.exportLogs`。
+///
+/// 需 `components` 或 `plugins` feature（`zip` 依赖随之启用）；导出瞬间被清理
+/// 的单个文件会被跳过，不使整个导出失败。
+#[cfg(any(feature = "components", feature = "plugins"))]
+pub fn export_logs_zip() -> Result<Vec<u8>, String> {
+    export_logs_zip_from(&log_dir())
+}
+
+/// [`export_logs_zip`] 的纯实现，目录显式传入以便测试。
+#[cfg(any(feature = "components", feature = "plugins"))]
+fn export_logs_zip_from(dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+
+    let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for meta in list_log_files_in(dir) {
+        let Ok(data) = fs::read(dir.join(&meta.name)) else {
+            continue;
+        };
+        zw.start_file(meta.name.as_str(), opts)
+            .map_err(|e| e.to_string())?;
+        zw.write_all(&data).map_err(|e| e.to_string())?;
+    }
+    let cursor = zw.finish().map_err(|e| e.to_string())?;
+    Ok(cursor.into_inner())
 }
 
 // ══════════════════════════════════════════════════
@@ -430,8 +514,19 @@ pub use crate::log_error;
 pub use crate::log_info;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::parse_log_name;
+    use super::{list_log_files_in, parse_log_name};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("fluxdown_logtest_{tag}_{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn parse_plain_daily_file() {
@@ -455,5 +550,67 @@ mod tests {
         assert_eq!(parse_log_name("fluxdown_backup.log"), None);
         assert_eq!(parse_log_name("fluxdown_2026-06-10.abc.log"), None);
         assert_eq!(parse_log_name("other_2026-06-10.log"), None);
+    }
+
+    #[test]
+    fn list_log_files_filters_non_logs_and_sorts_ascending() {
+        let dir = temp_dir("list");
+        std::fs::write(dir.join("fluxdown_2026-01-02.log"), b"b").unwrap();
+        std::fs::write(dir.join("fluxdown_2026-01-01.log"), b"aa").unwrap();
+        std::fs::write(dir.join("fluxdown_2026-01-01.1.log"), b"ccc").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"ignore me").unwrap();
+
+        let files = list_log_files_in(&dir);
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        // 非日志文件被过滤；其余按文件名升序（日期 + 分卷序）。
+        assert_eq!(
+            names,
+            [
+                "fluxdown_2026-01-01.1.log",
+                "fluxdown_2026-01-01.log",
+                "fluxdown_2026-01-02.log",
+            ]
+        );
+        // 大小如实反映内容字节数。
+        assert_eq!(files[0].size, 3);
+        assert_eq!(files[1].size, 2);
+        assert_eq!(files[2].size, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(any(feature = "components", feature = "plugins"))]
+    fn export_logs_zip_packs_only_log_files_with_content() {
+        use std::io::{Cursor, Read};
+
+        let dir = temp_dir("zip");
+        std::fs::write(dir.join("fluxdown_2026-01-01.log"), b"hello").unwrap();
+        std::fs::write(dir.join("fluxdown_2026-01-02.log"), b"world!!").unwrap();
+        std::fs::write(dir.join("notes.md"), b"skip").unwrap();
+
+        let bytes = super::export_logs_zip_from(&dir).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        // 仅两个日志文件入包，非日志被排除。
+        assert_eq!(zip.len(), 2);
+
+        let mut got = std::collections::BTreeMap::new();
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).unwrap();
+            let mut content = String::new();
+            entry.read_to_string(&mut content).unwrap();
+            got.insert(entry.name().to_string(), content);
+        }
+        assert_eq!(
+            got.get("fluxdown_2026-01-01.log").map(String::as_str),
+            Some("hello")
+        );
+        assert_eq!(
+            got.get("fluxdown_2026-01-02.log").map(String::as_str),
+            Some("world!!")
+        );
+        assert!(!got.contains_key("notes.md"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

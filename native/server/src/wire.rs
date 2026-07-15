@@ -368,6 +368,24 @@ pub struct StatsResponse {
     pub demo_url: String,
 }
 
+/// 单个日志文件（`GET /api/v1/logs` 列表项）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFileDto {
+    pub name: String,
+    pub size: i64,
+}
+
+/// 日志目录与文件清单（`GET /api/v1/logs`，前端「关于」页展示 + 导出入口）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsResponse {
+    /// 日志目录绝对路径（NAS 用户据此在服务器文件系统定位日志）。
+    pub dir: String,
+    /// 全部日志文件（按日期 + 分卷序升序）。
+    pub files: Vec<LogFileDto>,
+}
+
 /// token 重新生成响应（`POST /api/v1/token/regenerate`）。
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

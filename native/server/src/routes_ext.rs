@@ -42,9 +42,9 @@ use crate::actor::ActorCmd;
 use crate::config::default_save_dir;
 use crate::wire::{
     ComponentFfmpegStatus, ComponentVersions, ComponentYtdlpStatus, CreateQueueRequest, FsEntry,
-    FsListResponse, InstallFfmpegRequest, MoveQueueRequest, ProxyTestRequest, ProxyTestResponse,
-    StatsResponse, TokenResponse, TrackerSubRefreshResponse, UpdateQueueRequest, WsClientMsg,
-    WsServerMsg,
+    FsListResponse, InstallFfmpegRequest, LogFileDto, LogsResponse, MoveQueueRequest,
+    ProxyTestRequest, ProxyTestResponse, StatsResponse, TokenResponse, TrackerSubRefreshResponse,
+    UpdateQueueRequest, WsClientMsg, WsServerMsg,
 };
 use crate::ws_hub::WsHub;
 
@@ -113,6 +113,7 @@ pub fn extra_router(state: ServerState) -> Router {
         .route(paths::PROXY_TEST, post(proxy_test))
         .route(paths::TOKEN_REGENERATE, post(token_regenerate))
         .route(paths::STATS, get(stats))
+        .route(paths::LOGS, get(logs_info))
         .route(
             paths::BT_TRACKER_SUB_REFRESH,
             post(bt_tracker_sub_refresh),
@@ -148,6 +149,7 @@ pub fn extra_router(state: ServerState) -> Router {
     let open = Router::new()
         .route(paths::WS, get(ws_handler))
         .route(paths::TASK_FILE, get(task_file))
+        .route(paths::LOGS_EXPORT, get(logs_export))
         .route(paths::OPENAPI, get(openapi_spec))
         .route(paths::DOCS, get(scalar_docs));
 
@@ -167,6 +169,8 @@ pub mod paths {
     pub const PROXY_TEST: &str = "/api/v1/proxy/test";
     pub const TOKEN_REGENERATE: &str = "/api/v1/token/regenerate";
     pub const STATS: &str = "/api/v1/stats";
+    pub const LOGS: &str = "/api/v1/logs";
+    pub const LOGS_EXPORT: &str = "/api/v1/logs/export";
     pub const COMPONENT_FFMPEG: &str = "/api/v1/components/ffmpeg";
     pub const COMPONENT_FFMPEG_VERSIONS: &str = "/api/v1/components/ffmpeg/versions";
     pub const COMPONENT_FFMPEG_INSTALL: &str = "/api/v1/components/ffmpeg/install";
@@ -600,6 +604,56 @@ fn percent_encode_rfc5987(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 日志（目录路径展示 + zip 导出，NAS 远程运维用）
+// ---------------------------------------------------------------------------
+
+/// 日志目录路径与文件清单。前端「关于」页展示路径 + 提供导出入口。
+#[utoipa::path(get, path = "/api/v1/logs", tag = "server",
+    responses((status = 200, body = LogsResponse)),
+    security(("bearer_token" = []), ("api_key" = []))
+)]
+async fn logs_info() -> Result<Response, ApiError> {
+    let dir = fluxdown_engine::logger::log_dir().display().to_string();
+    let files = fluxdown_engine::logger::list_log_files()
+        .into_iter()
+        .map(|m| LogFileDto {
+            name: m.name,
+            size: m.size as i64,
+        })
+        .collect();
+    Ok(axum::Json(LogsResponse { dir, files }).into_response())
+}
+
+/// 导出全部日志为 zip 下载。`?token=` 鉴权（浏览器导航下载无法设 header，
+/// 与 `/tasks/{id}/file` 一致）。
+#[utoipa::path(get, path = "/api/v1/logs/export", tag = "server",
+    params(("token" = String, Query, description = "管理 token")),
+    responses(
+        (status = 200, description = "日志压缩包（attachment: fluxdown_logs.zip）"),
+        (status = 401, description = "token 无效或缺失")
+    )
+)]
+async fn logs_export(State(state): State<ServerState>, Query(q): Query<TokenQuery>) -> Response {
+    if state.token.is_empty() || !constant_time_eq(&q.token, &state.token) {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid or missing token");
+    }
+    let bytes = match fluxdown_engine::logger::export_logs_zip() {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/zip"),
+    );
+    if let Ok(v) = header::HeaderValue::from_str(&content_disposition("fluxdown_logs.zip")) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
 // 目录列举（服务器端保存目录选择器）
 // ---------------------------------------------------------------------------
 
@@ -979,6 +1033,8 @@ async fn component_ytdlp_uninstall(State(state): State<ServerState>) -> Result<R
         proxy_test,
         token_regenerate,
         stats,
+        logs_info,
+        logs_export,
         bt_tracker_sub_refresh,
         component_ffmpeg_status,
         component_ffmpeg_versions,
@@ -1004,6 +1060,8 @@ async fn component_ytdlp_uninstall(State(state): State<ServerState>) -> Result<R
         crate::wire::FsEntry,
         crate::wire::FsListResponse,
         crate::wire::StatsResponse,
+        crate::wire::LogsResponse,
+        crate::wire::LogFileDto,
         crate::wire::TokenResponse,
         crate::wire::ComponentFfmpegStatus,
         crate::wire::ComponentYtdlpStatus,

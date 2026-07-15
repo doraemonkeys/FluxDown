@@ -14,6 +14,7 @@ import type {
   FsListResponse,
   InstallFfmpegRequest,
   InstalledPlugin,
+  LogsResponse,
   MarketEntry,
   PingInfo,
   PluginDto,
@@ -117,6 +118,7 @@ export const api = {
   regenerateToken: () =>
     apiFetch<TokenResponse>('/api/v1/token/regenerate', { method: 'POST' }),
   stats: () => apiFetch<StatsResponse>('/api/v1/stats'),
+  logs: () => apiFetch<LogsResponse>('/api/v1/logs'),
 
   listPlugins: () => apiFetch<PluginDto[]>('/api/v1/plugins'),
   installPlugin: (zip: File | Blob | ArrayBuffer) =>
@@ -176,4 +178,9 @@ export const api = {
 /** 「保存到本地」下载地址（浏览器导航下载，token 走查询参数）。 */
 export function taskFileUrl(taskId: string): string {
   return `${getBase()}/api/v1/tasks/${taskId}/file?token=${encodeURIComponent(getToken())}`
+}
+
+/** 「导出日志」下载地址（浏览器导航下载 zip，token 走查询参数）。 */
+export function logsExportUrl(): string {
+  return `${getBase()}/api/v1/logs/export?token=${encodeURIComponent(getToken())}`
 }

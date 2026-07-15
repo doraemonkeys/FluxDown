@@ -1,12 +1,15 @@
 // 关于：版本信息 + 更新渠道 + 更新检测 + 退出登录。
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { api } from '../../lib/api'
+import { Download } from 'lucide-react'
+import { api, logsExportUrl } from '../../lib/api'
 import { clearCredentials } from '../../lib/auth'
+import { fmtBytes } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
 import type { ConfigMap } from '../../lib/types'
 import { useUpdateCheck } from '../../lib/update'
 import { disconnectWs } from '../../lib/ws'
+import { CopyButton } from '../CopyButton'
 import { SetRow, SetSelect } from './controls'
 
 export function AboutSettings({
@@ -19,6 +22,10 @@ export function AboutSettings({
   const navigate = useNavigate()
   const { t } = useI18n()
   const { data: info, isLoading } = useQuery({ queryKey: ['info'], queryFn: api.info })
+  const { data: logs } = useQuery({ queryKey: ['logs'], queryFn: api.logs })
+  const logDir = logs?.dir ?? ''
+  const fileCount = logs?.files.length ?? 0
+  const totalSize = logs?.files.reduce((sum, f) => sum + f.size, 0) ?? 0
   const update = useUpdateCheck()
   const channel = config?.web_update_channel === 'frontier' ? 'frontier' : 'stable'
 
@@ -49,7 +56,7 @@ export function AboutSettings({
         </SetRow>
         {update.hasUpdate && update.releaseUrl ? (
           <SetRow title={t('set.about.newVersion', { version: `v${update.latest}` })}>
-            <a className="btn sm" href={update.releaseUrl} target="_blank" rel="noreferrer">
+            <a className="btn primary sm" href={update.releaseUrl} target="_blank" rel="noreferrer">
               {t('set.about.getUpdate')}
             </a>
           </SetRow>
@@ -58,6 +65,35 @@ export function AboutSettings({
             <span className="set-value">v{update.latest}</span>
           </SetRow>
         ) : null}
+      </div>
+      <div className="set-group">
+        <SetRow title={t('set.about.logDir')} desc={t('set.about.logDirDesc')}>
+          <div className="token-box" style={{ flex: 1, minWidth: 0 }}>
+            <span
+              style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={logDir || undefined}
+            >
+              {logDir || t('common.loading')}
+            </span>
+            {logDir ? <CopyButton value={logDir} /> : null}
+          </div>
+        </SetRow>
+        <SetRow
+          title={t('set.about.logExport')}
+          desc={t('set.about.logExportDesc', { count: fileCount, size: fmtBytes(totalSize) })}
+        >
+          {fileCount > 0 ? (
+            <a className="btn ghost sm" href={logsExportUrl()} download>
+              <Download />
+              {t('set.about.logExportBtn')}
+            </a>
+          ) : (
+            <button type="button" className="btn ghost sm" disabled>
+              <Download />
+              {t('set.about.logExportBtn')}
+            </button>
+          )}
+        </SetRow>
       </div>
       <div className="set-group">
         <SetRow title={t('set.about.logout')} desc={t('set.about.logoutDesc')}>
