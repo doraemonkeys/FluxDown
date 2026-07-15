@@ -1,5 +1,5 @@
 /**
- * GET /api/changelog?page=1&per_page=10&since=v0.0.2
+ * GET /api/changelog?page=1&per_page=10&since=v0.0.2&channel=stable
  *
  * 代理 GitHub Releases API，获取私有仓库的发布记录（分页）。
  * 服务端持有 GITHUB_TOKEN，前端无需暴露凭据。
@@ -8,6 +8,8 @@
  *   page     - 页码，从 1 开始，默认 1
  *   per_page - 每页条数，默认 10，最大 100
  *   since    - 可选，起始版本号（含），如 "v0.0.2" 或 "0.0.2"
+ *   channel  - 可选，更新渠道：stable（默认，仅稳定版 vX.Y.Z）
+ *              或 frontier（仅前沿预发布版 vX.Y.Z-rc.N）
  *
  * 返回格式:
  * {
@@ -63,6 +65,8 @@ interface FilteredRelease {
   version: string;
   published_at: string;
   body: string;
+  /** 是否为前沿预发布版（GitHub prerelease，tag 形如 vX.Y.Z-rc.N） */
+  prerelease: boolean;
   assets: ReleaseAsset[];
 }
 
@@ -163,16 +167,19 @@ async function fetchAllGitHubReleases(): Promise<GitHubRelease[]> {
   return all;
 }
 
-/** 获取经过过滤和排序的全量 release 列表（带缓存） */
-async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
+/** 获取经过过滤和排序的全量 release 列表（带缓存），按渠道切分 */
+async function getCachedReleases(
+  since: string,
+  channel: "stable" | "frontier",
+): Promise<FilteredRelease[]> {
   let all = getCached<FilteredRelease[]>(CACHE_KEY, CACHE_TTL);
   if (!all) {
     const raw = await fetchAllGitHubReleases();
 
-    // 只保留 v* 客户端 release；extension-v* / website-v* 组件 release
-    // 不属于 App 更新日志（且其 tag 无法按 semver 解析）
+    // 只保留 v* 客户端 release（含前沿预发布）；extension-v* / website-v*
+    // 组件 release 不属于 App 更新日志（且其 tag 无法按 semver 解析）
     all = raw
-      .filter((r) => !r.draft && !r.prerelease && /^v\d/.test(r.tag_name))
+      .filter((r) => !r.draft && /^v\d/.test(r.tag_name))
       .sort(
         (a, b) =>
           new Date(b.published_at).getTime() -
@@ -183,6 +190,7 @@ async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
         version: r.tag_name.replace(/^v/, ""),
         published_at: r.published_at,
         body: r.body || "",
+        prerelease: r.prerelease,
         assets: (r.assets || [])
           .filter((a) => isDownloadableAsset(a.name))
           .map((a) => ({
@@ -196,7 +204,10 @@ async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
     setCached(CACHE_KEY, all);
   }
 
-  let releases = all;
+  // 渠道切分：稳定版 tab 只看正式版，前沿版 tab 只看 rc 预发布
+  let releases = all.filter((r) =>
+    channel === "frontier" ? r.prerelease : !r.prerelease,
+  );
 
   if (since) {
     const sinceVer = parseVersion(since);
@@ -210,6 +221,9 @@ async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
 
 export const GET: APIRoute = async ({ url }) => {
   const sinceParam = url.searchParams.get("since")?.trim() || "";
+  // 渠道：缺省 stable（与 /api/release 一致，未知值一律回落稳定版）
+  const channel =
+    url.searchParams.get("channel") === "frontier" ? "frontier" : "stable";
   const page = Math.max(
     1,
     parseInt(url.searchParams.get("page") || "1", 10) || 1,
@@ -227,7 +241,7 @@ export const GET: APIRoute = async ({ url }) => {
   }
 
   try {
-    const all = await getCachedReleases(sinceParam);
+    const all = await getCachedReleases(sinceParam, channel);
     const start = (page - 1) * perPage;
     const sliced = all.slice(start, start + perPage);
 

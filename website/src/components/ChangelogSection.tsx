@@ -30,8 +30,12 @@ interface Release {
   version: string;
   published_at: string;
   body: string;
+  /** 前沿预发布版（vX.Y.Z-rc.N）标记 */
+  prerelease?: boolean;
   assets: ReleaseAsset[];
 }
+
+type Channel = "stable" | "frontier";
 
 const PER_PAGE = 10;
 
@@ -616,6 +620,7 @@ function AssetsPanel({
 
 export default function ChangelogSection() {
   const { locale, t } = useLocale();
+  const [channel, setChannel] = useState<Channel>("stable");
   const [releases, setReleases] = useState<Release[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -624,40 +629,52 @@ export default function ChangelogSection() {
   const [hasMore, setHasMore] = useState(false);
   const initialFetched = useRef(false);
 
-  const fetchPage = useCallback(async (p: number, append: boolean) => {
-    if (append) {
-      setLoadingMore(true);
-    } else {
-      setLoading(true);
-    }
-    setError("");
+  const fetchPage = useCallback(
+    async (p: number, append: boolean, ch: Channel) => {
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setLoading(true);
+      }
+      setError("");
 
-    try {
-      const res = await fetch(`/api/changelog?page=${p}&per_page=${PER_PAGE}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      try {
+        const res = await fetch(
+          `/api/changelog?page=${p}&per_page=${PER_PAGE}&channel=${ch}`,
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
 
-      const incoming: Release[] = data.releases || [];
-      setReleases((prev) => (append ? [...prev, ...incoming] : incoming));
-      setHasMore(data.has_more ?? false);
-      setPage(p);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-      setLoadingMore(false);
-    }
-  }, []);
+        const incoming: Release[] = data.releases || [];
+        setReleases((prev) => (append ? [...prev, ...incoming] : incoming));
+        setHasMore(data.has_more ?? false);
+        setPage(p);
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (initialFetched.current) return;
     initialFetched.current = true;
-    fetchPage(1, false);
+    fetchPage(1, false, "stable");
   }, [fetchPage]);
+
+  const handleSwitchChannel = (ch: Channel) => {
+    if (ch === channel || loading) return;
+    setChannel(ch);
+    setReleases([]);
+    fetchPage(1, false, ch);
+  };
 
   const handleLoadMore = () => {
     if (loadingMore || !hasMore) return;
-    fetchPage(page + 1, true);
+    fetchPage(page + 1, true, channel);
   };
 
   return (
@@ -685,6 +702,34 @@ export default function ChangelogSection() {
             {t("changelog.subtitle")}
           </p>
         </motion.div>
+
+        {/* Channel tabs: 稳定版 / 前沿版 */}
+        <div className="mb-10 flex flex-col items-center gap-3">
+          <div className="inline-flex items-center rounded-lg border border-dark-border bg-dark-surface1 p-1">
+            {(["stable", "frontier"] as const).map((ch) => (
+              <button
+                key={ch}
+                onClick={() => handleSwitchChannel(ch)}
+                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+                  channel === ch
+                    ? ch === "frontier"
+                      ? "bg-amber-500/15 text-amber-400"
+                      : "bg-brand-sky/15 text-brand-sky"
+                    : "text-dark-text-muted hover:text-dark-text-secondary"
+                }`}
+              >
+                {ch === "stable"
+                  ? t("changelog.tabStable")
+                  : t("changelog.tabFrontier")}
+              </button>
+            ))}
+          </div>
+          {channel === "frontier" && (
+            <p className="text-xs text-dark-text-muted max-w-md text-center">
+              {t("changelog.frontierHint")}
+            </p>
+          )}
+        </div>
 
         {/* Initial loading */}
         {loading && (
@@ -729,13 +774,17 @@ export default function ChangelogSection() {
                   className="relative sm:pl-12"
                 >
                   {/* Timeline dot */}
-                  <div className="absolute left-2.5 top-1.5 w-3 h-3 rounded-full border-2 border-brand-sky bg-dark-bg hidden sm:block" />
+                  <div
+                    className={`absolute left-2.5 top-1.5 w-3 h-3 rounded-full border-2 bg-dark-bg hidden sm:block ${release.prerelease ? "border-amber-400" : "border-brand-sky"}`}
+                  />
 
                   {/* Card */}
                   <div className="rounded-xl border border-dark-border bg-dark-surface1 overflow-hidden">
                     {/* Card header */}
                     <div className="flex flex-wrap items-center gap-3 px-5 py-4 border-b border-dark-border bg-dark-surface1">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-brand-sky/10 text-brand-sky border border-brand-sky/20">
+                      <span
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${release.prerelease ? "bg-amber-500/10 text-amber-400 border-amber-500/20" : "bg-brand-sky/10 text-brand-sky border-brand-sky/20"}`}
+                      >
                         <Tag className="w-3 h-3" />
                         {release.tag}
                       </span>
