@@ -1,13 +1,13 @@
-// FluxDown 插件：YouTube onDone 钩子（classic script，入口挂 globalThis）。
+// FluxDown 插件：yt-dlp 通用解析 onDone 钩子（classic script，入口挂 globalThis）。
 //
 // 作用：关闭「优先 MP4 容器」时，下载完成后把非 mp4 产物（通常为 VP9/WebM）
-// 用 ffmpeg 转码为 H.264/AAC 的兼容 mp4。
+// 用 ffmpeg 转码为 H.264/AAC 的兼容 mp4。站点无关——对任意来源的非 mp4 产物生效。
 //
 // 通知平面语义：fire-and-forget——失败仅记日志，绝不影响任务状态。仅当：
 //   1. 设置「优先 MP4 容器」= 关（preferMp4 === false）；
 //   2. 产物不是 .mp4/.m4a（即 webm 等非 mp4 容器）；
 //   3. flux.ffmpeg 门面存在（manifest 已声明 permissions:["ffmpeg"] 授权）
-//      且宿主装有 ffmpeg（可在 App「组件」页安装）。
+//      且 FluxDown 装有 ffmpeg（可在 App「组件」页安装）。
 //
 // 约束（见 flux.ffmpeg 契约）：ffmpeg 在任务 save_dir 牢笼内执行，参数中的文件
 // 一律用相对名（basename，前缀 './' 防以 '-' 开头的文件名被当作选项）；绝对路径
@@ -38,7 +38,7 @@ globalThis.onDone = async (ctx) => {
 
   // 门面缺失（未授权，理论上不会——manifest 已声明权限）。
   if (!flux.ffmpeg) {
-    if (verbose) flux.logger.warn('[youtube] onDone: flux.ffmpeg 门面不可用，跳过');
+    if (verbose) flux.logger.warn('[ytdlp] onDone: flux.ffmpeg 门面不可用，跳过');
     return;
   }
 
@@ -46,15 +46,15 @@ globalThis.onDone = async (ctx) => {
   if (!filePath) return;
   var inName = baseName(filePath);
 
-  // 已是 mp4（渐进流 itag18）或纯音频 m4a → 无需转换。
+  // 已是 mp4（渐进流）或纯音频 m4a → 无需转换。
   if (/\.(mp4|m4a)$/i.test(inName)) {
-    if (verbose) flux.logger.info('[youtube] onDone: 已是 mp4/m4a，无需转换:', inName);
+    if (verbose) flux.logger.info('[ytdlp] onDone: 已是 mp4/m4a，无需转换:', inName);
     return;
   }
 
   var avail = await flux.ffmpeg.available();
   if (!avail || !avail.available) {
-    flux.logger.warn('[youtube] onDone: ffmpeg 未安装（可在「组件」页安装），跳过转 mp4');
+    flux.logger.warn('[ytdlp] onDone: ffmpeg 未安装（可在「组件」页安装），跳过转 mp4');
     return;
   }
 
@@ -73,39 +73,39 @@ globalThis.onDone = async (ctx) => {
   if (audioName) args.push('-map', '0:v:0', '-map', '1:a:0');
   args.push('-y', rel(outName));
 
-  if (verbose) flux.logger.info('[youtube] onDone: 转 mp4', inName, '→', outName);
+  if (verbose) flux.logger.info('[ytdlp] onDone: 转 mp4', inName, '→', outName);
 
   var started = Date.now();
   var r;
   try {
     r = await flux.ffmpeg.run({ args: args, timeoutMs: 20 * 60 * 1000 });
   } catch (e) {
-    flux.logger.error('[youtube] onDone: ffmpeg 调用异常:', String(e));
+    flux.logger.error('[ytdlp] onDone: ffmpeg 调用异常:', String(e));
     return;
   }
 
   if (r.timedOut) {
-    flux.logger.error('[youtube] onDone: ffmpeg 转码超时:', inName);
+    flux.logger.error('[ytdlp] onDone: ffmpeg 转码超时:', inName);
     return;
   }
   if (r.code !== 0) {
     flux.logger.error(
-      '[youtube] onDone: ffmpeg 转码失败 code=' + r.code,
+      '[ytdlp] onDone: ffmpeg 转码失败 code=' + r.code,
       (r.stderr || '').slice(-400)
     );
     return;
   }
 
   var secs = ((Date.now() - started) / 1000).toFixed(1);
-  flux.logger.info('[youtube] onDone: 已转为 mp4:', outName, '(' + secs + 's，源文件保留)');
+  flux.logger.info('[ytdlp] onDone: 已转为 mp4:', outName, '(' + secs + 's，源文件保留)');
 
   // 登记衍生产物：使 App「删除任务并删除文件」时把 mp4 与源 webm 一并删除，
-  // 保证单一任务的所有文件成组管理。旧版宿主无此 API 时静默跳过。
+  // 保证单一任务的所有文件成组管理。旧版 FluxDown 无此 API 时静默跳过。
   if (flux.task && flux.task.recordArtifact) {
     try {
       await flux.task.recordArtifact(outName);
     } catch (e) {
-      flux.logger.warn('[youtube] onDone: recordArtifact 失败（不影响产物）:', String(e));
+      flux.logger.warn('[ytdlp] onDone: recordArtifact 失败（不影响产物）:', String(e));
     }
   }
 };

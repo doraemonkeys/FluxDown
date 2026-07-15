@@ -52,6 +52,6 @@ fn all_example_plugin_manifests_are_valid() {
     }
     assert!(
         checked >= 2,
-        "示例插件目录应至少含 echo-rewriter 与 youtube"
+        "示例插件目录应至少含 echo-rewriter 与 ytdlp"
     );
 }

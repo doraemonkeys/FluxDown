@@ -1,4 +1,4 @@
-//! 端到端：YouTube 示例插件 `hooks.js` 的 `onDone` 经 `flux.ffmpeg` 把非 mp4 产物
+//! 端到端：yt-dlp 示例插件 `hooks.js` 的 `onDone` 经 `flux.ffmpeg` 把非 mp4 产物
 //! 转为 mp4。真实执行依赖 ffmpeg，经 `FLUXDOWN_TEST_FFMPEG=<绝对路径>` 注入；
 //! 未设置则跳过（保持 CI 无 ffmpeg 时确定性）。
 //!
@@ -45,7 +45,7 @@ async fn make_bridge(data_dir: &Path, ffmpeg: &str) -> Arc<EngineBridge> {
 }
 
 fn hooks_source() -> String {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/youtube/hooks.js");
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/ytdlp/hooks.js");
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读取 {p:?} 失败: {e}"))
 }
 
@@ -99,7 +99,7 @@ async fn run_on_done(
     settings_json: &str,
 ) {
     let script = PluginScript {
-        identity: "fluxdown@youtube".to_string(),
+        identity: "fluxdown@ytdlp".to_string(),
         source: hooks_source(),
         entry_fn_hint: PluginEntryKind::Hook,
         version: "1.2.0".to_string(),
