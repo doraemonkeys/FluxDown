@@ -1067,9 +1067,9 @@ class DownloadController extends ChangeNotifier {
     _safeNotifyListeners();
   }
 
-  /// 修改某个任务的分段（线程）数。仅暂停/错误/等待态任务可改；下载中/
-  /// 准备中/已完成会被 Rust 拒绝（回 [TaskSegmentsUpdated] ok=false）。
-  /// 已下进度完整保留：恢复下载时按新线程数续传（增线程拆分现有段、减线程降并发）。
+  /// 修改某个任务的分段（线程）数。已完成任务不可改（Rust 回 ok=false）；
+  /// 其余状态均可改——引擎对活跃任务自动「暂停→改→恢复」以立即生效。
+  /// 已下进度完整保留：恢复时按新线程数续传（增线程拆分现有段、减线程降并发）。
   /// `segments <= 0` = 恢复为「自动」。
   void setTaskSegments(String taskId, int segments) {
     final n = segments < 0 ? 0 : segments;

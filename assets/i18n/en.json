@@ -144,7 +144,6 @@
     "editThreads": "Change thread count",
     "editThreadsTitle": "Change thread count",
     "editThreadsResetHint": "A downloading task is paused and resumed automatically to apply the change immediately. Downloaded progress is fully preserved.",
-    "editThreadsPausedOnly": "Pause the task first to change its thread count.",
     "threadsChanged": "Thread count updated.",
     "threadsChangeRejected": "Cannot change the thread count of a completed task.",
     "configuredThreads": "Thread count",

@@ -249,7 +249,6 @@ class S {
   String get editThreads => _r('editThreads');
   String get editThreadsTitle => _r('editThreadsTitle');
   String get editThreadsResetHint => _r('editThreadsResetHint');
-  String get editThreadsPausedOnly => _r('editThreadsPausedOnly');
   String get threadsChanged => _r('threadsChanged');
   String get threadsChangeRejected => _r('threadsChangeRejected');
   String get configuredThreads => _r('configuredThreads');

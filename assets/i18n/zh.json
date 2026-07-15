@@ -144,7 +144,6 @@
     "editThreads": "修改线程数",
     "editThreadsTitle": "修改线程数",
     "editThreadsResetHint": "下载中的任务会自动暂停并恢复以立即生效，已下载进度完整保留。",
-    "editThreadsPausedOnly": "请先暂停任务再修改线程数。",
     "threadsChanged": "线程数已更新。",
     "threadsChangeRejected": "已完成的任务无法修改线程数。",
     "configuredThreads": "线程数",
