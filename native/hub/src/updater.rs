@@ -522,13 +522,11 @@ pub async fn download(url: &str, version: &str, file_size: i64) {
 /// Falls back to a safe default if the result is empty.
 fn sanitize_filename(raw: &str) -> String {
     // Strip query string and fragment before extracting the filename.
-    let without_query = raw
-        .split_once('?')
-        .map(|(base, _)| base)
-        .unwrap_or(raw)
-        .split_once('#')
-        .map(|(base, _)| base)
-        .unwrap_or(raw);
+    // Each fallback must land on the previously-stripped value, never the
+    // original `raw` — otherwise a URL without a `#` fragment would restore
+    // the query string and yield an OS-invalid Windows filename.
+    let base = raw.split_once('?').map(|(b, _)| b).unwrap_or(raw);
+    let without_query = base.split_once('#').map(|(b, _)| b).unwrap_or(base);
 
     let name = without_query
         .rsplit(['/', '\\'])
@@ -1774,7 +1772,7 @@ fn install_portable_tarball(tarball_path: &str) -> Result<(), UpdateError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{SegmentRange, load_resume, resume_path, save_resume};
+    use super::{SegmentRange, load_resume, resume_path, sanitize_filename, save_resume};
 
     fn ranges() -> Vec<SegmentRange> {
         vec![
@@ -1784,6 +1782,26 @@ mod tests {
                 end: 999,
             },
         ]
+    }
+
+    /// `sanitize_filename` must strip URL query strings so downloaded update
+    /// artifacts never carry `?` (invalid on Windows → OS error 123). The
+    /// desktop updater always appends `?source=github`, so the no-fragment
+    /// query case is the real-world path (regression: issue #86).
+    #[test]
+    fn sanitize_strips_query_and_fragment() {
+        assert_eq!(
+            sanitize_filename("FluxDown-0.2.0-windows-x64-setup.exe?source=github"),
+            "FluxDown-0.2.0-windows-x64-setup.exe"
+        );
+        assert_eq!(sanitize_filename("pkg.zip#frag"), "pkg.zip");
+        assert_eq!(sanitize_filename("pkg.zip?a=1#frag"), "pkg.zip");
+        // Plain name (no query/fragment) is unchanged.
+        assert_eq!(sanitize_filename("plain.exe"), "plain.exe");
+        // Path components are stripped.
+        assert_eq!(sanitize_filename("a/b/c.exe?x=1"), "c.exe");
+        // Empty / degenerate input falls back to the safe default.
+        assert_eq!(sanitize_filename("?only=query"), "FluxDown-update");
     }
 
     /// Roundtrip: saved progress is loaded back verbatim when the artifact
