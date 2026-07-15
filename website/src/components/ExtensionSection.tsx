@@ -1,72 +1,23 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { MousePointerClick, Shield, Filter } from "lucide-react";
+import { MousePointerClick, Radio, Filter, Moon, Inbox, Settings, Video, Image as ImageIcon, Music, Download } from "lucide-react";
 import { DotBackground } from "@/components/ui/grid-background";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useLocale } from "@/lib/i18n";
 
 /* ============================================================
-   ExtensionSection — Interactive Browser Extension Mockup
-   Users can:
-   - Click extension icon to show/hide popup
-   - Toggle Auto Intercept on/off
-   - Click file type filter badges to toggle them
-   - See animated stats counting & new file catches appearing
+   ExtensionSection — Browser Extension Popup Mockup
+   Mirrors the real extension UI: header (lang/theme/status),
+   tabs (tasks / resources / settings), empty task card with a
+   paste bar, today stats, and a footer.
    ============================================================ */
 
-const FILE_TYPES = [".zip", ".exe", ".dmg", ".mp4", ".pdf", ".rar", ".iso"];
-
-const INITIAL_CATCHES = [
-  "video-hd.mp4",
-  "report-2025.pdf",
-  "project-archive.zip",
-];
-
-// New catches that appear periodically
-const INCOMING_FILES = [
-  "flutter-sdk-3.27.dmg",
-  "design-assets.rar",
-  "podcast-ep42.mp3",
-  "database-backup.sql",
-];
+type ExtTab = "tasks" | "resources" | "settings";
 
 export default function ExtensionSection() {
   const [popupVisible, setPopupVisible] = useState(true);
-  const [toggleOn, setToggleOn] = useState(true);
-  const [activeFilters, setActiveFilters] = useState<Set<string>>(
-    new Set(FILE_TYPES),
-  );
-  const [catches, setCatches] = useState(INITIAL_CATCHES);
-  const [stats, setStats] = useState({ today: 12, week: 47, total: 384 });
-  const [incomingIdx, setIncomingIdx] = useState(0);
+  const [activeTab, setActiveTab] = useState<ExtTab>("tasks");
+  const [pasteUrl, setPasteUrl] = useState("");
   const { t } = useLocale();
-
-  // Periodically add new catches when toggle is ON
-  useEffect(() => {
-    if (!toggleOn) return;
-    const interval = setInterval(() => {
-      setIncomingIdx((prev) => {
-        const nextIdx = (prev + 1) % INCOMING_FILES.length;
-        const newFile = INCOMING_FILES[prev % INCOMING_FILES.length]!;
-        setCatches((c) => [newFile, ...c.slice(0, 2)]);
-        setStats((s) => ({
-          today: s.today + 1,
-          week: s.week + 1,
-          total: s.total + 1,
-        }));
-        return nextIdx;
-      });
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [toggleOn]);
-
-  const toggleFilter = (ext: string) => {
-    setActiveFilters((prev) => {
-      const next = new Set(prev);
-      if (next.has(ext)) next.delete(ext);
-      else next.add(ext);
-      return next;
-    });
-  };
 
   return (
     <section id="extension" className="relative py-20 sm:py-32 overflow-hidden">
@@ -107,7 +58,7 @@ export default function ExtensionSection() {
                   descKey: "ext.feat1.desc" as const,
                 },
                 {
-                  Icon: Shield,
+                  Icon: Radio,
                   iconBoxClass: "bg-emerald-500/10 border-emerald-500/20",
                   iconClass: "text-emerald-400",
                   titleKey: "ext.feat2.title" as const,
@@ -185,6 +136,22 @@ export default function ExtensionSection() {
                 </svg>
                 {t("ext.addToEdge")}
               </a>
+              <a
+                href="https://addons.mozilla.org/firefox/addon/fluxdown/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-lg bg-[#ff7139]/10 border border-[#ff7139]/30 px-5 py-2.5 text-sm font-semibold text-[#ff7139] hover:bg-[#ff7139]/20 transition-colors"
+              >
+                <svg
+                  className="w-4 h-4"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M20.452 8.427c-.386-.928-1.17-1.929-1.784-2.246.5.98.79 1.963.9 2.696l.002.014c-1.005-2.506-2.71-3.516-4.103-5.716a10.62 10.62 0 0 1-.202-.328 2.66 2.66 0 0 1-.095-.176 1.564 1.564 0 0 1-.128-.34.022.022 0 0 0-.02-.022.03.03 0 0 0-.016 0l-.004.001-.007.004.004-.007c-2.234 1.309-2.991 3.732-3.06 4.944a4.446 4.446 0 0 0-2.446.943 2.628 2.628 0 0 0-.228-.172 4.11 4.11 0 0 1-.025-2.167c-.911.415-1.62 1.072-2.135 1.653h-.004c-.352-.446-.327-1.918-.307-2.226a1.588 1.588 0 0 0-.297.158 6.454 6.454 0 0 0-.867.743 7.756 7.756 0 0 0-.828 1l-.005.007.004-.006a7.482 7.482 0 0 0-1.19 2.685l-.012.058c-.017.078-.078.474-.088.56 0 .007-.002.013-.002.02a8.505 8.505 0 0 0-.145 1.226v.046a8.898 8.898 0 0 0 17.685 1.482c.015-.114.027-.227.04-.343a9.147 9.147 0 0 0-.567-4.194zm-11.9 6.803c.042.02.08.042.124.061l.006.004a5.06 5.06 0 0 1-.13-.065zm11.351-5.61v-.011l.002.012z" />
+                </svg>
+                {t("ext.addToFirefox")}
+              </a>
             </motion.div>
           </motion.div>
 
@@ -237,174 +204,209 @@ export default function ExtensionSection() {
                     transition={{ duration: 0.25, ease: "easeInOut" }}
                     className="overflow-hidden"
                   >
-                    <div className="bg-dark-surface1 p-4 space-y-4">
-                      {/* Header */}
+                    <div className="bg-dark-surface1 p-4 space-y-3.5">
+                      {/* Header: logo + lang/theme/status */}
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <img src="/logo.svg" alt="" className="w-6 h-6" />
-                          <span className="text-xs font-semibold">
+                          <span className="text-sm font-semibold">
                             <span className="text-brand-sky">Flux</span>
                             <span className="text-dark-text">Down</span>
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5">
-                          <motion.div
-                            className="w-2 h-2 rounded-full"
-                            animate={{
-                              backgroundColor: toggleOn ? "#22C55E" : "#52525B",
-                              scale: toggleOn ? [1, 1.3, 1] : 1,
-                            }}
-                            transition={{
-                              scale: { repeat: Infinity, duration: 2 },
-                              backgroundColor: { duration: 0.2 },
-                            }}
-                          />
-                          <span
-                            className="text-[10px] font-medium transition-colors duration-200"
-                            style={{
-                              color: toggleOn
-                                ? "#22C55E"
-                                : "var(--color-dark-text-muted)",
-                            }}
-                          >
-                            {toggleOn ? t("ext.connected") : t("ext.paused")}
-                          </span>
+                          <div className="flex items-center justify-center h-6 px-1.5 rounded-md border border-dark-border bg-dark-surface2 text-[10px] font-medium text-dark-text-secondary cursor-default">
+                            中
+                          </div>
+                          <div className="flex items-center justify-center w-6 h-6 rounded-md border border-dark-border bg-dark-surface2 text-dark-text-secondary cursor-default">
+                            <Moon className="w-3 h-3" />
+                          </div>
+                          <div className="flex items-center gap-1 h-6 px-2 rounded-md border border-success/25 bg-success/10 cursor-default">
+                            <motion.div
+                              className="w-1.5 h-1.5 rounded-full bg-success"
+                              animate={{ scale: [1, 1.3, 1] }}
+                              transition={{ repeat: Infinity, duration: 2 }}
+                            />
+                            <span className="text-[10px] font-medium text-success">
+                              {t("ext.connected")}
+                            </span>
+                          </div>
                         </div>
                       </div>
 
-                      {/* Stats */}
-                      <div className="grid grid-cols-3 gap-2">
+                      {/* Tabs */}
+                      <div className="flex items-center gap-5 border-b border-dark-border">
                         {[
-                          { v: stats.today, l: t("ext.today") },
-                          { v: stats.week, l: t("ext.thisWeek") },
-                          { v: stats.total, l: t("ext.total") },
-                        ].map((s) => (
-                          <div
-                            key={s.l}
-                            className="rounded-lg bg-dark-surface2 border border-dark-border p-2.5 text-center"
+                          { key: "tasks" as const, label: t("ext.tabTasks"), badge: 0 },
+                          { key: "resources" as const, label: t("ext.tabResources"), badge: 30 },
+                          { key: "settings" as const, label: t("ext.tabSettings"), badge: 0 },
+                        ].map((tab) => (
+                          <button
+                            key={tab.key}
+                            onClick={() => setActiveTab(tab.key)}
+                            className="relative flex items-center gap-1.5 pb-2 text-xs font-medium transition-colors"
+                            style={{
+                              color:
+                                activeTab === tab.key
+                                  ? "#38bdf8"
+                                  : "var(--color-dark-text-muted)",
+                            }}
                           >
-                            <motion.div
-                              key={s.v}
-                              className="text-base font-bold text-dark-text"
-                              style={{ fontVariantNumeric: "tabular-nums" }}
-                              initial={{ y: -4, opacity: 0.5 }}
-                              animate={{ y: 0, opacity: 1 }}
-                              transition={{ duration: 0.25 }}
-                            >
-                              {s.v}
-                            </motion.div>
-                            <div className="text-[9px] text-dark-text-muted mt-0.5">
-                              {s.l}
-                            </div>
-                          </div>
+                            {tab.label}
+                            {tab.badge > 0 && (
+                              <span className="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-brand-sky text-[9px] font-bold text-white">
+                                {tab.badge}
+                              </span>
+                            )}
+                            {activeTab === tab.key && (
+                              <motion.div
+                                layoutId="ext-tab-underline"
+                                className="absolute -bottom-px left-0 right-0 h-0.5 rounded-full bg-brand-sky"
+                              />
+                            )}
+                          </button>
                         ))}
                       </div>
 
-                      {/* Toggle — clickable */}
-                      <div
-                        onClick={() => setToggleOn((v) => !v)}
-                        className="flex items-center justify-between rounded-lg bg-dark-surface2 border border-dark-border p-3 cursor-pointer hover:border-dark-surface3 transition-colors"
-                      >
-                        <span className="text-xs font-medium text-dark-text">
-                          {t("ext.autoIntercept")}
-                        </span>
-                        <motion.div
-                          className="relative w-9 h-5 rounded-full"
-                          animate={{
-                            backgroundColor: toggleOn
-                              ? "#22C55E"
-                              : "var(--color-dark-text-muted)",
-                          }}
-                          transition={{ duration: 0.2 }}
-                        >
-                          <motion.div
-                            className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm"
-                            animate={{ x: toggleOn ? 18 : 2 }}
-                            transition={{
-                              type: "spring",
-                              stiffness: 500,
-                              damping: 30,
-                            }}
-                          />
-                        </motion.div>
-                      </div>
-
-                      {/* Recent catches — animated list */}
-                      <div>
-                        <div className="text-[10px] text-dark-text-muted mb-2 font-medium">
-                          {t("ext.recentCatches")}
-                        </div>
-                        <div className="space-y-0">
-                          <AnimatePresence mode="popLayout" initial={false}>
-                            {catches.map((f, i) => (
-                              <motion.div
-                                key={f}
-                                layout
-                                initial={{ opacity: 0, x: -20, height: 0 }}
-                                animate={{ opacity: 1, x: 0, height: 24 }}
-                                exit={{ opacity: 0, x: 20, height: 0 }}
-                                transition={{ duration: 0.3 }}
-                                className="flex items-center gap-2 text-xs text-dark-text-secondary overflow-hidden cursor-default"
-                                style={{ height: 24 }}
-                              >
-                                <div
-                                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                                  style={{
-                                    backgroundColor:
-                                      i === 0 && toggleOn
-                                        ? "#3B82F6"
-                                        : "#22C55E",
-                                  }}
+                      {/* Pane content — switches with the active tab */}
+                      <div className="min-h-[188px]">
+                        {/* Tasks pane */}
+                        {activeTab === "tasks" && (
+                          <div className="space-y-3">
+                            <div className="rounded-lg border border-dark-border bg-dark-surface2 p-4 space-y-3">
+                              <div className="flex flex-col items-center justify-center py-4 text-center">
+                                <Inbox className="w-9 h-9 text-dark-text-muted/60" />
+                                <p className="mt-2 text-xs font-medium text-dark-text-secondary">
+                                  {t("ext.emptyTasks")}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={pasteUrl}
+                                  onChange={(e) => setPasteUrl(e.target.value)}
+                                  placeholder={t("ext.pastePlaceholder")}
+                                  className="flex-1 min-w-0 h-8 rounded-md border border-dark-border bg-dark-bg px-2.5 text-[11px] text-dark-text placeholder:text-dark-text-muted outline-none focus:border-brand-sky/50 transition-colors"
                                 />
-                                <span className="truncate">{f}</span>
-                              </motion.div>
-                            ))}
-                          </AnimatePresence>
-                        </div>
-                      </div>
+                                <button className="shrink-0 h-8 px-3 rounded-md bg-brand-sky text-[11px] font-semibold text-white hover:bg-brand-sky/90 transition-colors">
+                                  {t("ext.pasteButton")}
+                                </button>
+                              </div>
+                            </div>
+                            {/* Today stats */}
+                            <div className="flex items-center justify-center gap-1.5 text-[11px]">
+                              <span className="text-dark-text-muted">{t("ext.todayLabel")}</span>
+                              <span className="text-success font-semibold">2</span>
+                              <span className="text-dark-text-secondary">{t("ext.takenOver")}</span>
+                              <span className="text-dark-text-muted">·</span>
+                              <span className="text-danger font-semibold">0</span>
+                              <span className="text-dark-text-secondary">{t("ext.failed")}</span>
+                            </div>
+                          </div>
+                        )}
 
-                      {/* File type filters — clickable badges */}
-                      <div>
-                        <div className="text-[10px] text-dark-text-muted mb-2 font-medium">
-                          {t("ext.fileTypeFilters")}
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {FILE_TYPES.map((ext) => {
-                            const active = activeFilters.has(ext);
-                            return (
-                              <motion.span
-                                key={ext}
-                                onClick={() => toggleFilter(ext)}
-                                className="px-2 py-0.5 text-[10px] rounded border cursor-pointer"
-                                whileTap={{ scale: 0.93 }}
-                                animate={{
-                                  backgroundColor: active
-                                    ? "rgba(59,130,246,0.12)"
-                                    : "var(--color-dark-surface2)",
-                                  borderColor: active
-                                    ? "rgba(59,130,246,0.35)"
-                                    : "var(--color-dark-border)",
-                                  color: active
-                                    ? "#3B82F6"
-                                    : "var(--color-dark-text-muted)",
-                                }}
-                                transition={{ duration: 0.15 }}
+                        {/* Resources pane */}
+                        {activeTab === "resources" && (
+                          <div className="space-y-2.5">
+                            <div className="flex flex-wrap gap-1.5">
+                              {[
+                                { label: t("ext.resTypeAll"), active: true },
+                                { label: t("ext.resTypeVideo"), active: false },
+                                { label: t("ext.resTypeImage"), active: false },
+                                { label: t("ext.resTypeAudio"), active: false },
+                              ].map((rt) => (
+                                <span
+                                  key={rt.label}
+                                  className={`px-2 py-0.5 text-[10px] rounded-full border ${
+                                    rt.active
+                                      ? "bg-brand-sky/12 border-brand-sky/35 text-brand-sky"
+                                      : "bg-dark-surface2 border-dark-border text-dark-text-muted"
+                                  }`}
+                                >
+                                  {rt.label}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="space-y-1.5">
+                              {[
+                                { Icon: Video, name: "trailer-4k.mp4", meta: "MP4 · 248 MB", color: "text-[#EC4899]" },
+                                { Icon: Music, name: "podcast-ep42.mp3", meta: "MP3 · 36 MB", color: "text-[#22C55E]" },
+                                { Icon: ImageIcon, name: "cover-art.png", meta: "PNG · 4.2 MB", color: "text-brand-sky" },
+                              ].map((r) => (
+                                <div
+                                  key={r.name}
+                                  className="flex items-center gap-2 rounded-md border border-dark-border bg-dark-surface2 px-2 py-1.5"
+                                >
+                                  <r.Icon className={`w-4 h-4 shrink-0 ${r.color}`} />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-[11px] text-dark-text">{r.name}</div>
+                                    <div className="text-[9px] text-dark-text-muted">{r.meta}</div>
+                                  </div>
+                                  <Download className="w-3.5 h-3.5 shrink-0 text-dark-text-muted" />
+                                </div>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between pt-0.5">
+                              <label className="flex items-center gap-1.5 text-[10px] text-dark-text-muted">
+                                <span className="w-3 h-3 rounded-sm border border-dark-border bg-dark-surface2" />
+                                {t("ext.selectAll")}
+                              </label>
+                              <button className="h-6 px-2.5 rounded-md bg-brand-sky/12 border border-brand-sky/30 text-[10px] font-semibold text-brand-sky">
+                                {t("ext.batchDownload")} (0)
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Settings pane */}
+                        {activeTab === "settings" && (
+                          <div className="space-y-2.5">
+                            {[
+                              { label: t("ext.setIntercept"), hint: t("ext.setEnabled"), on: true },
+                              { label: t("ext.setFloatingBall"), hint: "", on: true },
+                              { label: t("ext.setSniffing"), hint: "", on: true },
+                            ].map((s) => (
+                              <div
+                                key={s.label}
+                                className="flex items-center justify-between rounded-md border border-dark-border bg-dark-surface2 px-3 py-2"
                               >
-                                {ext}
-                              </motion.span>
-                            );
-                          })}
-                        </div>
+                                <div className="flex flex-col">
+                                  <span className="text-[11px] font-medium text-dark-text">{s.label}</span>
+                                  {s.hint && (
+                                    <span className="text-[9px] text-success">{s.hint}</span>
+                                  )}
+                                </div>
+                                <div
+                                  className="relative w-8 h-[18px] rounded-full shrink-0"
+                                  style={{ backgroundColor: s.on ? "#22C55E" : "var(--color-dark-text-muted)" }}
+                                >
+                                  <span
+                                    className="absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm"
+                                    style={{ left: s.on ? 16 : 2 }}
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                            <div className="text-[9px] text-dark-text-muted leading-relaxed px-0.5">
+                              {t("ext.setSniffingHint")}
+                            </div>
+                            <div className="flex items-center justify-between rounded-md border border-dark-border bg-dark-surface2 px-3 py-2">
+                              <span className="text-[11px] font-medium text-dark-text">{t("ext.setRemoteMode")}</span>
+                              <span className="text-[10px] text-dark-text-secondary rounded border border-dark-border bg-dark-bg px-1.5 py-0.5">
+                                {t("ext.remoteFallback")}
+                              </span>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Quick settings */}
-                      <div className="space-y-2 pt-2 border-t border-dark-border">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-dark-text-muted">
-                            {t("ext.minFileSize")}
-                          </span>
-                          <span className="text-dark-text">1 MB</span>
+                      {/* Footer: all settings + dev */}
+                      <div className="flex items-center justify-between pt-2.5 border-t border-dark-border">
+                        <div className="flex items-center gap-1.5 text-[11px] text-brand-sky cursor-default">
+                          <Settings className="w-3 h-3" />
+                          <span>{t("ext.allSettings")}</span>
                         </div>
+                        <span className="text-[10px] text-dark-text-muted">dev</span>
                       </div>
                     </div>
                   </motion.div>

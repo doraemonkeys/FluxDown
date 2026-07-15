@@ -134,7 +134,6 @@ export default function Footer() {
                   href: `/docs/${locale === "zh" ? "zh" : "en"}/contributing/translations/`,
                   label: t("footer.translate"),
                 },
-                { href: "/logo-vote/", label: t("footer.logoVote") },
                 { href: "/macos-gatekeeper/", label: t("footer.macosGatekeeper") },
               ].map(({ href, label }) => (
                 <li key={href}>

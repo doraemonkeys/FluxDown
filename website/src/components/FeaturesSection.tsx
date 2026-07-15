@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
-import { Cpu, Layers, Globe, Gauge, RefreshCw, Chrome, Palette, ShieldCheck } from "lucide-react";
+import { Cpu, Layers, Globe, Gauge, RefreshCw, Chrome, Palette, ShieldCheck, Puzzle, Package } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 
 /** Mini terminal output — Rust engine card */
@@ -21,6 +21,7 @@ const ProtocolBadges = () => (
       { name: "HTTPS", color: "text-success bg-success/10 border-success/20" },
       { name: "FTP", color: "text-warning bg-warning/10 border-warning/20" },
       { name: "BitTorrent", color: "text-[#A855F7] bg-[#A855F7]/10 border-[#A855F7]/20" },
+      { name: "ED2K", color: "text-[#EC4899] bg-[#EC4899]/10 border-[#EC4899]/20" },
     ].map((p) => (
       <span key={p.name} className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border ${p.color}`}>
         {p.name}
@@ -115,6 +116,31 @@ const PrivacyBadges = () => (
     ].map((b) => (
       <span key={b.label} className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border ${b.color}`}>
         {b.label}
+      </span>
+    ))}
+  </div>
+);
+
+/** Plugin snippet — Plugin System card */
+const PluginSnippet = () => (
+  <div className="rounded-lg border border-dark-border bg-dark-bg p-2.5 font-mono text-[10px] leading-relaxed overflow-hidden">
+    <div className="text-dark-text-muted">// resolver plugin</div>
+    <div className="text-brand-sky">globalThis.<span className="text-[#22C55E]">resolve</span>(ctx) {'{'}</div>
+    <div className="text-dark-text-secondary pl-3">return {'{'} url: direct {'}'};</div>
+    <div className="text-brand-sky">{'}'}</div>
+  </div>
+);
+
+/** Component badges — Managed Components card */
+const ComponentBadges = () => (
+  <div className="flex flex-wrap gap-1.5">
+    {[
+      { name: "ffmpeg", color: "text-[#22C55E] bg-[#22C55E]/10 border-[#22C55E]/20" },
+      { name: "yt-dlp", color: "text-[#EC4899] bg-[#EC4899]/10 border-[#EC4899]/20" },
+      { name: "sandboxed", color: "text-brand-sky bg-brand-sky/10 border-brand-sky/20" },
+    ].map((c) => (
+      <span key={c.name} className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border ${c.color}`}>
+        {c.name}
       </span>
     ))}
   </div>
@@ -218,6 +244,21 @@ export default function FeaturesSection() {
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#22C55E]/10"><ShieldCheck className="w-5 h-5 text-[#22C55E]" /></div>,
       className: "md:col-span-2 lg:col-span-2",
       header: <PrivacyBadges />,
+    },
+    // Row 4: 2 double-col cards — Plugins & Components
+    {
+      title: t("features.pluginTitle"),
+      description: t("features.pluginDesc"),
+      icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#06b6d4]/10"><Puzzle className="w-5 h-5 text-[#06b6d4]" /></div>,
+      className: "md:col-span-2 lg:col-span-2",
+      header: <PluginSnippet />,
+    },
+    {
+      title: t("features.componentTitle"),
+      description: t("features.componentDesc"),
+      icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#EC4899]/10"><Package className="w-5 h-5 text-[#EC4899]" /></div>,
+      className: "md:col-span-2 lg:col-span-2",
+      header: <ComponentBadges />,
     },
   ];
 

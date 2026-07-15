@@ -128,12 +128,12 @@ export default function SponsorSection({
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
-  // Post name/message to the sponsor wall once payment is confirmed.
+  // Post to the sponsor wall once payment is confirmed. Name/message may be
+  // empty — anonymous sponsors are still recorded (server uses a fallback name).
   // Fire-and-forget: the thank-you screen must not block on GitHub.
   const submitWall = useCallback((outTradeNo: string) => {
     const n = wallInfo.current.name.trim();
     const m = wallInfo.current.message.trim();
-    if (!n && !m) return;
     setWallQueued(true);
     void fetch("/api/sponsor/wall", {
       method: "POST",

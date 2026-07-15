@@ -114,11 +114,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     return err(400, "outTradeNo required");
   }
 
+  // 名称/留言均可留空——匿名赞助也会登记（heading 用兜底文案）。
   const name = cleanName(body.name);
   const message = cleanMessage(body.message);
-  if (!name && !message) {
-    return err(400, "name or message required");
-  }
 
   // 服务端支付校验：未支付订单不得上墙。
   if (!isPaid(outTradeNo)) {
