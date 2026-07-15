@@ -2,7 +2,7 @@
 import { defineConfig, envField } from "astro/config";
 
 import react from "@astrojs/react";
-import sitemap from "@astrojs/sitemap";
+import sitemap, { ChangeFreqEnum } from "@astrojs/sitemap";
 import tailwindcss from "@tailwindcss/vite";
 import node from "@astrojs/node";
 import { getFallbackPathnames } from "./src/lib/docs-fallback.ts";
@@ -34,7 +34,7 @@ export default defineConfig({
       serialize: (item) => {
         item.lastmod = BUILD_TIME;
         if (new URL(item.url).pathname === "/") {
-          item.changefreq = "weekly";
+          item.changefreq = ChangeFreqEnum.WEEKLY;
           item.priority = 1.0;
         }
         return item;

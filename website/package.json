@@ -4,7 +4,8 @@
   "version": "0.0.1",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "astro check && astro build",
+    "check": "astro check",
     "preview": "astro preview",
     "astro": "astro",
     "docs:hash": "node scripts/docs-hash.mjs",
@@ -37,6 +38,8 @@
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {
-    "@types/nodemailer": "^7.0.10"
+    "@astrojs/check": "^0.9.9",
+    "@types/nodemailer": "^7.0.10",
+    "typescript": "^5.9.0"
   }
 }
