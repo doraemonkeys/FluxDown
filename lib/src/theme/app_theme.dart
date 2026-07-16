@@ -37,6 +37,19 @@ ShadButtonSizesTheme _buttonSizes(FluxThemeTokens tokens) {
 /// 缓存
 FluxThemeTokens? _cachedTokens;
 ShadThemeData? _cachedThemeData;
+/// 对话框进出场动效：120ms 淡入 + 轻微缩放（默认 300ms 偏慢，观感拖沓）。
+const _dialogAnimateIn = <AnimateEffect<dynamic>>[
+  FadeEffect(duration: Duration(milliseconds: 120)),
+  ScaleEffect(
+    begin: Offset(.97, .97),
+    end: Offset(1, 1),
+    duration: Duration(milliseconds: 120),
+    curve: Curves.easeOutCubic,
+  ),
+];
+const _dialogAnimateOut = <AnimateEffect<dynamic>>[
+  FadeEffect(begin: 1, end: 0, duration: Duration(milliseconds: 90)),
+];
 
 /// 从 [FluxThemeTokens] 构建 [ShadThemeData]。
 ///
@@ -69,6 +82,8 @@ ShadThemeData buildThemeFromTokens(FluxThemeTokens tokens) {
       ),
       inputTheme: ShadInputTheme(cursorColor: tokens.accent),
       primaryDialogTheme: ShadDialogTheme(
+        animateIn: _dialogAnimateIn,
+        animateOut: _dialogAnimateOut,
         backgroundColor: tokens.dialogBackground,
         border: Border.all(color: tokens.border, width: 1),
         shadows: [
@@ -80,6 +95,8 @@ ShadThemeData buildThemeFromTokens(FluxThemeTokens tokens) {
         ],
       ),
       alertDialogTheme: ShadDialogTheme(
+        animateIn: _dialogAnimateIn,
+        animateOut: _dialogAnimateOut,
         backgroundColor: tokens.dialogBackground,
         border: Border.all(color: tokens.border, width: 1),
         shadows: [
@@ -105,6 +122,14 @@ ShadThemeData buildThemeFromTokens(FluxThemeTokens tokens) {
       ),
       outlineButtonTheme: ShadButtonTheme(
         hoverBackgroundColor: tokens.elementHover,
+      ),
+      primaryDialogTheme: const ShadDialogTheme(
+        animateIn: _dialogAnimateIn,
+        animateOut: _dialogAnimateOut,
+      ),
+      alertDialogTheme: const ShadDialogTheme(
+        animateIn: _dialogAnimateIn,
+        animateOut: _dialogAnimateOut,
       ),
       primaryToastTheme: _primaryToastTheme(tokens),
       destructiveToastTheme: _destructiveToastTheme(tokens, colorScheme),

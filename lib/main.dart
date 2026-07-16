@@ -1006,9 +1006,21 @@ class _FluxDownAppState extends State<FluxDownApp>
                       },
                       pageRouteBuilder:
                           <T>(RouteSettings settings, WidgetBuilder builder) {
-                            return MaterialPageRoute<T>(
+                            // 快速淡入替代 Material 默认 300ms 转场，降低动效感知
+                            return PageRouteBuilder<T>(
                               settings: settings,
-                              builder: builder,
+                              transitionDuration:
+                                  const Duration(milliseconds: 120),
+                              reverseTransitionDuration:
+                                  const Duration(milliseconds: 100),
+                              pageBuilder: (context, _, _) => builder(context),
+                              transitionsBuilder:
+                                  (context, animation, _, child) {
+                                    return FadeTransition(
+                                      opacity: animation,
+                                      child: child,
+                                    );
+                                  },
                             );
                           },
                     ),
