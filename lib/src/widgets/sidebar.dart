@@ -754,10 +754,10 @@ class _QueueAddButtonState extends State<_QueueAddButton> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+        child: Container(
           width: 16,
           height: 16,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
             color: _isHovered ? c.hoverBg : Colors.transparent,
             borderRadius: m.brSm,
