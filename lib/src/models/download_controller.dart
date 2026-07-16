@@ -550,6 +550,7 @@ class DownloadController extends ChangeNotifier {
     String userAgent = '',
     String queueId = '',
     String checksum = '',
+    bool ignoreTlsErrors = false,
     Map<String, String> extraHeaders = const {},
     List<int> selectedFileIndices = const [],
     bool startPaused = false,
@@ -569,6 +570,7 @@ class DownloadController extends ChangeNotifier {
       userAgent: userAgent,
       queueId: queueId,
       checksum: checksum,
+      ignoreTlsErrors: ignoreTlsErrors,
       extraHeaders: extraHeaders,
       selectedFileIndices: selectedFileIndices,
       startPaused: startPaused,
@@ -605,6 +607,7 @@ class DownloadController extends ChangeNotifier {
       userAgent: userAgent,
       queueId: queueId,
       checksum: '',
+      ignoreTlsErrors: false,
       extraHeaders: const {},
       selectedFileIndices: selectedFileIndices,
       startPaused: startPaused,
@@ -676,6 +679,7 @@ class DownloadController extends ChangeNotifier {
         userAgent: userAgent,
         queueId: queueId,
         checksum: '',
+        ignoreTlsErrors: false,
         extraHeaders: const {},
         selectedFileIndices: selectedFileIndices,
         startPaused: startPaused,
@@ -696,6 +700,7 @@ class DownloadController extends ChangeNotifier {
     String cookies = '',
     String referrer = '',
     Map<String, String> extraHeaders = const {},
+    bool ignoreTlsErrors = false,
     bool startPaused = false,
   }) {
     logInfo(
@@ -712,6 +717,7 @@ class DownloadController extends ChangeNotifier {
       cookies: cookies,
       referrer: referrer,
       extraHeaders: extraHeaders,
+      ignoreTlsErrors: ignoreTlsErrors,
       startPaused: startPaused,
     ).sendSignalToRust();
   }
