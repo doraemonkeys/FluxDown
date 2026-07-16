@@ -393,11 +393,9 @@ class S {
   String get accountFeatureConfigSync => _r('accountFeatureConfigSync');
   String get accountFeatureConfigSyncDesc =>
       _r('accountFeatureConfigSyncDesc');
-  String get accountFeatureHistorySync => _r('accountFeatureHistorySync');
-  String get accountFeatureHistorySyncDesc =>
-      _r('accountFeatureHistorySyncDesc');
-  String get accountFeatureHandoff => _r('accountFeatureHandoff');
-  String get accountFeatureHandoffDesc => _r('accountFeatureHandoffDesc');
+  String get accountFeatureMultiDevice => _r('accountFeatureMultiDevice');
+  String get accountFeatureMultiDeviceDesc =>
+      _r('accountFeatureMultiDeviceDesc');
   String get accountLoginDialogTitle => _r('accountLoginDialogTitle');
   String get accountLoginTabCode => _r('accountLoginTabCode');
   String get accountLoginTabPassword => _r('accountLoginTabPassword');
