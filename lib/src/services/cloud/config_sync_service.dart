@@ -1,6 +1,6 @@
 // FluxCloud 配置同步客户端 —— 单例 + ChangeNotifier（同 CloudAuthService/
 // UpdateService 的单例风格），按契约 v1「客户端同步流程」节实现全链路：
-// pull / push / SSE 事件通知 / 防抖批量推送 / 快照防回环 / 断线退避重连。
+// pull / push / SSE 事件通知 / 防抖批量推送 / 快照+脏键防回环 / 断线退避重连。
 //
 // 推送通道用 Server-Sent Events（GET /sync/events，见契约），本类直接持有独立
 // [HttpClient] 长驻读取事件流，不经 [CloudClient]——CloudClient._request 给每次
@@ -10,6 +10,13 @@
 // 状态机：disabled → connecting → syncing ↔ synced；error 可重试（退避
 // 5s/15s/60s/5min 封顶），403 sync_device_limit/sync_device_untrusted 除外——
 // 那两种不自动重试，等用户手动「立即同步」或重新登录。
+//
+// 防回环三道闸（修复「本机连点设置被自己的回显翻回去 / 误报来自其他设备」）：
+// 1. push 回包 revision 恰为水位线+1 ⇒ 快进水位线，自己的写不再触发回显 pull；
+// 2. pull 应用时跳过脏键（本机未推送的编辑优先），且只有 deviceId ≠ 本机的
+//    条目才计入「来自其他设备的配置同步」toast；
+// 3. 全部同步入口经 _gate 串行，杜绝并发 pull 交错应用新旧批次远端值。
+// 服务端配合：值未变的 push 不写库不涨 revision 不广播（FluxCloud sync.rs）。
 
 import 'dart:async';
 import 'dart:convert';
@@ -61,7 +68,8 @@ class ConfigSyncService extends ChangeNotifier {
   bool _enabled = KvStore.instance.getBool(_kEnabledKey) ?? true;
   bool get enabled => _enabled;
 
-  /// 远端条目被实际应用后回调（count>0 才触发），供 home_page 弹 toast。
+  /// 来自其他设备的条目被实际应用后回调（count>0 才触发），供 home_page 弹
+  /// toast。本机自身推送的回显（重启补拉旧值等场景）静默应用，不计数。
   void Function(int count, String? deviceName)? onRemoteApplied;
 
   List<SyncEntry>? _catalog;
@@ -77,6 +85,11 @@ class ConfigSyncService extends ChangeNotifier {
   int _retryAttempt = 0;
   bool _applyingRemote = false;
   bool _stopped = true;
+
+  /// 同步操作串行门：SSE 触发的 pull、防抖 push、手动同步、断线重连一律排队
+  /// 执行。并发 pull 会交错应用不同批次的远端值（主题曾在 34ms 内 dark/light
+  /// 来回翻转），串行化后天然消除。
+  Future<void> _gate = Future.value();
 
   HttpClient? _sseHttp;
   StreamSubscription<String>? _sseSub;
@@ -155,6 +168,13 @@ class ConfigSyncService extends ChangeNotifier {
     }
   }
 
+  /// 所有同步入口经此串行执行；入口自身已捕获异常，链上再兜底一次防断链。
+  Future<void> _serialized(Future<void> Function() op) {
+    final run = _gate.then((_) => op());
+    _gate = run.then((_) {}, onError: (_) {});
+    return run;
+  }
+
   // ── 生命周期 ─────────────────────────────────────────────────────────
 
   Future<void> start() async {
@@ -199,19 +219,21 @@ class ConfigSyncService extends ChangeNotifier {
     _cancelRetryTimer();
     _status = CloudSyncStatus.syncing;
     notifyListeners();
-    try {
-      await _pull();
-      if (_stopped) return;
-      if (_dirty.isNotEmpty) await _pushDirtyNow();
-      if (_stopped) return;
-      if (_sseHttp == null) await _connectSse();
-      if (_stopped) return;
-      _onSyncSucceeded();
-    } catch (e, stack) {
-      if (_stopped) return;
-      logError(_tag, 'syncNow failed', e, stack);
-      _handleSyncFailure(e, _syncAndConnect);
-    }
+    await _serialized(() async {
+      try {
+        await _pull();
+        if (_stopped) return;
+        if (_dirty.isNotEmpty) await _pushDirtyNow();
+        if (_stopped) return;
+        if (_sseHttp == null) await _connectSse();
+        if (_stopped) return;
+        _onSyncSucceeded();
+      } catch (e, stack) {
+        if (_stopped) return;
+        logError(_tag, 'syncNow failed', e, stack);
+        _handleSyncFailure(e, _syncAndConnect);
+      }
+    });
   }
 
   // ── 启动 / 重连统一路径 ───────────────────────────────────────────────
@@ -219,7 +241,7 @@ class ConfigSyncService extends ChangeNotifier {
   /// pull → （首次/resync）标脏 → push 脏键 → 建 SSE 流 → synced。
   /// 也是 SSE 断线/超时重连的统一入口——契约要求"任何连接失败都走这条退避
   /// 路径，重试前先 pull（顺带经 CloudClient._authed 刷新 token）"。
-  Future<void> _syncAndConnect() async {
+  Future<void> _syncAndConnect() => _serialized(() async {
     if (_stopped) return;
     try {
       _status = CloudSyncStatus.syncing;
@@ -239,7 +261,7 @@ class ConfigSyncService extends ChangeNotifier {
       logError(_tag, 'sync/connect failed', e, stack);
       _handleSyncFailure(e, _syncAndConnect);
     }
-  }
+  });
 
   void _onSyncSucceeded() {
     _status = CloudSyncStatus.synced;
@@ -302,6 +324,11 @@ class ConfigSyncService extends ChangeNotifier {
       for (final item in result.items) {
         final entry = _catalogByKey![item.key];
         if (entry == null || item.deleted) continue;
+        // 脏键让位：该键在本机有尚未推送的编辑，pull 回来的必然是旧值（自己
+        // 上一轮的回显或别机更早的写入），应用它会把刚点的开关翻回去、把
+        // 「跟随系统」踢回 light/dark。跳过且不动快照——快照必须始终等于本地
+        // 当前值；脏键随后 push 成为服务端最新，收敛方向正确。
+        if (_dirty.contains(item.key)) continue;
         final encoded = _encode(item.value);
         if (_snapshot[item.key] == encoded) continue;
         // 先更新快照再 apply：apply 触发的 provider notifyListeners 会经
@@ -312,8 +339,10 @@ class ConfigSyncService extends ChangeNotifier {
         // 都会被卡死。跳过该条并记日志，让其余条目与水位线正常推进。
         try {
           entry.apply(item.value);
-          applied++;
+          // 只统计真正来自其他设备的条目：本机条目的回显静默应用，不弹
+          // 「来自其他设备的配置同步」toast。
           if (item.deviceId != deviceId) {
+            applied++;
             sourceDeviceName = item.deviceName ?? sourceDeviceName;
           }
         } catch (e, stack) {
@@ -351,9 +380,19 @@ class ConfigSyncService extends ChangeNotifier {
       return;
     }
     // 契约限额单批 ≤128 条；目录固定 41 键，永远不会超限，无需分批。
-    await CloudClient.instance.syncPush(deviceId: DeviceIdentity.deviceId(), items: items);
+    final before = _watermark();
+    final revision = await CloudClient.instance
+        .syncPush(deviceId: DeviceIdentity.deviceId(), items: items);
     _dirty.removeAll(keys);
     await _persistDirty();
+    // 自回显消除：本次 push 恰好把 revision 推进一格 ⇒ 期间无其他设备写入，
+    // 直接快进水位线到回包值，随后 SSE 送达的同号事件（≤ 水位线）被忽略，
+    // 不再发起纯回显 pull——那轮 pull 与用户的下一次点击竞争，正是「点一下
+    // 被翻回去」的根源之一。间隔 >1 说明有并发外部写入，水位线不动，照常
+    // 走 SSE→pull 拉取别机变更。
+    if (revision == before + 1 && _watermark() == before) {
+      await _setWatermark(revision);
+    }
   }
 
   // ── 本地变更（防抖批量推送） ─────────────────────────────────────────
@@ -375,7 +414,7 @@ class ConfigSyncService extends ChangeNotifier {
     _debounceTimer = Timer(_kDebounce, () => unawaited(_flushDirty()));
   }
 
-  Future<void> _flushDirty() async {
+  Future<void> _flushDirty() => _serialized(() async {
     if (_stopped || !_enabled || !CloudAuthService.instance.isLoggedIn) return;
     _status = CloudSyncStatus.syncing;
     notifyListeners();
@@ -389,7 +428,7 @@ class ConfigSyncService extends ChangeNotifier {
       // 推送失败保留脏键，走标准退避重试（同一条路径也会顺带重新拉取/重连）。
       _handleSyncFailure(e, _syncAndConnect);
     }
-  }
+  });
 
   void _markDirty(Iterable<String> keys) {
     if (keys.isEmpty) return;
@@ -481,15 +520,21 @@ class ConfigSyncService extends ChangeNotifier {
     try {
       final json = jsonDecode(payload) as Map<String, dynamic>;
       final revision = (json['revision'] as num?)?.toInt();
+      // 严格相等才跳过：push 回包快进后自回显事件恰等于水位线；revision
+      // 倒退（如管理端清空同步数据后 publish(0)）必须照常 pull 以触发 resync。
       if (revision == null || revision == _watermark()) return;
-      unawaited(_onRevisionChanged());
+      unawaited(_onRevisionChanged(revision));
     } catch (e, stack) {
       logError(_tag, 'sse payload parse failed: $payload', e, stack);
     }
   }
 
-  Future<void> _onRevisionChanged() async {
+  Future<void> _onRevisionChanged([int? revision]) => _serialized(() async {
     if (_stopped) return;
+    // 在串行门里排队期间，水位线可能已被前一轮 pull 或 push 快进推到本事件
+    // 的 revision——那就没什么可拉的了。倒退事件（管理端清空）与失败重试
+    //（不带参）恒重拉。
+    if (revision != null && revision == _watermark()) return;
     try {
       _status = CloudSyncStatus.syncing;
       notifyListeners();
@@ -501,7 +546,7 @@ class ConfigSyncService extends ChangeNotifier {
       logError(_tag, 'pull on sse event failed', e, stack);
       _handleSyncFailure(e, _onRevisionChanged);
     }
-  }
+  });
 
   void _resetSseWatchdog() {
     _sseWatchdog?.cancel();

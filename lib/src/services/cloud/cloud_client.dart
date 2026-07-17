@@ -292,8 +292,9 @@ class CloudClient {
         return SyncPullResult.fromJson(json);
       });
 
-  /// PUT /sync/items：批量推送本地变更，返回服务端最新 revision（契约要求
-  /// 客户端不用此 revision 更新水位线，统一靠 SSE 事件→pull 单一路径推进）。
+  /// PUT /sync/items：批量推送本地变更，返回服务端最新 revision。回包 revision
+  /// 恰为本地水位线+1 时，ConfigSyncService 会快进水位线以消除自回显 pull；
+  /// 其余情况（有并发外部写入）仍靠 SSE 事件→pull 路径推进。
   Future<int> syncPush({
     required String deviceId,
     required List<Map<String, dynamic>> items,

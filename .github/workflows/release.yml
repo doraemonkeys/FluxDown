@@ -2210,19 +2210,30 @@ jobs:
     if: ${{ always() && !cancelled() }}
 
     steps:
-      - name: Cleanup GitHub Actions artifacts (keep current tag only)
+      - name: Cleanup GitHub Actions artifacts (keep current tag + in-flight runs)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CURRENT_TAG="${GITHUB_REF#refs/tags/}"
-          echo "🧹 Artifact cleanup: keeping only artifacts from tag ${CURRENT_TAG}"
+          echo "🧹 Artifact cleanup: keeping artifacts from tag ${CURRENT_TAG} and any still-running workflow runs"
 
-          # 列出所有 artifact，过滤掉当前 tag 的，删除其余所有
+          # 收集所有未完成（queued/in_progress）run 的 id：并行的其他 tag 发布
+          # 仍在使用自己的 artifact，绝不能删（曾导致 v0.2.4-rc.1 的 Windows
+          # installer 被并行的 v0.2.3 cleanup 提前删除，Release 缺 x64 安装包）
+          ACTIVE_RUN_IDS=$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs?status=in_progress" \
+            -q '.workflow_runs[].id'; gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs?status=queued" \
+            -q '.workflow_runs[].id')
+          ACTIVE_JSON=$(printf '%s\n' $ACTIVE_RUN_IDS | jq -cs 'map(tonumber)')
+          echo "Active run ids: ${ACTIVE_JSON}"
+
+          # 列出所有 artifact：跳过当前 tag 的、跳过属于未完成 run 的，删除其余
           # workflow_run.head_branch 在 tag 推送时等于 tag 名（v0.1.43 这样）
           DELETE_IDS=$(gh api --paginate \
             repos/${{ github.repository }}/actions/artifacts \
-            -q ".artifacts[] | select(.workflow_run.head_branch != \"${CURRENT_TAG}\") | .id")
+            -q ".artifacts[] | select(.workflow_run.head_branch != \"${CURRENT_TAG}\") | select(.workflow_run.id as \$rid | (${ACTIVE_JSON} | index(\$rid)) == null) | .id")
 
           if [ -z "$DELETE_IDS" ]; then
             echo "✅ No old artifacts to delete"
