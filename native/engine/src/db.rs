@@ -257,10 +257,11 @@ fn task_from_row(row: &AnyRow) -> Result<TaskInfo, sqlx::Error> {
         completed_at: row.try_get("completed_at").unwrap_or_default(),
         segments: row.try_get("segments").unwrap_or(0),
         queue_order: row.try_get("queue_order").unwrap_or(0),
+        referrer: row.try_get("referrer").unwrap_or_default(),
     })
 }
 
-const TASK_COLUMNS: &str = "id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id, checksum, ignore_tls_errors, file_missing, completed_at, segments, queue_order";
+const TASK_COLUMNS: &str = "id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id, checksum, ignore_tls_errors, file_missing, completed_at, segments, queue_order, referrer";
 
 impl Db {
     /// 在 `dir` 目录下打开（不存在则创建）SQLite 数据库 `flux_down.db`。
@@ -1325,6 +1326,8 @@ impl Db {
             ("close_to_tray", "true"),
             ("auto_startup", "false"),
             ("auto_check_update", "true"),
+            // 匿名使用统计（每日活跃事件）；首装事件由 Dart 侧一次性上报，不受此开关控制。
+            ("analytics_enabled", "true"),
             ("bt_enable_dht", "true"),
             ("bt_enable_upnp", "true"),
             ("bt_port_start", "6881"),

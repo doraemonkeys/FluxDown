@@ -328,6 +328,9 @@ pub struct TaskInfo {
     /// 队列内启动顺序（越小越先启动）。0 = 未显式排序（按创建时间）。
     #[serde(default)]
     pub queue_order: i32,
+    /// Source page URL captured by the browser extension (empty = none).
+    #[serde(default)]
+    pub referrer: String,
 }
 
 /// 文件跟踪：一批已完成任务的「文件已丢失」标志变化（Rust → Dart）。
@@ -658,6 +661,13 @@ pub struct RequestAllQueues {}
 #[derive(Serialize, RustSignal)]
 pub struct AllQueues {
     pub queues: Vec<QueueInfo>,
+}
+
+/// Single task moved to another queue (Rust → Dart)
+#[derive(Serialize, RustSignal)]
+pub struct TaskQueueChanged {
+    pub task_id: String,
+    pub queue_id: String,
 }
 
 /// 启动队列：置运行态并按队列内顺序恢复其中所有待下载任务 (Dart → Rust)

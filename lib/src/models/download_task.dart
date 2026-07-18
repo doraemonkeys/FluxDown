@@ -256,6 +256,8 @@ class DownloadTask {
 
   /// 当前任务是否显式接受无效 HTTPS 证书。
   final bool ignoreTlsErrors;
+  /// Source page URL captured by the browser extension (empty = none).
+  final String referrer;
 
   DownloadTask({
     required this.id,
@@ -277,6 +279,7 @@ class DownloadTask {
     this.fileMissing = false,
     this.configuredSegments = 0,
     this.ignoreTlsErrors = false,
+    this.referrer = '',
     this.completedAt,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
@@ -303,6 +306,7 @@ class DownloadTask {
       fileMissing: info.fileMissing,
       configuredSegments: info.segments,
       ignoreTlsErrors: info.ignoreTlsErrors,
+      referrer: info.referrer,
       createdAt: seconds > 0
           ? DateTime.fromMillisecondsSinceEpoch(seconds * 1000)
           : DateTime.now(),
@@ -333,6 +337,7 @@ class DownloadTask {
     bool? fileMissing,
     int? configuredSegments,
     bool? ignoreTlsErrors,
+    String? referrer,
     DateTime? createdAt,
     DateTime? completedAt,
   }) {
@@ -356,6 +361,7 @@ class DownloadTask {
       fileMissing: fileMissing ?? this.fileMissing,
       configuredSegments: configuredSegments ?? this.configuredSegments,
       ignoreTlsErrors: ignoreTlsErrors ?? this.ignoreTlsErrors,
+      referrer: referrer ?? this.referrer,
       createdAt: createdAt ?? this.createdAt,
       completedAt: clearCompletedAt ? null : (completedAt ?? this.completedAt),
     );

@@ -68,15 +68,32 @@ pub fn reveal(path: &str, tpl: &str) {
 ///   委托给已运行的用户态 shell（中完整性级别），因此即便 App 以管理员身份运行也
 ///   能激活 UWP 关联应用（提权进程直接激活 UWP 会被系统拒绝），且无 cmd 黑框闪
 ///   烁。文件场景不存在“强制用 Explorer 当文件管理器”的顾虑（那是打开目录才有）。
+/// - **压缩包例外**：explorer.exe 收到 .zip/.rar 等路径会直接以“压缩文件夹”
+///   浏览进去，无视第三方压缩软件的关联。检测到第三方默认 handler 时直接调
+///   `ShellExecuteW`（详见 `shell_execute_open` / `archive_handler_is_third_party`）。
 ///
 /// | 平台    | 命令                |
 /// |---------|---------------------|
-/// | Windows | `explorer.exe path` |
+/// | Windows | `explorer.exe path`（第三方关联的压缩包 → `ShellExecuteW`） |
 /// | macOS   | `open path`         |
 /// | Linux   | `xdg-open path`     |
 pub fn open_file(path: &str) {
     #[cfg(target_os = "windows")]
     {
+        // 压缩包特例：explorer.exe 收到 .zip/.rar 等路径会直接以"压缩文件夹"
+        // 浏览进去，无视用户注册的第三方压缩软件关联。若检测到该扩展名的默认
+        // 处理程序是第三方（7-Zip/WinRAR/Bandizip 等），直接调 ShellExecuteW
+        // （与 Telegram/Chromium/Qt 的做法一致，即"双击"的 API 本体），尊重
+        // 关联。压缩软件均为 Win32 程序，不受"提权进程无法激活 UWP"的限制。
+        if is_archive(path) && archive_handler_is_third_party(path) {
+            if shell_execute_open(path) {
+                return;
+            }
+            crate::logger::log_info!(
+                "[open_file] ShellExecuteW failed; falling back to explorer.exe"
+            );
+        }
+
         if let Err(e) = std::process::Command::new("explorer.exe").arg(path).spawn() {
             crate::logger::log_info!("[open_file] explorer.exe failed: {e}");
         }
@@ -96,6 +113,113 @@ pub fn open_file(path: &str) {
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         crate::logger::log_info!("[open_file] not supported on this platform: {path}");
+    }
+}
+
+/// 直接调 Win32 `ShellExecuteW`（"open" 默认 verb）打开路径——这是双击的
+/// API 本体，Telegram Desktop / Chromium / Qt `QDesktopServices` 的同款实现。
+/// 相比 `cmd /c start`：不额外起 cmd 进程、无引号转义问题、天然无黑框。
+/// 返回值 > 32 表示成功（Win32 约定）。
+#[cfg(target_os = "windows")]
+fn shell_execute_open(path: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: wide/verb 均为有效的 NUL 结尾 UTF-16 缓冲，在调用期间存活；
+    // 其余参数按文档允许为空。
+    let h = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    h as usize > 32
+}
+
+/// 常见压缩包扩展名（含复合扩展名 .tar.gz 等——只需匹配末段即可）。
+#[cfg(target_os = "windows")]
+fn is_archive(path: &str) -> bool {
+    const ARCHIVE_EXTS: &[&str] = &[
+        "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2", "xz", "txz", "zst", "lz4", "cab",
+        "arj", "lzh", "wim",
+    ];
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            ARCHIVE_EXTS.contains(&e.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// Windows：该文件扩展名的默认打开程序是否为第三方（非 Explorer）。
+///
+/// 解析顺序与 Explorer 双击一致：
+/// 1. `HKCU\...\Explorer\FileExts\<.ext>\UserChoice` 的 `ProgId`（用户在
+///    "打开方式→始终"里选择的结果，优先级最高）
+/// 2. 回退 `HKCR\<.ext>` 默认值指向的 ProgId
+///
+/// 再读 `HKCR\<ProgId>\shell\open\command` 解析可执行文件名。ProgId 为
+/// `CompressedFolder`（Explorer 内建 zip）或命令解析为 explorer.exe /
+/// 解析失败时返回 `false`（保持 explorer.exe 现状，行为不回退）。
+#[cfg(target_os = "windows")]
+fn archive_handler_is_third_party(path: &str) -> bool {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER};
+
+    let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    else {
+        return false;
+    };
+    let ext = format!(".{}", ext.to_ascii_lowercase());
+
+    // 1) UserChoice ProgId（用户显式选择）
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let user_choice = hkcu
+        .open_subkey(format!(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice"
+        ))
+        .and_then(|k| k.get_value::<String, _>("ProgId"))
+        .ok();
+
+    // 2) 回退 HKCR\<.ext> 默认值
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+    let progid = match user_choice.filter(|p| !p.trim().is_empty()) {
+        Some(p) => p,
+        None => match hkcr
+            .open_subkey(&ext)
+            .and_then(|k| k.get_value::<String, _>(""))
+        {
+            Ok(p) if !p.trim().is_empty() => p,
+            _ => return false,
+        },
+    };
+
+    // Explorer 内建压缩文件夹 handler（zip/cab 默认）。
+    if progid.eq_ignore_ascii_case("CompressedFolder")
+        || progid.eq_ignore_ascii_case("CABFolder")
+    {
+        return false;
+    }
+
+    let Ok(cmd) = hkcr
+        .open_subkey(format!(r"{progid}\shell\open\command"))
+        .and_then(|k| k.get_value::<String, _>(""))
+    else {
+        return false;
+    };
+    match exe_basename(&cmd) {
+        Some(name) => !name.eq_ignore_ascii_case("explorer.exe"),
+        None => false,
     }
 }
 

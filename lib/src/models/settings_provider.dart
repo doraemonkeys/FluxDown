@@ -33,6 +33,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _silentDownloadEnabled = false; // 免打扰下载：外部请求不弹确认框直接下载
   bool _useServerTime = false; // 完成文件的修改时间采用服务器 Last-Modified
   bool _keepAwakeWhileDownloading = false; // 默认不阻止睡眠/息屏
+  bool _analyticsEnabled = true; // 匿名使用统计（每日活跃）；首装事件不受此开关控制
   int _logMaxSizeMb = 10; // 日志总大小上限（MB），超出自动清理
 
   // 悬浮球设置
@@ -63,6 +64,10 @@ class SettingsProvider extends ChangeNotifier {
   // 文件关联
   bool _torrentAssocPrompted = false; // 是否已弹窗提示过文件关联
   bool _torrentAssociated = false; // .torrent 文件是否已关联到 FluxDown
+  // User explicitly turned association OFF (persisted). Needed because on
+  // Linux .deb installs the system-wide MIME registration is root-owned and
+  // cannot be removed, so the live query alone can never report false.
+  bool _torrentAssocUserDisabled = false;
 
   // 代理设置
   String _proxyMode = 'none'; // none / system / manual
@@ -196,6 +201,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get silentDownloadEnabled => _silentDownloadEnabled;
   bool get useServerTime => _useServerTime;
   bool get keepAwakeWhileDownloading => _keepAwakeWhileDownloading;
+  bool get analyticsEnabled => _analyticsEnabled;
   int get logMaxSizeMb => _logMaxSizeMb;
 
   // 悬浮球 Getters
@@ -467,6 +473,13 @@ class SettingsProvider extends ChangeNotifier {
     _saveToRust('close_to_tray', value.toString());
   }
 
+  void setAnalyticsEnabled(bool value) {
+    if (_analyticsEnabled == value) return;
+    _analyticsEnabled = value;
+    notifyListeners();
+    _saveToRust('analytics_enabled', value.toString());
+  }
+
   void setStartMinimizedToTray(bool value) {
     if (_startMinimizedToTray == value) return;
     _startMinimizedToTray = value;
@@ -625,22 +638,26 @@ class SettingsProvider extends ChangeNotifier {
 
   // 自定义分类 Setters
 
-  void setCustomCategories(List<CustomCategory> categories) {
-    _customCategories = List.of(categories);
-    notifyListeners();
+  /// 持久化分类列表。同时写入「程序」分类迁移 marker：任何一次用户主导的
+  /// 分类变更都意味着当前列表是用户意愿，启动迁移不得再补插「程序」分类。
+  void _persistCategories() {
     _saveToRust(
       'custom_categories',
       CustomCategory.encodeList(_customCategories),
     );
+    _saveToRust('program_category_migrated', 'true');
+  }
+
+  void setCustomCategories(List<CustomCategory> categories) {
+    _customCategories = List.of(categories);
+    notifyListeners();
+    _persistCategories();
   }
 
   void addCustomCategory(CustomCategory category) {
     _customCategories.add(category);
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   void updateCustomCategory(CustomCategory updated) {
@@ -648,19 +665,13 @@ class SettingsProvider extends ChangeNotifier {
     if (idx < 0) return;
     _customCategories[idx] = updated;
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   void removeCustomCategory(String id) {
     _customCategories.removeWhere((c) => c.id == id);
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   void reorderCustomCategories(int oldIndex, int newIndex) {
@@ -672,10 +683,7 @@ class SettingsProvider extends ChangeNotifier {
       _customCategories[i] = _customCategories[i].copyWith(position: i);
     }
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   /// 重置某个内置分类到默认状态
@@ -694,20 +702,14 @@ class SettingsProvider extends ChangeNotifier {
       );
     }
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   /// 重置所有分类为默认状态（删除自定义分类，恢复内置分类）
   void resetAllCategories() {
     _customCategories = CustomCategory.defaultCategories();
     notifyListeners();
-    _saveToRust(
-      'custom_categories',
-      CustomCategory.encodeList(_customCategories),
-    );
+    _persistCategories();
   }
 
   // 代理设置 Setters
@@ -1016,10 +1018,16 @@ class SettingsProvider extends ChangeNotifier {
 
   /// 设置或取消 .torrent 文件关联。
   /// 乐观更新 UI，Rust 回传真实状态后会校正。
+  ///
+  /// Toggling OFF records a persisted opt-out so the live status reported
+  /// back by Rust cannot clobber the user's choice (see
+  /// [handleFileAssociationStatus]); toggling ON clears it.
   void setFileAssociation(bool enable) {
     logInfo('Settings', 'setFileAssociation: enable=$enable');
     _torrentAssociated = enable;
+    _torrentAssocUserDisabled = !enable;
     notifyListeners();
+    _saveToRust('torrent_assoc_user_disabled', (!enable).toString());
     SetFileAssociation(enable: enable).sendSignalToRust();
   }
 
@@ -1125,10 +1133,25 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   void _onFileAssocStatus(RustSignalPack<FileAssociationStatus> pack) {
-    final associated = pack.message.isAssociated;
-    logInfo('Settings', 'file association status: $associated');
-    if (_torrentAssociated != associated) {
-      _torrentAssociated = associated;
+    handleFileAssociationStatus(pack.message.isAssociated);
+  }
+
+  /// Applies a live .torrent association status reported by Rust.
+  /// Exposed for tests; production code receives it via the signal stream.
+  ///
+  /// A persisted user opt-out gates the reported status: on Linux .deb
+  /// installs the system-wide MIME registration is root-owned, so after
+  /// `disassociate()` the live query still resolves FluxDown and would
+  /// otherwise snap a user-requested OFF back to ON (issue #98).
+  @visibleForTesting
+  void handleFileAssociationStatus(bool associated) {
+    final effective = associated && !_torrentAssocUserDisabled;
+    logInfo(
+      'Settings',
+      'file association status: $associated (effective: $effective)',
+    );
+    if (_torrentAssociated != effective) {
+      _torrentAssociated = effective;
       notifyListeners();
     }
   }
@@ -1143,11 +1166,19 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   void _onConfigLoaded(RustSignalPack<ConfigLoaded> pack) {
-    final entries = pack.message.entries;
+    applyLoadedConfig(pack.message.entries);
+  }
+
+  /// Applies config entries loaded from Rust.
+  /// Exposed for tests; production code receives them via the signal stream.
+  @visibleForTesting
+  void applyLoadedConfig(List<ConfigEntry> entries) {
     logInfo('Settings', '_onConfigLoaded: ${entries.length} entries');
     String legacyOpenDirCmd = '';
     // 追踪 reveal_file_cmd 键是否出现在配置中（区分「从未设置」与「已清空」）。
     bool revealFileCmdPresent = false;
+    // 追踪「程序」分类迁移是否已执行过（键存在 = 已迁移，删除不再复活）。
+    bool programCategoryMigrated = false;
     for (final entry in entries) {
       logInfo('Settings', '  config: ${entry.key}=${_truncateForLog(entry.value)}');
       switch (entry.key) {
@@ -1177,6 +1208,8 @@ class SettingsProvider extends ChangeNotifier {
           _autoStartup = entry.value == 'true';
         case 'auto_check_update':
           _autoCheckUpdate = entry.value == 'true';
+        case 'analytics_enabled':
+          _analyticsEnabled = entry.value == 'true';
         case 'update_channel':
           _updateChannel = entry.value.isEmpty ? 'stable' : entry.value;
         case 'bt_enable_dht':
@@ -1219,6 +1252,8 @@ class SettingsProvider extends ChangeNotifier {
           _ed2kListenPort = int.tryParse(entry.value) ?? 0;
         case 'torrent_assoc_prompted':
           _torrentAssocPrompted = entry.value == 'true';
+        case 'torrent_assoc_user_disabled':
+          _torrentAssocUserDisabled = entry.value == 'true';
         case 'notify_on_complete':
           _notifyOnComplete = entry.value != 'false'; // 默认 true
         case 'silent_download_enabled':
@@ -1303,6 +1338,8 @@ class SettingsProvider extends ChangeNotifier {
           _sidebarCategoryExpanded = entry.value == 'true';
         case 'custom_categories':
           _customCategories = CustomCategory.decodeList(entry.value);
+        case 'program_category_migrated':
+          programCategoryMigrated = true;
       }
     }
     // 一次性迁移：把旧版拆分的「打开目录」命令(open_dir_cmd)并入统一的文件
@@ -1319,29 +1356,32 @@ class SettingsProvider extends ChangeNotifier {
     if (_customCategories.isEmpty) {
       _customCategories = CustomCategory.defaultCategories();
     }
-    // 一次性迁移：为旧配置补充「程序」内置分类（插到「压缩包」之前）
-    if (!_customCategories.any((c) => c.builtinType == 'program')) {
-      final defaults = CustomCategory.defaultCategories();
-      final program = defaults.firstWhere((c) => c.builtinType == 'program');
-      final archiveIdx = _customCategories.indexWhere(
-        (c) => c.builtinType == 'archive',
-      );
-      final insertAt = archiveIdx >= 0 ? archiveIdx : _customCategories.length;
-      final pos = archiveIdx >= 0
-          ? _customCategories[archiveIdx].position
-          : program.position;
-      _customCategories.insert(insertAt, program.copyWith(position: pos));
-      // 顺延后续分类的 position，保证排序稳定
-      for (var i = insertAt + 1; i < _customCategories.length; i++) {
-        final c = _customCategories[i];
-        if (c.position >= pos && c.position < 100) {
-          _customCategories[i] = c.copyWith(position: c.position + 1);
+    // 一次性迁移：为旧配置补充「程序」内置分类（插到「压缩包」之前）。
+    // 以显式 marker 键判定是否已迁移——不能用「列表里没有 program」当判据，
+    // 否则用户删除该内置分类后每次启动都会被重新插回。
+    if (!programCategoryMigrated) {
+      if (!_customCategories.any((c) => c.builtinType == 'program')) {
+        final defaults = CustomCategory.defaultCategories();
+        final program = defaults.firstWhere((c) => c.builtinType == 'program');
+        final archiveIdx = _customCategories.indexWhere(
+          (c) => c.builtinType == 'archive',
+        );
+        final insertAt = archiveIdx >= 0
+            ? archiveIdx
+            : _customCategories.length;
+        final pos = archiveIdx >= 0
+            ? _customCategories[archiveIdx].position
+            : program.position;
+        _customCategories.insert(insertAt, program.copyWith(position: pos));
+        // 顺延后续分类的 position，保证排序稳定
+        for (var i = insertAt + 1; i < _customCategories.length; i++) {
+          final c = _customCategories[i];
+          if (c.position >= pos && c.position < 100) {
+            _customCategories[i] = c.copyWith(position: c.position + 1);
+          }
         }
+        _persistCategories();
       }
-      _saveToRust(
-        'custom_categories',
-        CustomCategory.encodeList(_customCategories),
-      );
     }
     // 配置加载后，立即查询文件关联的实际状态（仅启用了文件关联功能的实例）
     if (_enableFileAssoc) {

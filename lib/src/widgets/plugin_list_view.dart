@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'flux_sonner.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../bindings/bindings.dart';
@@ -39,7 +40,10 @@ class _PluginListViewState extends State<PluginListView> {
   int _lastOpSeq = -1;
   bool _installingZip = false;
   bool _installingDir = false;
-  bool _devMode = true;
+  /// 开发模式开关跨页面导航保持（切走设置分类会销毁 State，
+  /// 用 static 记住本次会话的选择，避免每次回来都重置为默认开）。
+  static bool _devModeSticky = true;
+  bool get _devMode => _devModeSticky;
   String _devDirPath = '';
   String _marketQuery = '';
   int _marketLimit = _marketPageSize;
@@ -83,7 +87,7 @@ class _PluginListViewState extends State<PluginListView> {
         _ => null,
       };
       if (message == null) return;
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast(title: Text(message), duration: const Duration(seconds: 2)),
       );
       // 安装成功但声明权限所需的基础组件缺失 → 弹依赖提醒（提醒式非阻断，
@@ -100,7 +104,7 @@ class _PluginListViewState extends State<PluginListView> {
       'set_enabled' => s.pluginOpEnabledFailed(result.message),
       _ => s.pluginOpGenericFailed(result.message),
     };
-    ShadSonner.of(context).show(ShadToast.destructive(title: Text(message)));
+    FluxSonner.of(context).show(ShadToast.destructive(title: Text(message)));
   }
 
   Future<void> _pickZip() async {
@@ -118,7 +122,7 @@ class _PluginListViewState extends State<PluginListView> {
       }
     } on FilePickerException catch (e) {
       if (mounted) {
-        ShadSonner.of(context).show(
+        FluxSonner.of(context).show(
           ShadToast.destructive(
             title: Text(currentS.pluginInstallZipFailed(e.toString())),
           ),
@@ -250,7 +254,7 @@ class _PluginListViewState extends State<PluginListView> {
             const SizedBox(width: 6),
             ShadSwitch(
               value: _devMode,
-              onChanged: (v) => setState(() => _devMode = v),
+              onChanged: (v) => setState(() => _devModeSticky = v),
             ),
           ],
         ),

@@ -4,6 +4,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'flux_sonner.dart';
 import '../bindings/bindings.dart';
 import '../models/download_controller.dart';
 import '../models/download_task.dart';
@@ -495,6 +497,7 @@ class _DetailPanelState extends State<DetailPanel> {
         if (splitCount > 0) _buildSplitInfoRow(c, task),
         _buildInfoRow(currentS.infoPath, task.saveDir, c),
         _buildUrlRow(c, task.url),
+        if (task.referrer.isNotEmpty) _buildSourcePageRow(c, task.referrer),
         if (task.errorMessage.isNotEmpty)
           _buildErrorRow(c, task.errorMessage),
       ],
@@ -763,6 +766,51 @@ class _DetailPanelState extends State<DetailPanel> {
           ),
           const SizedBox(width: 4),
           _CopyValueButton(value: url, color: c.textMuted),
+        ],
+      ),
+    );
+  }
+
+  /// Source page (referrer) row — copy + open in browser.
+  Widget _buildSourcePageRow(AppColors c, String referrer) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(
+              currentS.infoSourcePage,
+              style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              referrer,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                color: c.textSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          _CopyValueButton(value: referrer, color: c.textMuted),
+          ShadButton.ghost(
+            onPressed: () => launchUrl(Uri.parse(referrer)),
+            size: ShadButtonSize.sm,
+            width: 24,
+            height: 24,
+            padding: EdgeInsets.zero,
+            child: Icon(
+              LucideIcons.externalLink,
+              size: 12,
+              color: c.textMuted,
+            ),
+          ),
         ],
       ),
     );
@@ -1129,7 +1177,7 @@ class _CopyValueButtonState extends State<_CopyValueButton> {
     await Clipboard.setData(ClipboardData(text: widget.value));
     if (!mounted) return;
     setState(() => _copied = true);
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(widget.toastText ?? currentS.urlCopied),
         duration: const Duration(seconds: 2),

@@ -29,6 +29,7 @@ impl From<model::TaskInfo> for signals::TaskInfo {
             completed_at: t.completed_at,
             segments: t.segments,
             queue_order: t.queue_order,
+            referrer: t.referrer,
         }
     }
 }

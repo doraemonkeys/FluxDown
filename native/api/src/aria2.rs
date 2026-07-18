@@ -780,6 +780,7 @@ mod tests {
             ignore_tls_errors: false,
             file_missing: false,
             completed_at: String::new(),
+            referrer: String::new(),
         }
     }
 

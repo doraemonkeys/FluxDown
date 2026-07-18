@@ -262,6 +262,7 @@ fn sample_task(id: &str, status: i32) -> TaskDto {
         ignore_tls_errors: false,
         file_missing: false,
         completed_at: String::new(),
+        referrer: String::new(),
     }
 }
 

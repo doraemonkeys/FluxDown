@@ -61,6 +61,8 @@ pub struct TaskInfo {
     /// 队列内启动顺序（越小越先启动）。0 = 未显式排序，按 `created_at`
     /// 先来先启动；>0 为显式顺序（`reorder_queue_tasks` 或建任务时追加）。
     pub queue_order: i32,
+    /// Source page URL captured by the browser extension (empty = none).
+    pub referrer: String,
 }
 
 /// 命名队列元数据。字段对应 `hub::signals::QueueInfo`。
