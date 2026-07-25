@@ -52,6 +52,10 @@ impl ProxyMode {
 pub enum ProxyType {
     Http,
     Https,
+    /// An explicit `https://` proxy URL whose endpoint itself uses TLS.
+    /// Global `https` settings use [`Self::Https`] instead because their
+    /// protocol name describes the destination, not the proxy transport.
+    HttpsProxy,
     Socks4,
     Socks5,
 }
@@ -72,17 +76,35 @@ impl ProxyType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Http => "http",
-            Self::Https => "https",
+            Self::Https | Self::HttpsProxy => "https",
             Self::Socks4 => "socks4",
             Self::Socks5 => "socks5",
         }
     }
 
-    /// URL scheme used by reqwest's `Proxy::all(url)`.
+    /// Scheme represented by this proxy type.
+    ///
+    /// Kept as the public protocol-facing accessor for compatibility. Use
+    /// [`Self::transport_scheme`] when constructing the endpoint URL.
     pub fn scheme(&self) -> &'static str {
         match self {
             Self::Http => "http",
-            Self::Https => "https",
+            Self::Https | Self::HttpsProxy => "https",
+            Self::Socks4 => "socks4",
+            Self::Socks5 => "socks5",
+        }
+    }
+
+    /// URL scheme used to connect to the proxy with reqwest's `Proxy::all(url)`.
+    ///
+    /// HTTPS describes the destination protocol. The proxy itself uses a
+    /// plaintext HTTP CONNECT transport, as with Windows proxy settings and
+    /// mixed HTTP/SOCKS endpoints such as Clash.
+    pub fn transport_scheme(&self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "http",
+            Self::HttpsProxy => "https",
             Self::Socks4 => "socks4",
             Self::Socks5 => "socks5",
         }
@@ -184,7 +206,7 @@ impl ProxyConfig {
                 if self.host.is_empty() || self.port == 0 {
                     return None;
                 }
-                let scheme = self.proxy_type.scheme();
+                let scheme = self.proxy_type.transport_scheme();
                 if !self.username.is_empty() {
                     let enc_user = percent_encode_userinfo(&self.username);
                     let enc_pass = percent_encode_userinfo(&self.password);
@@ -251,7 +273,14 @@ impl ProxyConfig {
             ("http", url)
         };
 
-        let proxy_type = ProxyType::parse_str(scheme);
+        // A task-level URL explicitly names the proxy endpoint's transport.
+        // Global settings use `ProxyType::Https` for an HTTPS destination and
+        // therefore deliberately remain on a plaintext HTTP CONNECT transport.
+        let proxy_type = if scheme == "https" {
+            ProxyType::HttpsProxy
+        } else {
+            ProxyType::parse_str(scheme)
+        };
 
         // Extract auth (user:pass@) if present
         let (auth, host_port) = if let Some(at_idx) = rest.rfind('@') {
@@ -1020,7 +1049,7 @@ pub fn proxy_connect_sync(
         ProxyType::Socks4 | ProxyType::Socks5 => {
             socks_connect_sync(proxy, target_host, target_port, timeout)
         }
-        ProxyType::Http | ProxyType::Https => {
+        ProxyType::Http | ProxyType::Https | ProxyType::HttpsProxy => {
             http_connect_proxy_sync(proxy, target_host, target_port, timeout)
         }
     }
@@ -1174,8 +1203,18 @@ mod tests {
     fn proxy_type_scheme() {
         assert_eq!(ProxyType::Http.scheme(), "http");
         assert_eq!(ProxyType::Https.scheme(), "https");
+        assert_eq!(ProxyType::HttpsProxy.scheme(), "https");
         assert_eq!(ProxyType::Socks4.scheme(), "socks4");
         assert_eq!(ProxyType::Socks5.scheme(), "socks5");
+    }
+
+    #[test]
+    fn proxy_type_transport_scheme() {
+        assert_eq!(ProxyType::Http.transport_scheme(), "http");
+        assert_eq!(ProxyType::Https.transport_scheme(), "http");
+        assert_eq!(ProxyType::HttpsProxy.transport_scheme(), "https");
+        assert_eq!(ProxyType::Socks4.transport_scheme(), "socks4");
+        assert_eq!(ProxyType::Socks5.transport_scheme(), "socks5");
     }
 
     #[test]
@@ -1259,6 +1298,21 @@ mod tests {
         assert_eq!(
             config.to_proxy_url().as_deref(),
             Some("http://proxy.example.com:8080")
+        );
+    }
+
+    #[test]
+    fn proxy_config_https_uses_plain_http_connect_transport() {
+        let config = ProxyConfig {
+            mode: ProxyMode::Manual,
+            proxy_type: ProxyType::Https,
+            host: "proxy.example.com".to_string(),
+            port: 7897,
+            ..ProxyConfig::default()
+        };
+        assert_eq!(
+            config.to_proxy_url().as_deref(),
+            Some("http://proxy.example.com:7897")
         );
     }
 
@@ -1359,6 +1413,16 @@ mod tests {
         assert_eq!(c.proxy_type, ProxyType::Socks4);
         assert_eq!(c.host, "myproxy");
         assert_eq!(c.port, 9050);
+    }
+
+    #[test]
+    fn from_proxy_url_https_preserves_tls_proxy_transport() {
+        let c = ProxyConfig::from_proxy_url("https://proxy.example.com:8443");
+        assert_eq!(c.proxy_type, ProxyType::HttpsProxy);
+        assert_eq!(
+            c.to_proxy_url().as_deref(),
+            Some("https://proxy.example.com:8443")
+        );
     }
 
     // -----------------------------------------------------------------------
